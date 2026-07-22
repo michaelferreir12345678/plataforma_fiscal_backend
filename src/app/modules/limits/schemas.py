@@ -1,0 +1,78 @@
+"""Schemas do monitor de limites (lista, detalhe com drill, simulador)."""
+
+from __future__ import annotations
+
+from decimal import Decimal
+
+from pydantic import BaseModel
+
+from app.shared.envelope import DrillNodeRef
+from app.shared.source_ref import SourceRef
+
+
+class LimiteItem(BaseModel):
+    indicador: str
+    esfera: str
+    sentido: str  # teto | piso
+    valor_rs: Decimal | None = None
+    valor_pct_rcl: Decimal | None = None
+    faixa: str | None = None
+    teto_pct: Decimal
+    alerta_pct: Decimal | None = None
+    prudencial_pct: Decimal | None = None
+    distancia_teto: Decimal | None = None  # teto − valor (teto) / valor − piso (piso)
+    distancia_alerta: Decimal | None = None
+
+
+class LimitesResponse(BaseModel):
+    cod_ibge: str
+    periodo: str
+    versao_entrega: str
+    itens: list[LimiteItem]
+    source_ref: SourceRef
+
+
+class ProvidenciaOut(BaseModel):
+    faixa: str
+    texto: str
+    base_legal: str | None = None
+
+
+class SerieItem(BaseModel):
+    periodo: str
+    valor_pct_rcl: Decimal | None = None
+    faixa: str | None = None
+    valor_rs: Decimal | None = None
+
+
+class LimiteDetail(BaseModel):
+    cod_ibge: str
+    periodo: str
+    indicador: str
+    esfera: str
+    faixa: str | None = None
+    valor_rs: Decimal | None = None
+    valor_pct_rcl: Decimal | None = None
+    teto_pct: Decimal
+    memoria: dict | None = None
+    providencias: list[ProvidenciaOut]
+    serie_historica: list[SerieItem]
+    periodo_breadcrumb: list[DrillNodeRef]  # drill UP (ano → …)
+    source_ref: SourceRef
+
+
+class SimularRequest(BaseModel):
+    novo_valor_rs: Decimal | None = None
+    delta_rs: Decimal | None = None
+
+
+class SimularResponse(BaseModel):
+    indicador: str
+    valor_rs_atual: Decimal | None = None
+    valor_rs_simulado: Decimal
+    valor_pct_atual: Decimal | None = None
+    valor_pct_simulado: Decimal
+    faixa_atual: str | None = None
+    faixa_simulada: str
+    teto_pct: Decimal
+    persistido: bool = False

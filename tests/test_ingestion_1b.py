@@ -1,0 +1,542 @@
+"""Testes da Sprint 1B — conectores complementares (SADIPEM, BCB/SGS, IBGE).
+
+Reusa o framework da Sprint 1: idempotência, versão por data de captura, long format
+(BCB), flatten dos agregados (IBGE) e mapeamento silver de cada fonte. Sem rede.
+"""
+
+from __future__ import annotations
+
+import random
+from collections.abc import Iterator
+from datetime import date
+from typing import Any
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import delete, func, select
+
+from app.core.db import SessionLocal
+from app.main import app
+from app.modules.catalog.models import DimEnte
+from app.modules.ingestion.models import (
+    BcbIndice,
+    DimEntrega,
+    IbgePib,
+    IbgePopulacao,
+    IngestionLog,
+    RawPayload,
+    SadipemCronogramaPgto,
+    SadipemOpContratada,
+    SadipemPvl,
+)
+from app.modules.ingestion.router import get_client_resolver
+from app.shared.ingestion.client import (
+    SADIPEM_BASE_URL,
+    IbgeAgregadosClient,
+    SadipemClient,
+)
+from tests.conftest import auth_header, login
+
+
+class FakeRecordsClient:
+    """Cliente/resolver falso (sem rede)."""
+
+    def __init__(self) -> None:
+        self.records: dict[str, list[dict[str, Any]]] = {}
+        self.records_by_request: dict[
+            tuple[str, tuple[tuple[str, str], ...]], list[dict[str, Any]]
+        ] = {}
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def get(self, fonte: str) -> FakeRecordsClient:
+        return self
+
+    @staticmethod
+    def _request_key(path: str, params: dict[str, Any]) -> tuple[str, tuple[tuple[str, str], ...]]:
+        return path.removeprefix("tt/"), tuple(
+            sorted((key, str(value)) for key, value in params.items())
+        )
+
+    def set_records(self, path: str, params: dict[str, Any], records: list[dict[str, Any]]) -> None:
+        """Registra resposta exata; necessário para cronogramas por ``id_pleito``."""
+        self.records_by_request[self._request_key(path, params)] = records
+
+    def get_records(self, path: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+        self.calls.append((path, dict(params)))
+        exact = self.records_by_request.get(self._request_key(path, params))
+        if exact is not None:
+            return list(exact)
+        # Suporta match por prefixo de path (BCB/IBGE têm código no caminho).
+        # ``tt/`` mantém compatibilidade com fixtures da URL SADIPEM antiga.
+        path_aliases = {path, path.removeprefix("tt/"), f"tt/{path.removeprefix('tt/')}"}
+        for key, data in self.records.items():
+            if any(alias.startswith(key) for alias in path_aliases):
+                return list(data)
+        return []
+
+
+def _ente() -> str:
+    return "9" + "".join(random.choices("0123456789", k=6))
+
+
+@pytest.fixture
+def fake_client() -> Iterator[FakeRecordsClient]:
+    fake = FakeRecordsClient()
+    app.dependency_overrides[get_client_resolver] = lambda: fake
+    yield fake
+    app.dependency_overrides.pop(get_client_resolver, None)
+
+
+@pytest.fixture
+def cleanup() -> Iterator[list[str]]:
+    used: list[str] = []
+    yield used
+    with SessionLocal() as s:
+        for cod in used:
+            s.execute(delete(IngestionLog).where(IngestionLog.cod_ibge == cod))
+            s.execute(delete(DimEntrega).where(DimEntrega.cod_ibge == cod))
+            for model in (
+                RawPayload,
+                SadipemPvl,
+                SadipemOpContratada,
+                SadipemCronogramaPgto,
+                IbgePopulacao,
+                IbgePib,
+                DimEnte,
+            ):
+                s.execute(delete(model).where(model.cod_ibge == cod))
+        s.commit()
+
+
+def _admin_token(client: TestClient, make_org) -> str:
+    fx = make_org()
+    return login(client, fx.email, fx.senha)
+
+
+def _run(client: TestClient, token: str, body: dict[str, Any]) -> dict[str, Any]:
+    resp = client.post("/admin/ingestion/run", json=body, headers=auth_header(token))
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def _count(model: type, **filtros: Any) -> int:
+    with SessionLocal() as s:
+        stmt = select(func.count()).select_from(model)
+        for col, val in filtros.items():
+            stmt = stmt.where(getattr(model, col) == val)
+        return s.scalar(stmt) or 0
+
+
+# ---------------- SADIPEM ----------------
+def test_sadipem_cliente_usa_url_oficial_e_limite_de_uma_requisicao() -> None:
+    client = SadipemClient()
+    try:
+        assert SADIPEM_BASE_URL == ("https://apidatalake.tesouro.gov.br/ords/cdwhprd/sadipem/tt/")
+        assert str(client._client.base_url) == SADIPEM_BASE_URL
+        assert client._page_size == 5_000
+        assert client._limiter._min_interval == 1.0
+    finally:
+        client.close()
+
+
+def test_sadipem_pvl_versao_por_data_de_captura(client, make_org, fake_client, cleanup) -> None:
+    ente = _ente()
+    cleanup.append(ente)
+    fake_client.records["tt/pvl"] = [
+        {
+            "id_pvl": "1",
+            "tipo_operacao": "Interna",
+            "valor": "1000000.00",
+            "status": "Deferido",
+            "decisao": "Favorável",
+            "data_analise": "2024-05-10",
+        },
+        {
+            "id_pvl": "2",
+            "tipo_operacao": "Externa",
+            "valor": "2000000.00",
+            "status": "Em análise",
+            "decisao": "",
+            "data_analise": "31/05/2024",
+        },
+    ]
+    token = _admin_token(client, make_org)
+    body = {"fonte": "sadipem_pvl", "entes": [ente], "anos": [2024], "versao": "20260704"}
+
+    res = _run(client, token, body)
+    assert res["silver_rows"] == 2
+    assert res["versoes_vigentes"] == ["20260704"]
+    assert _count(SadipemPvl, cod_ibge=ente, versao_entrega="20260704") == 2
+
+    # Rodar 2x com a mesma versão não duplica.
+    res2 = _run(client, token, body)
+    assert res2["pulados"] == 1
+    assert _count(RawPayload, cod_ibge=ente, fonte="sadipem_pvl") == 1
+    assert _count(SadipemPvl, cod_ibge=ente) == 2
+    assert fake_client.calls[0] == ("pvl", {"id_ente": ente})
+
+
+def test_sadipem_preserva_anos_da_mesma_captura(
+    client, make_org, fake_client, cleanup
+) -> None:
+    ente = _ente()
+    cleanup.append(ente)
+    fake_client.records["pvl"] = [
+        {
+            "id_pleito": 77,
+            "tipo_operacao": "Operação contratual interna",
+            "valor": "500000.00",
+            "status": "Deferido",
+        }
+    ]
+    token = _admin_token(client, make_org)
+
+    res = _run(
+        client,
+        token,
+        {
+            "fonte": "sadipem_pvl",
+            "entes": [ente],
+            "anos": [2024, 2025],
+            "versao": "20260704",
+        },
+    )
+
+    assert res["silver_rows"] == 2
+    with SessionLocal() as session:
+        valid_times = set(
+            session.scalars(
+                select(SadipemPvl.valid_time).where(
+                    SadipemPvl.cod_ibge == ente,
+                    SadipemPvl.versao_entrega == "20260704",
+                )
+            )
+        )
+    assert valid_times == {date(2024, 12, 31), date(2025, 12, 31)}
+
+
+def test_sadipem_operacoes_contratadas_vem_do_pvl_e_filtra_flag(
+    client, make_org, fake_client, cleanup
+) -> None:
+    ente = _ente()
+    cleanup.append(ente)
+    fake_client.records["pvl"] = [
+        {
+            "id_pleito": 101,
+            "tipo_operacao": "Operação contratual interna",
+            "credor": "Caixa Econômica Federal",
+            "moeda": "Real",
+            "valor": 50_000_000,
+            "pvl_contratado_credor": 1,
+            "data_status": "13/06/2025",
+        },
+        {
+            "id_pleito": 102,
+            "tipo_operacao": "Operação contratual externa",
+            "credor": "BID",
+            "moeda": "Dólar dos EUA",
+            "valor": "90000000.50",
+            # Grafia encontrada no payload real do Tesouro.
+            "pvl_contradado_credor": "1",
+            "data_status": "2025-07-14",
+        },
+        {
+            "id_pleito": 103,
+            "credor": "Não deve materializar",
+            "valor": 1,
+            "pvl_contratado_credor": 0,
+        },
+    ]
+    token = _admin_token(client, make_org)
+    result = _run(
+        client,
+        token,
+        {
+            "fonte": "sadipem_op_contratada",
+            "entes": [ente],
+            "anos": [2025],
+            "versao": "20260704",
+        },
+    )
+    assert result["silver_rows"] == 2
+
+    with SessionLocal() as s:
+        rows = list(
+            s.scalars(
+                select(SadipemOpContratada)
+                .where(SadipemOpContratada.cod_ibge == ente)
+                .order_by(SadipemOpContratada.id_operacao)
+            )
+        )
+    assert [row.id_operacao for row in rows] == ["101", "102"]
+    assert rows[0].tipo_operacao == "Operação contratual interna"
+    assert rows[0].credor == "Caixa Econômica Federal"
+    assert float(rows[0].valor_contratado or 0) == 50_000_000.0
+    assert rows[0].data_contratacao is not None
+    assert rows[1].moeda == "Dólar dos EUA"
+    assert float(rows[1].valor_contratado or 0) == 90_000_000.5
+    assert fake_client.calls == [("pvl", {"id_ente": ente})]
+
+
+def test_sadipem_cronograma_busca_somente_pleitos_contratados_e_aceita_grafias(
+    client, make_org, fake_client, cleanup
+) -> None:
+    ente = _ente()
+    cleanup.append(ente)
+    fake_client.records["pvl"] = [
+        {"id_pleito": 201, "pvl_contratado_credor": 1},
+        {"id_pleito": 202, "pvl_contratado_credor": 0},
+        {"id_pleito": 203, "pvl_contradado_credor": 1},
+    ]
+    fake_client.set_records(
+        "opc-cronograma-pagamentos",
+        {"id_pleito": 201},
+        [
+            {
+                "id_pleito": 201,
+                "ano": "2026",
+                "total_amorizacao": "1000000.25",
+                "total_encargos": "200000.50",
+            }
+        ],
+    )
+    fake_client.set_records(
+        "opc-cronograma-pagamentos",
+        {"id_pleito": 203},
+        [
+            {
+                "id_pleito": 203,
+                "ano": 2027,
+                "total_amortizacao": 800_000,
+                "total_encargos": 150_000,
+            },
+            # Layout legado continua aceito.
+            {
+                "id_operacao": "203",
+                "ano": 2028,
+                "mes": 6,
+                "principal": 700_000,
+                "juros": 100_000,
+                "encargos": 50_000,
+            },
+        ],
+    )
+    token = _admin_token(client, make_org)
+    result = _run(
+        client,
+        token,
+        {
+            "fonte": "sadipem_cronograma_pgto",
+            "entes": [ente],
+            "anos": [2025],
+            "versao": "20260704",
+        },
+    )
+    assert result["silver_rows"] == 3
+
+    with SessionLocal() as s:
+        rows = list(
+            s.scalars(
+                select(SadipemCronogramaPgto)
+                .where(SadipemCronogramaPgto.cod_ibge == ente)
+                .order_by(SadipemCronogramaPgto.ano)
+            )
+        )
+    assert [(row.id_operacao, row.ano) for row in rows] == [
+        ("201", 2026),
+        ("203", 2027),
+        ("203", 2028),
+    ]
+    assert float(rows[0].principal or 0) == 1_000_000.25
+    assert rows[0].juros is None
+    assert float(rows[0].encargos or 0) == 200_000.5
+    assert float(rows[1].principal or 0) == 800_000.0
+    assert float(rows[2].juros or 0) == 100_000.0
+    assert [(path, params.get("id_pleito")) for path, params in fake_client.calls] == [
+        ("pvl", None),
+        ("opc-cronograma-pagamentos", 201),
+        ("opc-cronograma-pagamentos", 203),
+    ]
+
+
+# ---------------- BCB / SGS ----------------
+def test_bcb_long_format_uma_linha_por_data(client, make_org, fake_client, cleanup) -> None:
+    codigo = 433  # IPCA
+    cleanup.append(str(codigo))
+    fake_client.records["dados/serie/bcdata.sgs.433/dados"] = [
+        {"data": "01/01/2024", "valor": "0.42"},
+        {"data": "01/02/2024", "valor": "0.83"},
+        {"data": "01/03/2024", "valor": "0.16"},
+    ]
+    token = _admin_token(client, make_org)
+    body = {
+        "fonte": "bcb",
+        "series": [433],
+        "data_inicial": "2024-01-01",
+        "data_final": "2024-03-31",
+        "versao": "20260704",
+    }
+    res = _run(client, token, body)
+    assert res["silver_rows"] == 3
+    assert _count(BcbIndice, codigo_serie=433, versao_entrega="20260704") == 3
+
+    with SessionLocal() as s:
+        valores = sorted(
+            float(v)
+            for v in s.scalars(select(BcbIndice.valor).where(BcbIndice.codigo_serie == 433))
+        )
+    assert valores == [0.16, 0.42, 0.83]
+
+    # Limpeza específica do BCB (não tem cod_ibge).
+    with SessionLocal() as s:
+        s.execute(delete(BcbIndice).where(BcbIndice.codigo_serie == 433))
+        s.commit()
+
+
+# ---------------- IBGE ----------------
+def test_ibge_flatten_agregados() -> None:
+    """O cliente IBGE achata a estrutura v3 aninhada em registros planos."""
+    payload = [
+        {
+            "id": "9324",
+            "resultados": [
+                {
+                    "series": [
+                        {"localidade": {"id": "2304400"}, "serie": {"2022": "2428708"}},
+                    ]
+                }
+            ],
+        }
+    ]
+    flat = IbgeAgregadosClient.flatten(payload)
+    assert flat == [{"variavel": "9324", "cod_ibge": "2304400", "ano": "2022", "valor": "2428708"}]
+
+
+def test_ibge_flatten_pesquisa_leaf_pib_per_capita() -> None:
+    """A Pesquisa 38/47001 usa ``res`` em vez da estrutura dos agregados v3."""
+    payload = [
+        {
+            "id": 47001,
+            "res": [
+                {
+                    "localidade": "230440",
+                    "res": {"2021": "27165.05"},
+                    "notas": {"2021": None},
+                }
+            ],
+        }
+    ]
+    flat = IbgeAgregadosClient.flatten(payload)
+    assert flat == [
+        {
+            "variavel": "47001",
+            "cod_ibge": "230440",
+            "ano": "2021",
+            "valor": "27165.05",
+        }
+    ]
+
+
+def test_ibge_populacao_materializa_silver(client, make_org, fake_client, cleanup) -> None:
+    ente = _ente()
+    cleanup.append(ente)
+    fake_client.records["v3/agregados/6579/periodos/2022/variaveis"] = [
+        {"variavel": "9324", "cod_ibge": ente, "ano": "2022", "valor": "150000"}
+    ]
+    token = _admin_token(client, make_org)
+    body = {"fonte": "ibge_populacao", "entes": [ente], "anos": [2022], "versao": "20260704"}
+    res = _run(client, token, body)
+    assert res["silver_rows"] == 1
+
+    with SessionLocal() as s:
+        row = s.scalar(
+            select(IbgePopulacao).where(
+                IbgePopulacao.cod_ibge == ente, IbgePopulacao.ano_ref == 2022
+            )
+        )
+    assert row is not None
+    assert row.populacao == 150000
+    assert row.fonte == "estimativa"
+
+
+def test_ibge_pib_usa_per_capita_oficial_sem_derivar_da_populacao(
+    client, make_org, fake_client, cleanup
+) -> None:
+    ente = _ente()
+    cleanup.append(ente)
+    fake_client.records["v3/agregados/6579/periodos/2021/variaveis"] = [
+        {"variavel": "9324", "cod_ibge": ente, "ano": "2021", "valor": "150000"}
+    ]
+    fake_client.records["v3/agregados/5938/periodos/2021/variaveis"] = [
+        {"variavel": "37", "cod_ibge": ente, "ano": "2021", "valor": "5000000"},
+    ]
+    fake_client.records[
+        "v1/pesquisas/38/periodos/2021/indicadores/47001/resultados/"
+    ] = [
+        {"variavel": "47001", "cod_ibge": ente[:6], "ano": "2021", "valor": "27165.05"},
+    ]
+    token = _admin_token(client, make_org)
+    _run(
+        client,
+        token,
+        {
+            "fonte": "ibge_populacao",
+            "entes": [ente],
+            "anos": [2021],
+            "versao": "20260704",
+        },
+    )
+    body = {"fonte": "ibge_pib", "entes": [ente], "anos": [2021], "versao": "20260704"}
+    _run(client, token, body)
+
+    with SessionLocal() as s:
+        row = s.scalar(select(IbgePib).where(IbgePib.cod_ibge == ente, IbgePib.ano_ref == 2021))
+    assert row is not None
+    assert float(row.pib_nominal) == 5000000.0
+    # 5.000.000 mil R$ / 150.000 hab. seria R$ 33.333,33; o valor persistido deve
+    # ser o indicador oficial 47001, e não uma derivação local.
+    assert float(row.pib_per_capita) == pytest.approx(27165.05)
+    assert (
+        f"v1/pesquisas/38/periodos/2021/indicadores/47001/resultados/{ente}",
+        {},
+    ) in fake_client.calls
+
+
+def test_ibge_pib_nao_usa_outro_ano_nem_faz_fallback_por_populacao(
+    client, make_org, fake_client, cleanup
+) -> None:
+    ente = _ente()
+    cleanup.append(ente)
+    fake_client.records["v3/agregados/6579/periodos/2021/variaveis"] = [
+        {"variavel": "9324", "cod_ibge": ente, "ano": "2021", "valor": "100000"}
+    ]
+    fake_client.records["v3/agregados/5938/periodos/2021/variaveis"] = [
+        {"variavel": "37", "cod_ibge": ente, "ano": "2021", "valor": "2000000"},
+    ]
+    fake_client.records[
+        "v1/pesquisas/38/periodos/2021/indicadores/47001/resultados/"
+    ] = [
+        {"variavel": "47001", "cod_ibge": ente[:6], "ano": "2020", "valor": "19999.99"},
+    ]
+    token = _admin_token(client, make_org)
+    _run(
+        client,
+        token,
+        {
+            "fonte": "ibge_populacao",
+            "entes": [ente],
+            "anos": [2021],
+            "versao": "20260704",
+        },
+    )
+    _run(
+        client,
+        token,
+        {"fonte": "ibge_pib", "entes": [ente], "anos": [2021], "versao": "20260704"},
+    )
+
+    with SessionLocal() as s:
+        row = s.scalar(select(IbgePib).where(IbgePib.cod_ibge == ente, IbgePib.ano_ref == 2021))
+    assert row is not None
+    assert float(row.pib_nominal) == 2000000.0
+    assert row.pib_per_capita is None

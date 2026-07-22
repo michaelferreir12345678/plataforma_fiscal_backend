@@ -1,0 +1,56 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: plataforma_fiscal_pg
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: plataforma_fiscal
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # ltree é distribuído com o postgres oficial; habilitado pela migration/bootstrap.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d plataforma_fiscal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    container_name: plataforma_fiscal_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    container_name: plataforma_fiscal_api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg2://plataforma_app:plataforma_app@postgres:5432/plataforma_fiscal
+      DATABASE_ADMIN_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/plataforma_fiscal
+      DB_NAME: plataforma_fiscal
+      APP_DB_ROLE: plataforma_app
+      APP_DB_PASSWORD: plataforma_app
+      JWT_SECRET: dev-secret-nao-usar-em-producao
+      REDIS_URL: redis://redis:6379/0
+      APP_ENV: docker
+    ports:
+      - "8000:8000"
+    command: >
+      sh -c "python -m scripts.bootstrap_db &&
+             alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+volumes:
+  pgdata:

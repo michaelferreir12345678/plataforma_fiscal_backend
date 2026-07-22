@@ -1,0 +1,69 @@
+[project]
+name = "plataforma-fiscal-backend"
+version = "0.1.0"
+description = "Backend da Plataforma de Inteligência Fiscal (SICONFI) — API + modelo de dados"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.34.0",
+    "sqlalchemy==2.0.36",
+    "psycopg2-binary==2.9.10",
+    "alembic==1.14.0",
+    "pydantic==2.10.4",
+    "pydantic-settings==2.7.0",
+    "email-validator==2.2.0",
+    "pyjwt==2.10.1",
+    "passlib==1.7.4",
+    "python-multipart==0.0.20",
+    "httpx==0.28.1",
+    "tenacity==9.0.0",
+    "openpyxl==3.1.5",
+    "pypdf==5.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx==0.28.1",
+    "pytest==8.3.4",
+    "ruff==0.8.4",
+    "mypy==1.14.0",
+    "types-passlib",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+extend-exclude = [".venv", "alembic/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM"]
+ignore = ["B008"]  # FastAPI usa Depends() como default de argumento
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "scripts", "tests"]
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+packages = ["app"]
+plugins = ["pydantic.mypy"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+ignore_missing_imports = true
+exclude = ["alembic/", "tests/"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
