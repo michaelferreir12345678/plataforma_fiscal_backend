@@ -2,25 +2,35 @@
 
 from __future__ import annotations
 
-import uuid
-from collections.abc import Iterator
-from dataclasses import dataclass, field
-from pathlib import Path
+import os
 
-import pytest
-from alembic import command
-from alembic.config import Config
-from fastapi.testclient import TestClient
-from sqlalchemy import delete
+# O assistente (Sprint 17) deve rodar OFFLINE nos testes: força o provedor/embedder
+# local determinístico antes de qualquer import que construa as Settings. Assim a suíte
+# nunca chama o Gemini nem a rede, mesmo com GEMINI_API_KEY presente no .env.
+os.environ["ASSISTANT_PROVIDER"] = "local"
 
-from app.core.db import admin_session
-from app.core.security import hash_password
-from app.main import app
-from app.modules.catalog import service as catalog_service
-from app.modules.limits import service as limits_service
-from app.modules.tenancy import repository
-from app.modules.tenancy.models import CAPACIDADES, AuditLog, Organizacao, Usuario
-from scripts.bootstrap_db import ensure_role_and_database
+import uuid  # noqa: E402
+from collections.abc import Iterator  # noqa: E402
+from dataclasses import dataclass, field  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import pytest  # noqa: E402
+from alembic import command  # noqa: E402
+from alembic.config import Config  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+from sqlalchemy import delete  # noqa: E402
+
+from app.core.db import admin_session  # noqa: E402
+from app.core.security import hash_password  # noqa: E402
+from app.main import app  # noqa: E402
+from app.modules.assistant import norma_seed  # noqa: E402
+from app.modules.assistant.embeddings import get_embedder  # noqa: E402
+from app.modules.catalog import service as catalog_service  # noqa: E402
+from app.modules.ingestion import integracoes  # noqa: E402
+from app.modules.limits import service as limits_service  # noqa: E402
+from app.modules.tenancy import repository  # noqa: E402
+from app.modules.tenancy.models import CAPACIDADES, AuditLog, Organizacao, Usuario  # noqa: E402
+from scripts.bootstrap_db import ensure_role_and_database  # noqa: E402
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -36,6 +46,10 @@ def _ensure_schema() -> None:
     with admin_session() as session:
         catalog_service.seed_dimensoes(session)
         limits_service.seed_providencias(session)
+        # Corpo normativo do assistente (RAG) — embedder local determinístico.
+        norma_seed.seed_norma_corpus(session, get_embedder())
+        # Integrações (toggles das fontes das Sprints 1/1B).
+        integracoes.seed_integracoes(session)
 
 
 @pytest.fixture

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 from fastapi import APIRouter, Depends
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
@@ -17,6 +19,7 @@ from app.modules.tenancy.schemas import (
     OrgOut,
     PapelCreate,
     PapelOut,
+    PapelUpdate,
     TokenResponse,
     UserCreate,
     UserOut,
@@ -43,25 +46,41 @@ def me(principal: Principal = Depends(get_current_principal)) -> MeResponse:
 def create_org(
     data: OrgCreate, _: Principal = Depends(require_capability("administrar"))
 ) -> OrgOut:
-    return service.create_org(data)
+    # ``administrar`` é uma capacidade do tenant, não uma credencial de operador da
+    # plataforma. Provisionar outro tenant com uma sessão admin global criaria uma
+    # organização órfã e permitiria expansão de escopo indevida.
+    raise AppError(
+        status=403,
+        title="Provisionamento restrito",
+        detail="A criação de organizações exige o plano de controle da plataforma.",
+        type_="urn:plataforma-fiscal:error:platform-admin-required",
+    )
 
 
 @router.get("/orgs", response_model=list[OrgOut], tags=["orgs"])
-def list_orgs(_: Principal = Depends(require_capability("administrar"))) -> list[OrgOut]:
-    return service.list_orgs()
+def list_orgs(
+    principal: Principal = Depends(require_capability("administrar")),
+    session: Session = Depends(get_db),
+) -> list[OrgOut]:
+    return service.list_orgs(session, principal)
 
 
 # --- Usuários (plano de controle; requer 'administrar') ---
 @router.post("/users", response_model=UserOut, status_code=201, tags=["users"])
 def create_user(
-    data: UserCreate, _: Principal = Depends(require_capability("administrar"))
+    data: UserCreate,
+    principal: Principal = Depends(require_capability("administrar")),
+    session: Session = Depends(get_db),
 ) -> UserOut:
-    return service.create_user(data)
+    return service.create_user(session, principal, data)
 
 
 @router.get("/users", response_model=list[UserOut], tags=["users"])
-def list_users(_: Principal = Depends(require_capability("administrar"))) -> list[UserOut]:
-    return service.list_users()
+def list_users(
+    principal: Principal = Depends(require_capability("administrar")),
+    session: Session = Depends(get_db),
+) -> list[UserOut]:
+    return service.list_users(session, principal)
 
 
 # --- Papéis / RBAC (plano de dados; isolado por RLS na org do principal) ---
@@ -78,12 +97,31 @@ def create_papel(
 
 @router.get("/papeis", response_model=list[PapelOut], tags=["papeis"])
 def list_papeis(
-    principal: Principal = Depends(require_capability("ver")),
+    principal: Principal = Depends(require_capability("administrar")),
     session: Session = Depends(get_db),
 ) -> list[PapelOut]:
     if principal.org_id is None:
         return []
     return service.list_papeis(session, principal.org_id)
+
+
+@router.patch("/papeis/{papel_id}", response_model=PapelOut, tags=["papeis"])
+def update_papel(
+    papel_id: uuid.UUID,
+    data: PapelUpdate,
+    principal: Principal = Depends(require_capability("administrar")),
+    session: Session = Depends(get_db),
+) -> PapelOut:
+    """Atualiza as capacidades de um papel da org (aba Permissões — fim do mock)."""
+    if principal.org_id is None:
+        raise AppError(status=400, title="Sem organização", detail="Principal sem org ativa.")
+    return service.update_papel_capacidades(
+        session,
+        principal.org_id,
+        papel_id,
+        list(data.capacidades),
+        actor_user_id=principal.usuario_id,
+    )
 
 
 # --- Carteira (plano de dados; isolado por RLS na org do principal) ---

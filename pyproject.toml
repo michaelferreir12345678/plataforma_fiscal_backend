@@ -19,6 +19,11 @@ dependencies = [
     "tenacity==9.0.0",
     "openpyxl==3.1.5",
     "pypdf==5.1.0",
+    "reportlab==4.2.5",
+    "python-pptx==1.0.2",
+    "google-genai==1.16.1",
+    "redis==8.0.1",
+    "rq==2.10.0",
 ]
 
 [project.optional-dependencies]

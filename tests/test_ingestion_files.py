@@ -26,6 +26,7 @@ from app.modules.ingestion.models import (
     TesouroFpm,
 )
 from app.modules.ingestion.router import get_client_resolver
+from app.workers import ingest_jobs
 from tests.conftest import auth_header, login
 
 TEST_FPM_YEAR = 2097
@@ -90,9 +91,13 @@ class FakeFileClient:
 @pytest.fixture
 def fake_file() -> Iterator[FakeFileClient]:
     fake = FakeFileClient()
+    ingest_jobs.set_eager(True)
+    ingest_jobs.set_recalcular(False)
     app.dependency_overrides[get_client_resolver] = lambda: fake
     yield fake
     app.dependency_overrides.pop(get_client_resolver, None)
+    ingest_jobs.set_eager(False)
+    ingest_jobs.set_recalcular(True)
 
 
 @pytest.fixture(autouse=True)
@@ -150,15 +155,17 @@ def _cleanup_test_records() -> None:
         s.commit()
 
 
-def _admin_token(client: TestClient, make_org) -> str:
-    fx = make_org()
+def _admin_token(client: TestClient, make_org, *entes: str) -> str:
+    fx = make_org(entes=list(entes))
     return login(client, fx.email, fx.senha)
 
 
 def _run(client: TestClient, token: str, body: dict[str, Any]) -> dict[str, Any]:
     resp = client.post("/admin/ingestion/run", json=body, headers=auth_header(token))
-    assert resp.status_code == 200, resp.text
-    return resp.json()
+    assert resp.status_code == 202, resp.text
+    job = resp.json()["job"]
+    assert job["status"] == "concluido", job
+    return job["resultado"]["resumo_execucao"]
 
 
 def _count(model: type, *conditions: Any) -> int:
@@ -237,8 +244,9 @@ def test_capag_falha_explicita_em_layout_invalido(client, make_org, fake_file) -
         json={"fonte": "tesouro_capag", "anos": [TEST_CAPAG_YEAR]},
         headers=auth_header(token),
     )
-    assert resp.status_code == 422
-    assert resp.headers["content-type"].startswith("application/problem+json")
+    assert resp.status_code == 202
+    assert resp.json()["job"]["status"] == "falhou"
+    assert resp.json()["job"]["resultado"]["itens"][0]["erro"]
     assert (
         _count(
             TesouroCapag,
@@ -343,9 +351,9 @@ def test_capag_layout_oficial_incompleto_falha_explicita(client, make_org, fake_
         json={"fonte": "tesouro_capag", "anos": [TEST_CAPAG_YEAR]},
         headers=auth_header(token),
     )
-    assert resp.status_code == 422
-    assert resp.headers["content-type"].startswith("application/problem+json")
-    assert "Indicador 3" in resp.json()["detail"]
+    assert resp.status_code == 202
+    assert resp.json()["job"]["status"] == "falhou"
+    assert "Indicador 3" in resp.json()["job"]["resultado"]["itens"][0]["erro"]
     assert (
         _count(
             TesouroCapag,
@@ -361,7 +369,7 @@ def test_siops_long_format(client, make_org, fake_file) -> None:
         {"numero_indicador": "1.1", "indicador_calculado": "15,5 %"},
         {"numero_indicador": "2.1", "indicador_calculado": "300,0"},
     ]
-    token = _admin_token(client, make_org)
+    token = _admin_token(client, make_org, TEST_SIOPS_COD)
     res = _run(
         client,
         token,

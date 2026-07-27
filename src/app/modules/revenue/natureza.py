@@ -84,13 +84,37 @@ class NoReceita:
     nivel: int
 
 
+# Vocabulário do bloco de **despesa** do Anexo 01. O Anexo 01 é o *Balanço Orçamentário*:
+# traz a receita E a despesa. As colunas de despesa também dizem "ATÉ O BIMESTRE" / "NO
+# BIMESTRE" (ex.: "DESPESAS EMPENHADAS ATÉ O BIMESTRE (f)"), então precisam ser rejeitadas
+# **antes** das regras de arrecadação — caso contrário a despesa entra no fato_receita e,
+# por tabela, vira nó da hierarquia de origens de receita.
+_MARCAS_DESPESA = (
+    "DESPESA",
+    "DOTACAO",
+    "EMPENHAD",
+    "LIQUIDAD",
+    "PAGAS",
+    "INSCRITAS EM RESTOS",
+)
+
+
+def e_coluna_de_despesa(coluna: str | None) -> bool:
+    """A coluna pertence ao bloco de despesa do Balanço Orçamentário?"""
+    c = normalizar_texto(coluna)
+    return bool(c) and any(marca in c for marca in _MARCAS_DESPESA)
+
+
 def classificar_coluna(coluna: str | None) -> str | None:
     """Mapeia a coluna do Anexo 01 para a medida do ``fato_receita`` (ou ``None``).
 
     Colunas percentuais/saldo não entram — o percentual de realização é derivado.
+    Colunas do bloco de despesa também não: elas pertencem ao Módulo 5 (Despesa).
     """
     c = normalizar_texto(coluna)
     if not c:
+        return None
+    if e_coluna_de_despesa(coluna):
         return None
     if "%" in c or "PERCENTUAL" in c or "SALDO" in c:
         return None

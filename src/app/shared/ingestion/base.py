@@ -56,7 +56,18 @@ class IngestionResult:
     versao_entrega: str
     vigente: bool
     silver_rows: int
-    status: str  # "ingested" | "skipped"
+    status: str  # "ingested" | "skipped" | "vazio"
+
+
+def payload_vazio(payload: Any) -> bool:
+    """Fonte sem dado publicado: lista vazia (ou dict cujos valores são todos vazios)."""
+    if payload is None:
+        return True
+    if isinstance(payload, list):
+        return len(payload) == 0
+    if isinstance(payload, dict):
+        return all(payload_vazio(v) for v in payload.values())
+    return False
 
 
 def payload_hash(payload: Any) -> str:
@@ -129,15 +140,40 @@ class BaseConnector(ABC):
         return job, self.extract(job)
 
     # --- Template method: orquestra o ciclo idempotente ---
-    def run(self, session: Session, job: IngestionJob, *, force: bool = False) -> IngestionResult:
+    def run(
+        self,
+        session: Session,
+        job: IngestionJob,
+        *,
+        force: bool = False,
+        payload_pronto: Any | None = None,
+    ) -> IngestionResult:
         """Executa ``prepare → to_bronze → to_silver → mark_done`` de forma idempotente.
 
         - Rodar 2x com a mesma chave não duplica (bronze faz *no-op* e o silver é pulado).
         - Uma nova ``versao`` (retificação) cria nova entrega vigente sem apagar o histórico.
         - ``force=True`` reprocessa o silver mesmo sem novo bronze (usado no replay).
+        - Payload **vazio** (fonte ainda não publicou o período) não vira entrega: uma
+          entrega vigente sem linha alguma mascararia a lacuna da fonte como "dado zero".
+        - ``payload_pronto`` injeta um payload já extraído (a varredura de retificações
+          extrai uma vez para comparar o hash e reaproveita aqui, sem 2ª ida à rede).
         """
-        job, payload = self.prepare(job)
+        if payload_pronto is not None:
+            payload = payload_pronto
+        else:
+            job, payload = self.prepare(job)
         hash_ = payload_hash(payload)
+
+        if payload_vazio(payload):
+            self.sink.log_ingestion(session, job, "vazio", "Fonte sem dado para o período.")
+            return IngestionResult(
+                job=job,
+                is_new=False,
+                versao_entrega=job.versao,
+                vigente=False,
+                silver_rows=0,
+                status="vazio",
+            )
 
         is_new = self.sink.upsert_bronze(session, job, payload, hash_)
         entrega = self.sink.register_entrega(session, job, hash_)

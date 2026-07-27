@@ -26,6 +26,7 @@ from app.modules.ingestion.models import (
     SilverRreo,
 )
 from app.modules.ingestion.router import get_client_resolver
+from app.workers import ingest_jobs
 from tests.conftest import auth_header, login
 
 RREO_PATH = "tt/rreo"
@@ -67,9 +68,13 @@ def _ente() -> str:
 @pytest.fixture
 def fake_client() -> Iterator[FakeRecordsClient]:
     fake = FakeRecordsClient()
+    ingest_jobs.set_eager(True)
+    ingest_jobs.set_recalcular(False)
     app.dependency_overrides[get_client_resolver] = lambda: fake
     yield fake
     app.dependency_overrides.pop(get_client_resolver, None)
+    ingest_jobs.set_eager(False)
+    ingest_jobs.set_recalcular(True)
 
 
 @pytest.fixture
@@ -83,8 +88,8 @@ def entes_cleanup() -> Iterator[list[str]]:
         s.commit()
 
 
-def _admin_token(client: TestClient, make_org) -> str:
-    fx = make_org()  # caps padrão incluem 'administrar'
+def _admin_token(client: TestClient, make_org, *entes: str) -> str:
+    fx = make_org(entes=list(entes))  # caps padrão incluem 'administrar'
     return login(client, fx.email, fx.senha)
 
 
@@ -95,29 +100,33 @@ def _count(model: type, ente: str) -> int:
 
 def _run(client: TestClient, token: str, body: dict[str, Any]) -> dict[str, Any]:
     resp = client.post("/admin/ingestion/run", json=body, headers=auth_header(token))
-    assert resp.status_code == 200, resp.text
-    return resp.json()
+    assert resp.status_code == 202, resp.text
+    job = resp.json()["job"]
+    assert job["status"] == "concluido", job
+    return job["resultado"]["resumo_execucao"]
 
 
 def test_rodar_2x_nao_duplica(client, make_org, fake_client, entes_cleanup) -> None:
     ente = _ente()
     entes_cleanup.append(ente)
     fake_client.records[RREO_PATH] = _rreo_items("1000.00", "700.00")
-    token = _admin_token(client, make_org)
+    token = _admin_token(client, make_org, ente)
     body = {
         "fonte": "siconfi_rreo", "entes": [ente], "anos": [2024],
         "periodos": [6], "versao": "1", "homologada_em": "2025-01-10T00:00:00Z",
     }
 
     r1 = client.post("/admin/ingestion/run", json=body, headers=auth_header(token))
-    assert r1.status_code == 200, r1.text
-    assert r1.json()["ingeridos"] == 1
-    assert r1.json()["silver_rows"] == 2
+    assert r1.status_code == 202, r1.text
+    resumo1 = r1.json()["job"]["resultado"]["resumo_execucao"]
+    assert resumo1["ingeridos"] == 1
+    assert resumo1["silver_rows"] == 2
 
     r2 = client.post("/admin/ingestion/run", json=body, headers=auth_header(token))
-    assert r2.status_code == 200
-    assert r2.json()["ingeridos"] == 0
-    assert r2.json()["pulados"] == 1
+    assert r2.status_code == 202
+    resumo2 = r2.json()["job"]["resultado"]["resumo_execucao"]
+    assert resumo2["ingeridos"] == 0
+    assert resumo2["pulados"] == 1
 
     # Bronze não duplica (1 versão) e silver mantém apenas as 2 linhas da versão.
     assert _count(RawPayload, ente) == 1
@@ -129,7 +138,7 @@ def test_retificacao_supera_versao_e_mantem_historico(
 ) -> None:
     ente = _ente()
     entes_cleanup.append(ente)
-    token = _admin_token(client, make_org)
+    token = _admin_token(client, make_org, ente)
 
     # v1 homologada antes; v2 (retificação) homologada depois, com valores diferentes.
     fake_client.records[RREO_PATH] = _rreo_items("1000.00", "700.00")
@@ -161,7 +170,7 @@ def test_retificacao_supera_versao_e_mantem_historico(
 def test_as_of_retorna_versao_historica(client, make_org, fake_client, entes_cleanup) -> None:
     ente = _ente()
     entes_cleanup.append(ente)
-    token = _admin_token(client, make_org)
+    token = _admin_token(client, make_org, ente)
 
     fake_client.records[RREO_PATH] = _rreo_items("1000.00", "700.00")
     client.post("/admin/ingestion/run", headers=auth_header(token), json={
@@ -193,7 +202,7 @@ def test_as_of_retorna_versao_historica(client, make_org, fake_client, entes_cle
 def test_replay_reprocessa_do_bronze(client, make_org, fake_client, entes_cleanup) -> None:
     ente = _ente()
     entes_cleanup.append(ente)
-    token = _admin_token(client, make_org)
+    token = _admin_token(client, make_org, ente)
     fake_client.records[RREO_PATH] = _rreo_items("1000.00", "700.00")
     client.post("/admin/ingestion/run", headers=auth_header(token), json={
         "fonte": "siconfi_rreo", "entes": [ente], "anos": [2024], "periodos": [6], "versao": "1"})
@@ -209,15 +218,15 @@ def test_replay_reprocessa_do_bronze(client, make_org, fake_client, entes_cleanu
         params={"ente": ente, "periodo": "2024-B6", "fonte": "siconfi_rreo"},
         headers=auth_header(token),
     )
-    assert r.status_code == 200, r.text
-    assert r.json()["silver_rows"] == 2
+    assert r.status_code == 202, r.text
+    assert r.json()["job"]["resultado"]["resumo_execucao"]["silver_rows"] == 2
     assert _count(SilverRreo, ente) == 2
 
 
 def test_msc_um_ente_ano_rapido(client, make_org, fake_client, entes_cleanup) -> None:
     ente = _ente()
     entes_cleanup.append(ente)
-    token = _admin_token(client, make_org)
+    token = _admin_token(client, make_org, ente)
     fake_client.records[MSC_PATH] = [
         {
             "conta_contabil": f"1.1.{i:04d}",
@@ -234,8 +243,8 @@ def test_msc_um_ente_ano_rapido(client, make_org, fake_client, entes_cleanup) ->
     r = client.post("/admin/ingestion/run", json=body, headers=auth_header(token))
     elapsed = perf_counter() - t0
 
-    assert r.status_code == 200, r.text
-    assert r.json()["silver_rows"] == 2000
+    assert r.status_code == 202, r.text
+    assert r.json()["job"]["resultado"]["resumo_execucao"]["silver_rows"] == 2000
     assert _count(SilverMsc, ente) == 2000
     assert elapsed < 300  # << 5 min
 

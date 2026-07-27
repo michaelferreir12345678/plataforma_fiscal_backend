@@ -21,6 +21,20 @@ from app.modules.tenancy import repository
 
 # Requisições de leitura triviais que não precisam ser auditadas.
 _SKIP_PATHS = frozenset({"/health", "/", "/docs", "/openapi.json", "/redoc"})
+_INGESTION_JOBS_PATH = "/admin/ingestion/jobs"
+
+
+def _skip_request(request: Request) -> bool:
+    path = request.url.path
+    if path in _SKIP_PATHS:
+        return True
+    # A Central consulta lista/detalhe de jobs a cada dois segundos. Esses GETs são
+    # telemetria operacional, não ações de negócio; criação, confirmação, cancelamento,
+    # retry e resultado já geram eventos de domínio completos em op.audit_log.
+    return request.method == "GET" and (
+        path == _INGESTION_JOBS_PATH
+        or path.startswith(f"{_INGESTION_JOBS_PATH}/")
+    )
 
 
 def _persist_audit(
@@ -43,7 +57,7 @@ class AuditMiddleware(BaseHTTPMiddleware):
     ) -> Response:
         response = await call_next(request)
 
-        if request.url.path in _SKIP_PATHS or response.status_code >= 400:
+        if _skip_request(request) or response.status_code >= 400:
             return response
 
         principal = getattr(request.state, "principal", None)

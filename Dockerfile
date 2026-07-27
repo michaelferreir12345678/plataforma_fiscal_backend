@@ -6,13 +6,14 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Dependências de sistema para psycopg2 e build
+# Biblioteca cliente em runtime; compiladores e ferramentas de teste não entram na imagem final.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential libpq-dev \
+    libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml ./
-RUN pip install --upgrade pip && pip install -e ".[dev]"
+COPY src ./src
+RUN pip install --upgrade pip && pip install "."
 
 COPY . .
 ENV PYTHONPATH=/app/src

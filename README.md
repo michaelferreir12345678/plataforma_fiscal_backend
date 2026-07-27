@@ -2,10 +2,10 @@
 
 API + modelo de dados (SICONFI) para o gestor público. Este repositório é o **backend**
 (separado do frontend). Contexto e regras em [CLAUDE.md](../CLAUDE.md); roadmap em
-[backend-sprints.md](../backend-sprints.md).
+[backend-sprints.md](../docs/backend-sprints.md).
 
 **Stack:** Python 3.12 · FastAPI · Pydantic v2 · SQLAlchemy 2.0 · Alembic · PostgreSQL 16
-(ltree + RLS) · pytest · ruff · mypy.
+(ltree + RLS) · Redis 7/RQ · pytest · ruff · mypy.
 
 ## Sprint 0 — Fundação & multi-tenant (implementada)
 
@@ -45,8 +45,9 @@ API + modelo de dados (SICONFI) para o gestor público. Este repositório é o *
 - **Endpoints admin** (capacidade `administrar`): `GET /admin/ingestion/status`,
   `POST /admin/ingestion/run` (backfill), `POST /admin/ingestion/replay` (reprocessa do
   bronze, sem rede), `GET /admin/ingestion/data?...&as_of=` (leitura histórica).
-- Orquestração RQ em [workers/ingestion_tasks.py](src/app/workers/ingestion_tasks.py)
-  (executa síncrono no MVP; enfileirável quando houver Redis).
+- Orquestração assíncrona Redis/RQ em
+  [workers/ingest_jobs.py](src/app/workers/ingest_jobs.py); em Docker/produção, a API
+  enfileira e o processo `worker` executa fora do request HTTP.
 
 ### Critérios de aceite — status
 | Critério | Status |
@@ -192,8 +193,8 @@ coorte → ente → posição; não há fallback para mock em produção.
 
 ## Como rodar (Postgres local — sem Docker)
 
-Pré-requisitos: Python 3.12 e um PostgreSQL acessível em `localhost:5432`
-(superuser `postgres`/`postgres`; ajuste em `.env` se necessário).
+Pré-requisitos: Python 3.12 e um PostgreSQL acessível em `localhost:5432`; configure as
+credenciais administrativa e de aplicação no `.env`.
 
 ```bash
 python -m venv .venv
@@ -216,12 +217,20 @@ Docs interativas em `http://localhost:8000/docs`.
 ## Como rodar (Docker)
 
 ```bash
-docker compose up -d --build   # sobe postgres 16 + redis + api (bootstrap+migrate no start)
+cp .env.example .env           # substitua POSTGRES_PASSWORD, APP_DB_PASSWORD e JWT_SECRET
+docker compose up -d --build   # postgres + Redis AOF + API/migrations + worker RQ
+make smoke-infra               # PONG, revision Alembic, /health e estado do RQ
 ```
+
+PostgreSQL, Redis e API são publicados somente em `127.0.0.1`; dentro do Compose, API e
+worker usam `redis://redis:6379/0`. O volume `redisdata` preserva a fila/AOF em reinícios normais.
+Não use `docker compose down -v` se houver jobs pendentes. Operação detalhada, incluindo
+Windows e Ubuntu: [runbook da Sprint 24](docs/sprint24_central_dados.md).
 
 ## Comandos (Makefile)
 
-`make install | bootstrap | migrate | seed | run | test | lint | fmt | up | down`.
+`make install | bootstrap | migrate | seed | run | test | lint | fmt | up | down | redis |
+worker | worker-logs | queue-info | smoke-infra`.
 No Windows sem GNU make, use o interpretador do venv diretamente, ex.:
 `./.venv/Scripts/python -m pytest`.
 

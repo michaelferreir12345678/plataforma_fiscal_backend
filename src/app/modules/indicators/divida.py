@@ -138,14 +138,28 @@ def calcular_dcl(linhas: list[LinhaDdcl], periodo: str) -> ApuracaoDivida:
             )
         )
 
-    obrigatorios = ("dc_bruta", "disponibilidades", "haveres")
+    # ``Demais Haveres Financeiros`` é uma dedução **opcional** do DDCL: o RGF só publica a
+    # linha quando o ente tem esses haveres (metade dos municípios do CE não tem). Ausência
+    # significa zero — não "impossível apurar". Tratá-la como obrigatória deixava esses entes
+    # sem indicador de dívida algum. A ausência fica registrada no rastro, e o zero é a
+    # leitura **conservadora** (sem a dedução, a DCL apurada é maior, nunca menor).
+    obrigatorios = ("dc_bruta", "disponibilidades")
     faltantes = [nome for nome in obrigatorios if nome not in valores]
     if faltantes:
         raise ValueError(f"Componentes DDCL ausentes no período: {', '.join(faltantes)}")
 
     dc = valores["dc_bruta"]
     disponibilidades = valores["disponibilidades"]
-    haveres = valores["haveres"]
+    haveres = valores.get("haveres", Decimal(0))
+    if "haveres" not in valores:
+        rastros.append(
+            ComponenteDdcl(
+                papel="haveres",
+                conta="(linha ausente no DDCL — assumido zero)",
+                coluna="",
+                valor=Decimal(0),
+            )
+        )
     dcl = dc - disponibilidades - haveres
     reportada = valores.get("dcl_reportada")
     diferenca = dcl - reportada if reportada is not None else None

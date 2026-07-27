@@ -1,0 +1,120 @@
+"""Acesso a dados da Sprint 15: op.alerta (upsert dedup) e gold.calendario_obrigacao."""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import Iterable
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import false, func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.orm import Session
+
+from app.modules.alerts.models import Alerta, CalendarioObrigacao
+
+# Campos de conteúdo atualizados na reavaliação (o ``status`` do gestor é preservado).
+_ALERTA_UPDATE = (
+    "cod_ibge",
+    "categoria",
+    "severidade",
+    "prioridade",
+    "titulo",
+    "motivo_legal",
+    "acao_sugerida",
+    "prazo",
+    "link",
+    "indicador",
+    "periodo",
+    "source_ref",
+    "memoria",
+    "atualizado_em",
+)
+
+
+def upsert_alerta(session: Session, valores: dict[str, Any]) -> None:
+    """Insere/atualiza por (org_id, chave). Não rebaixa o ``status`` já tratado pelo gestor."""
+    stmt = pg_insert(Alerta).values(**valores)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["org_id", "chave"],
+        set_={k: valores[k] for k in _ALERTA_UPDATE if k in valores},
+    )
+    session.execute(stmt)
+
+
+def list_alertas(
+    session: Session,
+    *,
+    org_id: uuid.UUID,
+    cods_ibge: Iterable[str] | None = None,
+    incluir_status: Iterable[str] | None = None,
+) -> list[Alerta]:
+    stmt = select(Alerta).where(Alerta.org_id == org_id)
+    if cods_ibge is not None:
+        cods = list(cods_ibge)
+        stmt = stmt.where(Alerta.cod_ibge.in_(cods)) if cods else stmt.where(false())
+    if incluir_status is not None:
+        stmt = stmt.where(Alerta.status.in_(list(incluir_status)))
+    return list(session.scalars(stmt.order_by(Alerta.prioridade, Alerta.prazo, Alerta.criado_em)))
+
+
+def get_alerta(session: Session, *, org_id: uuid.UUID, alerta_id: uuid.UUID) -> Alerta | None:
+    return session.scalar(
+        select(Alerta).where(Alerta.id == alerta_id, Alerta.org_id == org_id)
+    )
+
+
+def set_status(
+    session: Session, *, org_id: uuid.UUID, alerta_id: uuid.UUID, status: str, agora: datetime
+) -> int:
+    result = session.execute(
+        update(Alerta)
+        .where(Alerta.id == alerta_id, Alerta.org_id == org_id)
+        .values(status=status, atualizado_em=agora)
+    )
+    return result.rowcount
+
+
+def contar_por_severidade(
+    session: Session, *, org_id: uuid.UUID, cods_ibge: Iterable[str] | None = None
+) -> dict[str, int]:
+    stmt = (
+        select(Alerta.severidade, func.count())
+        .where(Alerta.org_id == org_id, Alerta.status != "descartada")
+        .group_by(Alerta.severidade)
+    )
+    if cods_ibge is not None:
+        cods = list(cods_ibge)
+        stmt = stmt.where(Alerta.cod_ibge.in_(cods)) if cods else stmt.where(false())
+    return {str(sev): int(n) for sev, n in session.execute(stmt).all()}
+
+
+# --- gold.calendario_obrigacao ---
+_CAL_UPDATE = (
+    "periodicidade",
+    "prazo",
+    "status",
+    "entregue_em",
+    "versao_entrega",
+    "source_ref",
+    "atualizado_em",
+)
+
+
+def upsert_calendario(session: Session, valores: dict[str, Any]) -> None:
+    stmt = pg_insert(CalendarioObrigacao).values(**valores)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["cod_ibge", "relatorio", "periodo"],
+        set_={k: valores[k] for k in _CAL_UPDATE if k in valores},
+    )
+    session.execute(stmt)
+
+
+def list_calendario(session: Session, *, cod_ibge: str) -> list[CalendarioObrigacao]:
+    return list(
+        session.scalars(
+            select(CalendarioObrigacao)
+            .where(CalendarioObrigacao.cod_ibge == cod_ibge)
+            .order_by(CalendarioObrigacao.prazo, CalendarioObrigacao.relatorio)
+        )
+    )

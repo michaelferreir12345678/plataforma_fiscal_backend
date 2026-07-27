@@ -18,6 +18,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
+import httpx
 from sqlalchemy.orm import Session
 
 from app.modules.ingestion import repository
@@ -121,6 +122,11 @@ class IbgePibConnector(IbgeConnectorBase):
         O agregado 5938 e a Pesquisa 38 têm contratos JSON diferentes, mas o cliente
         IBGE normaliza ambos para registros planos. Os dois payloads permanecem juntos
         no bronze, tornando a origem de cada coluna reproduzível na mesma entrega.
+
+        O PIB municipal tem defasagem de anos: para um exercício que a pesquisa ainda
+        **não publicou**, a API responde 4xx. Isso é lacuna da fonte, não erro de
+        requisição — o per capita fica vazio e o PIB nominal (se houver) é preservado.
+        Erros que não sejam "período inexistente" continuam subindo.
         """
         pib_nominal = super().extract(job)
         ano = job.params["ano"]
@@ -129,7 +135,12 @@ class IbgePibConnector(IbgeConnectorBase):
             f"v1/pesquisas/{self.pesquisa_pib}/periodos/{ano}/indicadores/"
             f"{self.indicador_pib_per_capita}/resultados/{cod_ibge}"
         )
-        pib_per_capita = self.client.get_records(per_capita_path, {})
+        try:
+            pib_per_capita = self.client.get_records(per_capita_path, {})
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code not in (400, 404):
+                raise
+            pib_per_capita = []
         return {
             "pib_nominal_agregado_5938_variavel_37": pib_nominal,
             "pib_per_capita_pesquisa_38_indicador_47001": pib_per_capita,

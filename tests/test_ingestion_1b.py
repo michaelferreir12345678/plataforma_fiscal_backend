@@ -35,6 +35,7 @@ from app.shared.ingestion.client import (
     IbgeAgregadosClient,
     SadipemClient,
 )
+from app.workers import ingest_jobs
 from tests.conftest import auth_header, login
 
 
@@ -82,9 +83,13 @@ def _ente() -> str:
 @pytest.fixture
 def fake_client() -> Iterator[FakeRecordsClient]:
     fake = FakeRecordsClient()
+    ingest_jobs.set_eager(True)
+    ingest_jobs.set_recalcular(False)
     app.dependency_overrides[get_client_resolver] = lambda: fake
     yield fake
     app.dependency_overrides.pop(get_client_resolver, None)
+    ingest_jobs.set_eager(False)
+    ingest_jobs.set_recalcular(True)
 
 
 @pytest.fixture
@@ -108,15 +113,17 @@ def cleanup() -> Iterator[list[str]]:
         s.commit()
 
 
-def _admin_token(client: TestClient, make_org) -> str:
-    fx = make_org()
+def _admin_token(client: TestClient, make_org, *entes: str) -> str:
+    fx = make_org(entes=list(entes))
     return login(client, fx.email, fx.senha)
 
 
 def _run(client: TestClient, token: str, body: dict[str, Any]) -> dict[str, Any]:
     resp = client.post("/admin/ingestion/run", json=body, headers=auth_header(token))
-    assert resp.status_code == 200, resp.text
-    return resp.json()
+    assert resp.status_code == 202, resp.text
+    job = resp.json()["job"]
+    assert job["status"] == "concluido", job
+    return job["resultado"]["resumo_execucao"]
 
 
 def _count(model: type, **filtros: Any) -> int:
@@ -160,7 +167,7 @@ def test_sadipem_pvl_versao_por_data_de_captura(client, make_org, fake_client, c
             "data_analise": "31/05/2024",
         },
     ]
-    token = _admin_token(client, make_org)
+    token = _admin_token(client, make_org, ente)
     body = {"fonte": "sadipem_pvl", "entes": [ente], "anos": [2024], "versao": "20260704"}
 
     res = _run(client, token, body)
@@ -189,7 +196,7 @@ def test_sadipem_preserva_anos_da_mesma_captura(
             "status": "Deferido",
         }
     ]
-    token = _admin_token(client, make_org)
+    token = _admin_token(client, make_org, ente)
 
     res = _run(
         client,
@@ -247,7 +254,7 @@ def test_sadipem_operacoes_contratadas_vem_do_pvl_e_filtra_flag(
             "pvl_contratado_credor": 0,
         },
     ]
-    token = _admin_token(client, make_org)
+    token = _admin_token(client, make_org, ente)
     result = _run(
         client,
         token,
@@ -321,7 +328,7 @@ def test_sadipem_cronograma_busca_somente_pleitos_contratados_e_aceita_grafias(
             },
         ],
     )
-    token = _admin_token(client, make_org)
+    token = _admin_token(client, make_org, ente)
     result = _run(
         client,
         token,
@@ -380,16 +387,29 @@ def test_bcb_long_format_uma_linha_por_data(client, make_org, fake_client, clean
     assert res["silver_rows"] == 3
     assert _count(BcbIndice, codigo_serie=433, versao_entrega="20260704") == 3
 
+    # A asserção é escopada a ESTA versão de entrega: a série 433 (IPCA) real pode estar
+    # populada pelo backfill da Sprint 21 (2019→hoje) em outra versão, e as duas coexistem
+    # no long format bitemporal sem que este teste veja o dado real.
     with SessionLocal() as s:
         valores = sorted(
             float(v)
-            for v in s.scalars(select(BcbIndice.valor).where(BcbIndice.codigo_serie == 433))
+            for v in s.scalars(
+                select(BcbIndice.valor).where(
+                    BcbIndice.codigo_serie == 433,
+                    BcbIndice.versao_entrega == "20260704",
+                )
+            )
         )
     assert valores == [0.16, 0.42, 0.83]
 
-    # Limpeza específica do BCB (não tem cod_ibge).
+    # Limpeza escopada à versão do teste — nunca apaga a série 433 real de outra versão.
     with SessionLocal() as s:
-        s.execute(delete(BcbIndice).where(BcbIndice.codigo_serie == 433))
+        s.execute(
+            delete(BcbIndice).where(
+                BcbIndice.codigo_serie == 433,
+                BcbIndice.versao_entrega == "20260704",
+            )
+        )
         s.commit()
 
 
@@ -443,7 +463,7 @@ def test_ibge_populacao_materializa_silver(client, make_org, fake_client, cleanu
     fake_client.records["v3/agregados/6579/periodos/2022/variaveis"] = [
         {"variavel": "9324", "cod_ibge": ente, "ano": "2022", "valor": "150000"}
     ]
-    token = _admin_token(client, make_org)
+    token = _admin_token(client, make_org, ente)
     body = {"fonte": "ibge_populacao", "entes": [ente], "anos": [2022], "versao": "20260704"}
     res = _run(client, token, body)
     assert res["silver_rows"] == 1
@@ -475,7 +495,7 @@ def test_ibge_pib_usa_per_capita_oficial_sem_derivar_da_populacao(
     ] = [
         {"variavel": "47001", "cod_ibge": ente[:6], "ano": "2021", "valor": "27165.05"},
     ]
-    token = _admin_token(client, make_org)
+    token = _admin_token(client, make_org, ente)
     _run(
         client,
         token,
@@ -518,7 +538,7 @@ def test_ibge_pib_nao_usa_outro_ano_nem_faz_fallback_por_populacao(
     ] = [
         {"variavel": "47001", "cod_ibge": ente[:6], "ano": "2020", "valor": "19999.99"},
     ]
-    token = _admin_token(client, make_org)
+    token = _admin_token(client, make_org, ente)
     _run(
         client,
         token,

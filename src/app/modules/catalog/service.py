@@ -11,7 +11,14 @@ from sqlalchemy.orm import Session
 from app.core.errors import AppError
 from app.modules.catalog import repository
 from app.modules.catalog.models import ESFERA_ESTADUAL, ESFERA_MUNICIPAL, DimEnte
-from app.modules.catalog.schemas import EnteOut
+from app.modules.catalog.schemas import (
+    EnteBusca,
+    EnteOut,
+    EntesBuscaResponse,
+    PeriodoDisponivel,
+    PeriodosResponse,
+)
+from app.shared import periodo as periodo_util
 from app.shared.envelope import DrillEnvelope, DrillNodeRef
 from app.shared.hierarchy import (
     HierarchyNode,
@@ -42,6 +49,9 @@ _LIMITES: list[tuple[str, str, str, str, str]] = [
     ("fundeb_profissionais", ESFERA_MUNICIPAL, "", "piso", "70"),
     ("fundeb_profissionais", ESFERA_ESTADUAL, "", "piso", "70"),
 ]
+
+# Relatório que ancora o período default do shell (o RREO é o de maior granularidade).
+RELATORIO_PADRAO = "RREO"
 
 _UF_REGIAO = {
     "AC": "NO", "AP": "NO", "AM": "NO", "PA": "NO", "RO": "NO", "RR": "NO", "TO": "NO",
@@ -102,6 +112,13 @@ def gerar_periodos(anos: list[int]) -> list[dict[str, Any]]:
                 {"codigo": cod, "descricao": f"{q}º quadrimestre/{ano}", "parent_codigo": ano_cod,
                  "nivel": 2, "path": make_path(ano_path, cod), "ano": ano, "quadrimestre": q}
             )
+        # RGF semestral dos municípios < 50 mil hab. (LRF art. 63) — nível 2 do exercício.
+        for s in range(1, 3):
+            cod = f"{ano}-S{s}"
+            nodes.append(
+                {"codigo": cod, "descricao": f"{s}º semestre/{ano}", "parent_codigo": ano_cod,
+                 "nivel": 2, "path": make_path(ano_path, cod), "ano": ano, "quadrimestre": None}
+            )
         for m in range(1, 13):
             bim = math.ceil(m / 2)
             bim_cod = f"{ano}-B{bim}"
@@ -119,10 +136,18 @@ def seed_periodos(session: Session, anos: list[int]) -> None:
         repository.upsert_periodo(session, node)
 
 
+# Horizonte histórico do backfill (Sprint 21): 2021→exercício corrente + 1 (projeções).
+HORIZONTE_ANOS: list[int] = list(range(2021, 2028))
+
+
 def seed_dimensoes(session: Session, *, anos: list[int] | None = None) -> None:
-    """Semeia as dimensões que são DADO de referência (limites + períodos)."""
+    """Semeia as dimensões que são DADO de referência (limites + períodos).
+
+    O horizonte default cobre 2021→2027 (Sprint 21: profundidade histórica + espaço para
+    as projeções). ``anos`` permite restringir em testes.
+    """
     seed_limites_legais(session)
-    seed_periodos(session, anos or [2023, 2024, 2025])
+    seed_periodos(session, anos or HORIZONTE_ANOS)
 
 
 def _normalizar_esfera(valor: str | None) -> str | None:
@@ -211,6 +236,68 @@ def get_ente(session: Session, cod_ibge: str) -> EnteOut:
             detail=f"Sem cadastro para o IBGE {cod_ibge} (ingerir siconfi_entes).",
         )
     return EnteOut.model_validate(ente)
+
+
+def buscar_entes(
+    session: Session,
+    *,
+    cods_escopo: set[str],
+    q: str | None = None,
+    uf: str | None = None,
+    limit: int = 20,
+) -> EntesBuscaResponse:
+    """Busca de entes **dentro do escopo** (seletor de ente e ⌘K).
+
+    Cada linha informa se o ente tem dado (``tem_dado``) e qual o período mais recente,
+    para que o seletor não ofereça um ente que abriria uma tela vazia.
+    """
+    rows, total = repository.buscar_entes(
+        session, cods_escopo=cods_escopo, q=q, uf=uf, limit=limit
+    )
+    itens: list[EnteBusca] = []
+    for ente in rows:
+        entregas = repository.periodos_com_dado(
+            session, cod_ibge=ente.cod_ibge, relatorio=RELATORIO_PADRAO
+        )
+        recente = periodo_util.mais_recente([e.periodo for e in entregas])
+        itens.append(
+            EnteBusca(
+                cod_ibge=ente.cod_ibge,
+                nome=ente.nome,
+                uf=ente.uf,
+                esfera=ente.esfera,
+                populacao=ente.populacao,
+                tem_dado=recente is not None,
+                periodo_mais_recente=recente,
+            )
+        )
+    return EntesBuscaResponse(data=itens, total=total, escopo_total=len(cods_escopo))
+
+
+def periodos_do_ente(
+    session: Session, cod_ibge: str, *, relatorio: str | None = None
+) -> PeriodosResponse:
+    """Períodos com dado do ente. O ``default`` é o mais recente — nunca um período fixo."""
+    entregas = repository.periodos_com_dado(session, cod_ibge=cod_ibge, relatorio=relatorio)
+    itens = [
+        PeriodoDisponivel(
+            periodo=e.periodo,
+            relatorio=e.relatorio,
+            versao_entrega=e.versao_entrega,
+            vigente=e.vigente,
+        )
+        for e in entregas
+    ]
+    alvo = relatorio or RELATORIO_PADRAO
+    default = periodo_util.mais_recente([i.periodo for i in itens if i.relatorio == alvo])
+    if default is None:
+        default = periodo_util.mais_recente([i.periodo for i in itens])
+    return PeriodosResponse(
+        cod_ibge=cod_ibge,
+        relatorio=relatorio,
+        default=default,
+        periodos=sorted(itens, key=lambda i: (i.relatorio, periodo_util.ordenar_chave(i.periodo))),
+    )
 
 
 def periodo_breadcrumb(session: Session, periodo: str) -> list[DrillNodeRef]:

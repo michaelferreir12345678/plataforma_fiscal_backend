@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
@@ -9,6 +10,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.modules.indicators.models import MartIndicador
+from app.modules.ingestion.models import DimEntrega, MartCoberturaFonte
 from app.modules.limits.models import DimProvidenciaLegal
 
 
@@ -24,6 +26,50 @@ def list_mart_by_periodo(
                 MartIndicador.versao_entrega == versao_entrega,
             )
             .order_by(MartIndicador.indicador)
+        )
+    )
+
+
+def valores_indicador_periodo(
+    session: Session, *, indicador: str, periodo: str
+) -> list[Decimal]:
+    """Valores (% RCL) do indicador no período, entre todos os entes apurados.
+
+    Base da mediana da coorte no cockpit. Usa apenas entregas **vigentes**, para não
+    misturar versões retificadas de entes diferentes na mesma estatística.
+    """
+    return [
+        v
+        for v in session.scalars(
+            select(MartIndicador.valor_pct_rcl)
+            .join(
+                DimEntrega,
+                (DimEntrega.cod_ibge == MartIndicador.cod_ibge)
+                & (DimEntrega.periodo == MartIndicador.periodo)
+                & (DimEntrega.versao_entrega == MartIndicador.versao_entrega)
+                & (DimEntrega.relatorio == "RREO"),
+            )
+            .where(
+                MartIndicador.indicador == indicador,
+                MartIndicador.periodo == periodo,
+                MartIndicador.valor_pct_rcl.is_not(None),
+                DimEntrega.vigente.is_(True),
+            )
+        )
+        if v is not None
+    ]
+
+
+def cobertura_do_ente(
+    session: Session, *, fonte: str, cod_ibge: str
+) -> list[MartCoberturaFonte]:
+    """Linhas de cobertura materializada do ente para uma fonte (camada de qualidade)."""
+    return list(
+        session.scalars(
+            select(MartCoberturaFonte).where(
+                MartCoberturaFonte.fonte == fonte,
+                MartCoberturaFonte.cod_ibge == cod_ibge,
+            )
         )
     )
 

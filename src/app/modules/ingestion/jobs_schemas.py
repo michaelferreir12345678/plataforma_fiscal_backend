@@ -1,0 +1,119 @@
+"""Schemas do job de ingestão (Central de Dados, Sprint 24)."""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class IngestJobCreate(BaseModel):
+    """Pedido de execução. ``anos`` para run/backfill (SICONFI); ``periodos`` para replay."""
+
+    fonte: str = Field(description="Ex.: siconfi_rreo, siconfi_rgf, ibge_populacao, ...")
+    tipo: str = Field(default="backfill", description="run | backfill | replay.")
+    entes: list[str] = Field(default_factory=list, description="Códigos IBGE.")
+    anos: list[int] = Field(default_factory=list, description="Exercícios (run/backfill).")
+    periodos: list[str] = Field(
+        default_factory=list, description="Períodos canônicos (replay, ex.: 2024-B6)."
+    )
+    versao: str | None = None
+    parametros: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Parâmetros completos do conector. Chaves conhecidas de RunRequest ficam no "
+            "topo; parâmetros específicos de arquivo ficam em `params`."
+        ),
+    )
+    confirmar: bool = Field(
+        default=False, description="Obrigatório quando a estimativa passa do limiar."
+    )
+
+
+class IngestJobItem(BaseModel):
+    """Resultado de uma unidade de trabalho (ente × período/ano)."""
+
+    ente: str
+    chave: str  # ano ou período
+    ok: bool
+    erro: str | None = None
+    silver_rows: int = 0
+    detalhe: dict[str, Any] | None = None
+
+
+class IngestJobResultado(BaseModel):
+    """Resumo pós-job: o que recalculou e o delta de cobertura."""
+
+    itens: list[IngestJobItem] = Field(default_factory=list)
+    indicadores_recalculados: list[str] = Field(default_factory=list)
+    cobertura_antes: int | None = None
+    cobertura_depois: int | None = None
+    delta_cobertura: int | None = None
+    erro_sistema: dict[str, Any] | None = None
+    resumo_execucao: dict[str, Any] | None = None
+
+
+class IngestionLogOut(BaseModel):
+    """Entrada estruturada de ``gold.ingestion_log`` ligada ao job."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    job_id: uuid.UUID
+    fonte: str
+    cod_ibge: str | None = None
+    periodo: str | None = None
+    versao: str | None = None
+    status: str
+    mensagem: str | None = None
+    ts: datetime
+
+
+class IngestJobOut(BaseModel):
+    """Estado completo de um job (contrato de progresso do frontend)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    org_id: uuid.UUID
+    criado_por: uuid.UUID | None = None
+    fonte: str
+    tipo: str
+    entes: list[str] = Field(default_factory=list)
+    periodos: list[str] = Field(default_factory=list)
+    parametros: dict | None = None
+    status: str
+    progresso_pct: int = Field(ge=0, le=100)
+    itens_total: int = Field(ge=0)
+    itens_ok: int = Field(ge=0)
+    itens_erro: int = Field(ge=0)
+    tentativas: int = Field(ge=0)
+    erro_resumo: str | None = None
+    log_ref: str | None = None
+    resultado: IngestJobResultado | None = None
+    logs: list[IngestionLogOut] = Field(default_factory=list)
+    criado_em: datetime | None = None
+    iniciado_em: datetime | None = None
+    terminado_em: datetime | None = None
+
+
+class IngestJobCreateResult(BaseModel):
+    """Resposta de criação: ou pede confirmação (ação custosa), ou devolve o job (202)."""
+
+    precisa_confirmacao: bool = False
+    estimativa_itens: int
+    limiar: int
+    job: IngestJobOut | None = None
+
+
+class RetificacaoItem(BaseModel):
+    """Uma entrega que superou a versão anterior (retificação bitemporal)."""
+
+    cod_ibge: str
+    relatorio: str
+    periodo: str
+    versao_entrega: str
+    homologada_em: datetime | None = None
+    versoes_anteriores: int

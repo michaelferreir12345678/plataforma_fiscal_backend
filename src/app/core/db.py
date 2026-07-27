@@ -21,15 +21,20 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
-from sqlalchemy import MetaData, create_engine, text
+from sqlalchemy import MetaData, create_engine, event, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.core.config import settings
+
+# Chave em ``session.info`` onde guardamos o contexto RLS, para reaplicá-lo a cada
+# transação (os GUCs são ``SET LOCAL`` — valem só até o commit/rollback).
+_RLS_CTX_KEY = "rls_ctx"
 
 
 def _json_serializer(obj: Any) -> str:
     """Serializa JSONB tolerando Decimal/date/datetime (bronze guarda payloads variados)."""
     return json.dumps(obj, ensure_ascii=False, default=str)
+
 
 # Convenção de nomes de constraints — migrations determinísticas/reversíveis.
 NAMING_CONVENTION = {
@@ -62,20 +67,31 @@ def apply_context(
 ) -> None:
     """Injeta o contexto multi-tenant na transação corrente da ``session``.
 
-    Deve ser chamada com uma transação ativa (o SQLAlchemy autoinicia ao executar).
+    Guarda o contexto em ``session.info`` para que seja **reaplicado a cada nova
+    transação** (workers que commitam por unidade — progresso incremental — não perdem o
+    isolamento). Deve ser chamada com uma transação ativa (o SQLAlchemy autoinicia).
     """
-    session.execute(
-        text("select set_config('app.current_org_id', :v, true)"),
-        {"v": str(org_id) if org_id else ""},
-    )
-    session.execute(
-        text("select set_config('app.current_user_id', :v, true)"),
-        {"v": str(user_id) if user_id else ""},
-    )
-    session.execute(
-        text("select set_config('app.is_admin', :v, true)"),
-        {"v": "on" if is_admin else "off"},
-    )
+    ctx = {
+        "org": str(org_id) if org_id else "",
+        "user": str(user_id) if user_id else "",
+        "admin": "on" if is_admin else "off",
+    }
+    session.info[_RLS_CTX_KEY] = ctx
+    _emit_context(session, ctx)
+
+
+def _emit_context(bind: Any, ctx: dict[str, str]) -> None:
+    bind.execute(text("select set_config('app.current_org_id', :v, true)"), {"v": ctx["org"]})
+    bind.execute(text("select set_config('app.current_user_id', :v, true)"), {"v": ctx["user"]})
+    bind.execute(text("select set_config('app.is_admin', :v, true)"), {"v": ctx["admin"]})
+
+
+@event.listens_for(Session, "after_begin")
+def _reapply_rls_context(session: Session, transaction: Any, connection: Any) -> None:
+    """Reaplica o contexto RLS em cada nova transação (os GUCs são ``SET LOCAL``)."""
+    ctx = session.info.get(_RLS_CTX_KEY)
+    if ctx is not None:
+        _emit_context(connection, ctx)
 
 
 @contextmanager

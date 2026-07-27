@@ -2,17 +2,19 @@ services:
   postgres:
     image: postgres:16
     container_name: plataforma_fiscal_pg
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: plataforma_fiscal
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD no arquivo .env}
+      POSTGRES_DB: ${POSTGRES_DB:-plataforma_fiscal}
     ports:
-      - "5432:5432"
+      # Somente o host local acessa o banco; em Ubuntu, não publique esta porta na internet.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       # ltree é distribuído com o postgres oficial; habilitado pela migration/bootstrap.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d plataforma_fiscal"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-plataforma_fiscal}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -20,37 +22,83 @@ services:
   redis:
     image: redis:7
     container_name: plataforma_fiscal_redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
     ports:
-      - "6379:6379"
+      # Redis não fica exposto na rede: somente processos do host e a rede interna do Compose.
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
+      start_period: 5s
 
   api:
     build: .
     container_name: plataforma_fiscal_api
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql+psycopg2://plataforma_app:plataforma_app@postgres:5432/plataforma_fiscal
-      DATABASE_ADMIN_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/plataforma_fiscal
-      DB_NAME: plataforma_fiscal
-      APP_DB_ROLE: plataforma_app
-      APP_DB_PASSWORD: plataforma_app
-      JWT_SECRET: dev-secret-nao-usar-em-producao
+      DATABASE_URL: postgresql+psycopg2://${APP_DB_ROLE:-plataforma_app}:${APP_DB_PASSWORD:?Defina APP_DB_PASSWORD no arquivo .env}@postgres:5432/${POSTGRES_DB:-plataforma_fiscal}
+      DATABASE_ADMIN_URL: postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD no arquivo .env}@postgres:5432/${POSTGRES_DB:-plataforma_fiscal}
+      DB_NAME: ${POSTGRES_DB:-plataforma_fiscal}
+      APP_DB_ROLE: ${APP_DB_ROLE:-plataforma_app}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Defina APP_DB_PASSWORD no arquivo .env}
+      JWT_SECRET: ${JWT_SECRET:?Defina JWT_SECRET no arquivo .env}
       REDIS_URL: redis://redis:6379/0
+      # Em Docker, a fila pertence ao serviço worker abaixo, não ao processo HTTP.
+      INGEST_WORKER_IN_PROCESS: "false"
       APP_ENV: docker
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     command: >
       sh -c "python -m scripts.bootstrap_db &&
              alembic upgrade head &&
              uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  worker:
+    build: .
+    container_name: plataforma_fiscal_ingest_worker
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 65m
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${APP_DB_ROLE:-plataforma_app}:${APP_DB_PASSWORD:?Defina APP_DB_PASSWORD no arquivo .env}@postgres:5432/${POSTGRES_DB:-plataforma_fiscal}
+      DATABASE_ADMIN_URL: postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD no arquivo .env}@postgres:5432/${POSTGRES_DB:-plataforma_fiscal}
+      DB_NAME: ${POSTGRES_DB:-plataforma_fiscal}
+      APP_DB_ROLE: ${APP_DB_ROLE:-plataforma_app}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Defina APP_DB_PASSWORD no arquivo .env}
+      REDIS_URL: redis://redis:6379/0
+      INGEST_WORKER_IN_PROCESS: "false"
+      APP_ENV: docker
+    # Bootstrap próprio: aguarda o schema, reconcilia leases vencidos e reentrega
+    # pendências sem depender do ciclo de vida da API.
+    command: ["python", "-m", "app.workers.ingest_worker"]
 
 volumes:
   pgdata:
+  redisdata:

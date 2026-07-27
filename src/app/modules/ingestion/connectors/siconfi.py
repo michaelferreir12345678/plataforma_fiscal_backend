@@ -11,6 +11,7 @@ Base legal/fonte: https://apidatalake.tesouro.gov.br/ords/siconfi/ (JSON públic
 from __future__ import annotations
 
 import calendar
+import unicodedata
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -62,9 +63,19 @@ def valid_time_from_periodo(periodo: str) -> date | None:
         return _period_end(ano, min(n * 2, 12))
     if tipo == "Q":  # quadrimestre
         return _period_end(ano, min(n * 4, 12))
+    if tipo == "S":  # semestre (RGF facultativo p/ municípios < 50 mil hab. — LRF art. 63)
+        return _period_end(ano, min(n * 6, 12))
     if tipo == "M":  # mensal
         return _period_end(ano, min(max(n, 1), 12))
     return _period_end(ano, 12)
+
+
+def esfera_siconfi(cod_ibge: str) -> str:
+    """Esfera do ente no vocabulário da API (``co_esfera``): UF de 2 dígitos ⇒ ``E``."""
+    cod = str(cod_ibge).strip()
+    if cod == "1":  # União
+        return "U"
+    return "E" if len(cod) == 2 else "M"
 
 
 class SiconfiConnectorBase(BaseConnector):
@@ -166,36 +177,60 @@ class RreoConnector(_RelatorioMixin, SiconfiConnectorBase):
 
 
 class RgfConnector(_RelatorioMixin, SiconfiConnectorBase):
+    """RGF quadrimestral (padrão) ou semestral (municípios < 50 mil hab., LRF art. 63).
+
+    O ``co_esfera`` sai do próprio código do ente (UF de 2 dígitos ⇒ estadual) e os
+    poderes consultados acompanham a esfera: municípios têm Executivo/Legislativo;
+    estados têm também Judiciário, Ministério Público e Defensoria.
+    """
+
     fonte = FONTE_RGF
     relatorio = "RGF"
     path = "tt/rgf"
-    default_periodos = (1, 2, 3)  # quadrimestres
+    default_periodos = (1, 2, 3)  # quadrimestres (semestral usa periodicidade="S" e 1..2)
     silver_model = SilverRgf
-    poderes = ("E", "L")  # Executivo + Legislativo (co_poder é obrigatório no tt/rgf)
+    poderes_municipais = ("E", "L")
+    poderes_estaduais = ("E", "L", "J", "M", "D")
 
     def extract(self, job: IngestionJob) -> Any:
         """O RGF exige ``co_poder``; busca cada poder e concatena (co_poder vem em cada linha)."""
+        esfera = job.params.get("co_esfera", "M")
+        poderes = self.poderes_estaduais if esfera == "E" else self.poderes_municipais
         registros: list[Any] = []
-        for poder in self.poderes:
+        for poder in poderes:
             registros.extend(self.client.get_records(self.path, {**job.params, "co_poder": poder}))
         return registros
 
+    def discover(self, state: dict[str, Any]) -> list[IngestionJob]:
+        periodicidade = str(state.get("periodicidade") or "Q").upper()
+        if periodicidade == "S" and not state.get("periodos"):
+            state = {**state, "periodos": [1, 2]}
+        self._periodicidade = periodicidade
+        try:
+            return super().discover(state)
+        finally:
+            self._periodicidade = "Q"
+
+    _periodicidade: str = "Q"
+
     def build_job(self, cod_ibge, ano, periodo_num, versao, homologada_em) -> IngestionJob:  # type: ignore[no-untyped-def]
+        periodicidade = self._periodicidade
+        meses_por_periodo = 6 if periodicidade == "S" else 4
         return IngestionJob(
             fonte=self.fonte,
             relatorio=self.relatorio,
             cod_ibge=cod_ibge,
             ano=ano,
-            periodo=f"{ano}-Q{periodo_num}",
+            periodo=f"{ano}-{periodicidade}{periodo_num}",
             versao=versao,
             homologada_em=homologada_em,
-            valid_time=_period_end(ano, periodo_num * 4),
+            valid_time=_period_end(ano, periodo_num * meses_por_periodo),
             params={
                 "an_exercicio": ano,
                 "nr_periodo": periodo_num,
-                "in_periodicidade": "Q",
+                "in_periodicidade": periodicidade,
                 "co_tipo_demonstrativo": "RGF",
-                "co_esfera": "M",  # MVP municipal (Fortaleza); esfera estadual usaria 'E'
+                "co_esfera": esfera_siconfi(cod_ibge),
                 "id_ente": cod_ibge,
             },
         )
@@ -333,7 +368,52 @@ class MscConnector(SiconfiConnectorBase):
         )
 
 
+def relatorio_do_entregavel(
+    entregavel: str | None, tipo_relatorio: str | None = None
+) -> str | None:
+    """Normaliza o ``entregavel`` do extrato para o relatório canônico da plataforma.
+
+    O extrato usa nomes por extenso ("Relatório Resumido de Execução Orçamentária",
+    "Relatório de Gestão Fiscal", "Balanço Anual (DCA)", "MSC Agregada/Encerramento"),
+    não as siglas — por isso o casamento é feito sobre o texto sem acento.
+    """
+    bruto = f"{entregavel or ''} {tipo_relatorio or ''}"
+    nfkd = unicodedata.normalize("NFKD", bruto)
+    texto = "".join(c for c in nfkd if not unicodedata.combining(c)).upper()
+    if "MSC" in texto or "MATRIZ DE SALDOS" in texto:
+        return "MSC"
+    if "RREO" in texto or "RESUMIDO DE EXECUCAO ORCAMENTARIA" in texto:
+        return "RREO"
+    if "RGF" in texto or "GESTAO FISCAL" in texto:
+        return "RGF"
+    if "DCA" in texto or "BALANCO ANUAL" in texto or "CONTAS ANUAIS" in texto:
+        return "DCA"
+    return None
+
+
+def periodo_canonico(ano: int, periodicidade: str | None, periodo_num: Any) -> str:
+    """Período canônico da plataforma a partir de (periodicidade, nº) do extrato."""
+    tipo = (periodicidade or "A").strip().upper()[:1]
+    try:
+        n = int(periodo_num)
+    except (TypeError, ValueError):
+        n = 0
+    if tipo == "A" or n <= 0:
+        return str(ano)
+    if tipo == "M":
+        return f"{ano}-M{n:02d}"
+    return f"{ano}-{tipo}{n}"
+
+
 class ExtratosConnector(SiconfiConnectorBase):
+    """Extrato de entregas: cada evento homologado da fonte (dispara retificações).
+
+    O extrato não traz número de versão; a **data de status** identifica o evento e é
+    preservada como ``versao``/``homologada_em``. O período é canonizado
+    (periodicidade + nº ⇒ ``2024-B6``/``2024-Q2``/``2024-M07``/...), casando com a
+    chave usada por ``gold.dim_entrega``.
+    """
+
     fonte = FONTE_EXTRATOS
     relatorio = "EXTRATOS"
     path = "tt/extrato_entregas"
@@ -349,7 +429,7 @@ class ExtratosConnector(SiconfiConnectorBase):
             versao=versao,
             homologada_em=homologada_em,
             valid_time=_period_end(ano, 12),
-            params={"an_exercicio": ano, "id_ente": cod_ibge},
+            params={"an_referencia": ano, "id_ente": cod_ibge},
         )
 
     def to_silver(
@@ -357,15 +437,23 @@ class ExtratosConnector(SiconfiConnectorBase):
     ) -> int:
         count = 0
         for item in payload:
+            relatorio = relatorio_do_entregavel(
+                _first(item, "entregavel", "relatorio"), _first(item, "tipo_relatorio")
+            )
+            if relatorio is None:
+                continue
+            ano = int(_first(item, "exercicio") or job.ano)
+            data_status = _first(item, "data_status", "homologada_em")
             stmt = (
                 pg_insert(SilverExtrato)
                 .values(
                     cod_ibge=job.cod_ibge,
-                    relatorio=_first(item, "tipo_relatorio", "relatorio", "co_tipo_relatorio")
-                    or "?",
-                    periodo=str(_first(item, "periodo", "exercicio") or job.periodo),
-                    homologada_em=_first(item, "data_status", "homologada_em"),
-                    versao=str(_first(item, "versao", "nr_entrega", "id_entrega") or "1"),
+                    relatorio=relatorio,
+                    periodo=periodo_canonico(
+                        ano, _first(item, "periodicidade"), _first(item, "periodo")
+                    ),
+                    homologada_em=data_status,
+                    versao=str(data_status or "1"),
                 )
                 .on_conflict_do_nothing(
                     index_elements=["cod_ibge", "relatorio", "periodo", "versao"]

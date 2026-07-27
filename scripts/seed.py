@@ -14,7 +14,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from app.core.db import admin_session  # noqa: E402
 from app.core.security import hash_password  # noqa: E402
+from app.modules.assistant import norma_seed  # noqa: E402
+from app.modules.assistant.embeddings import get_embedder  # noqa: E402
 from app.modules.catalog import service as catalog_service  # noqa: E402
+from app.modules.ingestion import integracoes  # noqa: E402
 from app.modules.limits import service as limits_service  # noqa: E402
 from app.modules.tenancy import repository  # noqa: E402
 from app.modules.tenancy.models import CAPACIDADES  # noqa: E402
@@ -30,7 +33,11 @@ def run() -> None:
     with admin_session() as s:
         catalog_service.seed_dimensoes(s)
         limits_service.seed_providencias(s)
+        gravados = norma_seed.seed_norma_corpus(s, get_embedder())
+        integracoes.seed_integracoes(s)
         print("[seed] dimensões (limites + períodos + providências) garantidas")
+        print(f"[seed] corpo normativo do assistente indexado ({gravados} dispositivos)")
+        print(f"[seed] integrações semeadas ({len(integracoes.FAMILIES)} fontes)")
 
     with admin_session() as s:
         if repository.get_usuario_by_email(s, ADMIN_MUNICIPIO_EMAIL) is not None:

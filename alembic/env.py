@@ -15,10 +15,13 @@ from app.modules.benchmark import models as _benchmark_models  # noqa: F401
 from app.modules.catalog import models as _catalog_models  # noqa: F401
 from app.modules.dashboard import models as _dashboard_models  # noqa: F401
 from app.modules.debt import models as _debt_models  # noqa: F401
+from app.modules.expense import models as _expense_models  # noqa: F401
 from app.modules.health_edu import models as _health_edu_models  # noqa: F401
 from app.modules.indicators import models as _indicators_models  # noqa: F401
+from app.modules.ingestion import jobs_models as _ingestion_jobs_models  # noqa: F401
 from app.modules.ingestion import models as _ingestion_models  # noqa: F401
 from app.modules.limits import models as _limits_models  # noqa: F401
+from app.modules.reports import models as _reports_models  # noqa: F401
 from app.modules.tenancy import models as _tenancy_models  # noqa: F401
 
 config = context.config

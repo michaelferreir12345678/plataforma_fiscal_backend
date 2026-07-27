@@ -16,6 +16,7 @@ from sqlalchemy import (
     Boolean,
     Date,
     DateTime,
+    ForeignKey,
     Integer,
     Numeric,
     String,
@@ -24,7 +25,7 @@ from sqlalchemy import (
     Uuid,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -383,6 +384,31 @@ class SiopsSaude(Base):
     versao_entrega: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class Integracao(Base):
+    """op.integracao — toggle global por família de fonte (Sprint 18, Módulo 17).
+
+    Config do plano de controle (sem ``org_id``/RLS): ``ativo=false`` pausa a orquestração
+    dos conectores da família. Vive no schema ``op`` (default do :class:`Base`).
+    """
+
+    __tablename__ = "integracao"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    codigo: Mapped[str] = mapped_column(String(24), nullable=False, unique=True)
+    nome: Mapped[str] = mapped_column(Text, nullable=False)
+    descricao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    categoria: Mapped[str] = mapped_column(String(24), nullable=False, default="nacional")
+    ativo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    fontes: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    atualizado_por: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    atualizado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    criado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class SiopeEducacao(Base):
     """silver.siope_educacao — indicadores SIOPE (educacao) em long format."""
 
@@ -408,6 +434,9 @@ class IngestionLog(Base):
     __table_args__ = {"schema": "gold"}
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("op.ingest_job.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     fonte: Mapped[str] = mapped_column(Text, nullable=False)
     cod_ibge: Mapped[str | None] = mapped_column(String(7), nullable=True)
     periodo: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -415,5 +444,61 @@ class IngestionLog(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False)
     mensagem: Mapped[str | None] = mapped_column(Text, nullable=True)
     ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class CatalogoFonte(Base):
+    """gold.catalogo_fonte — metadado por fonte (família, cadência, órgão). Sprint 21.
+
+    DADO semeado do ``CONNECTOR_REGISTRY`` (não código): descreve cada fonte para o
+    catálogo de ``GET /admin/ingestion/fontes`` e ancora a cadência usada no cálculo de
+    defasagem da cobertura.
+    """
+
+    __tablename__ = "catalogo_fonte"
+    __table_args__ = {"schema": "gold"}
+
+    fonte: Mapped[str] = mapped_column(Text, primary_key=True)
+    familia: Mapped[str] = mapped_column(Text, nullable=False)
+    relatorio: Mapped[str] = mapped_column(Text, nullable=False)
+    descricao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cadencia: Mapped[str] = mapped_column(Text, nullable=False)
+    orgao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    url_origem: Mapped[str | None] = mapped_column(Text, nullable=True)
+    escopo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Versão do parser que produz o silver desta fonte — muda quando o layout muda.
+    parser_versao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # "Se esta fonte cair, o que para?" — telas servidas e fontes das quais depende.
+    paginas_impactadas: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, default=list
+    )
+    dependencias: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
+    atualizado_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class MartCoberturaFonte(Base):
+    """gold.mart_cobertura_fonte — cobertura materializada (fonte×ente×período). Sprint 21.
+
+    Uma linha por combinação, com a versão vigente, a contagem de registros silver e a
+    defasagem em períodos (pela cadência). Municípios sem entrega no SICONFI simplesmente
+    **não têm linha** — a lacuna é da fonte, explícita, não um zero fabricado.
+    """
+
+    __tablename__ = "mart_cobertura_fonte"
+    __table_args__ = {"schema": "gold"}
+
+    fonte: Mapped[str] = mapped_column(Text, primary_key=True)
+    cod_ibge: Mapped[str] = mapped_column(String(7), primary_key=True)
+    periodo: Mapped[str] = mapped_column(Text, primary_key=True)
+    uf: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    ano: Mapped[int] = mapped_column(Integer, nullable=False)
+    n_registros: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    versao_entrega_vigente: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ingerido_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    defasagem_periodos: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    atualizado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

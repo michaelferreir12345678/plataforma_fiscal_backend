@@ -163,6 +163,48 @@ def list_limites(session: Session) -> list[DimLimiteLegal]:
     return list(session.scalars(select(DimLimiteLegal).order_by(DimLimiteLegal.indicador)))
 
 
+# --- busca de entes (seletor / ⌘K) ---
+def buscar_entes(
+    session: Session,
+    *,
+    cods_escopo: Iterable[str],
+    q: str | None = None,
+    uf: str | None = None,
+    limit: int = 20,
+) -> tuple[list[DimEnte], int]:
+    """Entes do escopo que casam com ``q`` (nome ou código) e ``uf``. Retorna (página, total).
+
+    A busca **nunca** sai do escopo: o conjunto vem de ``carteira_scope_ibges``, então um
+    ente fora da carteira/licença simplesmente não existe para o usuário.
+    """
+    cods = list(cods_escopo)
+    if not cods:
+        return [], 0
+    stmt = select(DimEnte).where(DimEnte.cod_ibge.in_(cods))
+    if uf:
+        stmt = stmt.where(func.substr(DimEnte.cod_ibge, 1, 2) == uf)
+    if q:
+        termo = f"%{q.strip()}%"
+        stmt = stmt.where(
+            (DimEnte.nome.ilike(termo)) | (DimEnte.cod_ibge.like(f"{q.strip()}%"))
+        )
+    total = int(session.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
+    rows = list(session.scalars(stmt.order_by(DimEnte.nome, DimEnte.cod_ibge).limit(limit)))
+    return rows, total
+
+
+def periodos_com_dado(
+    session: Session, *, cod_ibge: str, relatorio: str | None = None
+) -> list[DimEntrega]:
+    """Entregas vigentes do ente (uma por relatório/período) — os períodos navegáveis."""
+    stmt = select(DimEntrega).where(
+        DimEntrega.cod_ibge == cod_ibge, DimEntrega.vigente.is_(True)
+    )
+    if relatorio:
+        stmt = stmt.where(DimEntrega.relatorio == relatorio)
+    return list(session.scalars(stmt.order_by(DimEntrega.relatorio, DimEntrega.periodo)))
+
+
 # --- dim_periodo ---
 def list_periodos(session: Session) -> list[DimPeriodo]:
     return list(session.scalars(select(DimPeriodo)))

@@ -39,6 +39,10 @@ class RunRequest(BaseModel):
         default_factory=dict, description="Parâmetros extras (ex.: url, escopo, formato)."
     )
     force: bool = Field(default=False, description="Reprocessa o silver mesmo sem novo bronze.")
+    confirmar: bool = Field(
+        default=False,
+        description="Confirma explicitamente uma execução cuja estimativa excede o limiar.",
+    )
 
 
 class RunResult(BaseModel):
@@ -48,6 +52,26 @@ class RunResult(BaseModel):
     pulados: int
     silver_rows: int
     versoes_vigentes: list[str]
+    pausado: bool = Field(
+        default=False, description="Integração desligada (op.integracao): conector não rodou."
+    )
+    observacao: str | None = None
+
+
+# --- Integrações (op.integracao; Sprint 18) ---
+class IntegracaoOut(BaseModel):
+    id: str
+    codigo: str
+    nome: str
+    descricao: str | None = None
+    categoria: str
+    ativo: bool
+    fontes: list[str]
+    atualizado_em: datetime
+
+
+class IntegracaoPatch(BaseModel):
+    ativo: bool = Field(description="Liga/desliga a orquestração dos conectores da família.")
 
 
 class EntregaStatus(BaseModel):
@@ -70,3 +94,66 @@ class DataResponse(BaseModel):
     total: int
     rows: list[dict[str, Any]]
     source_ref: SourceRef | None = None
+
+
+# --- Catálogo de fontes e cobertura (Sprint 21 / instrumento da Sprint 20) ---
+class FonteCatalogo(BaseModel):
+    """Uma fonte do catálogo + observabilidade da última execução."""
+
+    fonte: str
+    familia: str
+    relatorio: str
+    descricao: str | None = None
+    cadencia: str
+    orgao: str | None = None
+    url_origem: str | None = None
+    escopo: str | None = None
+    parser_versao: str | None = None
+    paginas_impactadas: list[str] = Field(default_factory=list)
+    dependencias: list[str] = Field(default_factory=list)
+    ativo: bool = True
+    ultima_execucao: datetime | None = None
+    ultima_execucao_ok: datetime | None = None
+    periodo_mais_recente: str | None = None
+    defasagem_periodos: int | None = None
+    entes_cobertos: int = 0
+    registros_cobertos: int = Field(
+        default=0,
+        description="Soma de n_registros da cobertura materializada para a fonte.",
+    )
+
+
+class CoberturaItem(BaseModel):
+    fonte: str
+    cod_ibge: str
+    uf: str | None = None
+    ano: int
+    periodo: str
+    n_registros: int
+    versao_entrega_vigente: str | None = None
+    ingerido_em: datetime | None = None
+    defasagem_periodos: int | None = None
+
+
+class CoberturaResumo(BaseModel):
+    """Agregado para leitura rápida da matriz (a UI mostra sem paginar tudo)."""
+
+    total_linhas: int
+    entes: int
+    periodos: int
+    fontes: list[str]
+
+
+class CoberturaResponse(BaseModel):
+    data: list[CoberturaItem]
+    page: int
+    page_size: int = Field(
+        description=(
+            "Número de grupos fonte×cod_ibge×ano selecionados por página; data pode "
+            "conter mais linhas porque inclui todos os períodos dos grupos."
+        )
+    )
+    total: int = Field(
+        description="Total de grupos fonte×cod_ibge×ano após os filtros."
+    )
+    resumo: CoberturaResumo

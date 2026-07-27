@@ -2,18 +2,68 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterator
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.orm import Session
 
 from app.core.deps import Principal, get_db, require_capability
-from app.modules.ingestion import service
-from app.modules.ingestion.schemas import DataResponse, EntregaStatus, RunRequest, RunResult
+from app.core.errors import AppError
+from app.modules.ingestion import jobs_service, service
+from app.modules.ingestion.jobs_schemas import (
+    IngestJobCreate,
+    IngestJobCreateResult,
+    IngestJobOut,
+    RetificacaoItem,
+)
+from app.modules.ingestion.schemas import (
+    CoberturaResponse,
+    DataResponse,
+    EntregaStatus,
+    FonteCatalogo,
+    IntegracaoOut,
+    IntegracaoPatch,
+    RunRequest,
+)
 from app.shared.ingestion.client import ClientResolver, RealClientResolver
 
 router = APIRouter(prefix="/admin/ingestion", tags=["ingestion"])
+
+# Router separado para os toggles de integração (mesmo módulo, prefixo /admin/integracoes).
+integracoes_router = APIRouter(prefix="/admin/integracoes", tags=["admin"])
+
+
+@integracoes_router.get("", response_model=list[IntegracaoOut])
+def listar_integracoes(
+    _: Principal = Depends(require_capability("administrar")),
+    session: Session = Depends(get_db),
+) -> list[IntegracaoOut]:
+    """Uma linha por fonte das Sprints 1/1B, com o toggle atual (semeia se faltar)."""
+    return service.list_integracoes(session)
+
+
+@integracoes_router.patch("/{codigo}", response_model=IntegracaoOut)
+def patch_integracao(
+    codigo: str,
+    _: IntegracaoPatch,
+    __: Principal = Depends(require_capability("administrar")),
+) -> IntegracaoOut:
+    """Bloqueia mutação global por administradores de um tenant.
+
+    ``op.integracao`` não possui ``org_id``: pausar uma família interrompe a ingestão
+    de todas as organizações. Essa operação pertence ao control plane da plataforma.
+    """
+    raise AppError(
+        status=403,
+        title="Operação global restrita",
+        detail=(
+            f"A integração '{codigo.upper()}' só pode ser alterada pelo control plane "
+            "da plataforma."
+        ),
+        type_="urn:plataforma-fiscal:error:platform-admin-required",
+    )
 
 
 def get_client_resolver() -> Iterator[ClientResolver]:
@@ -34,28 +84,83 @@ def ingestion_status(
     return service.status(session, fonte=fonte)
 
 
-@router.post("/run", response_model=RunResult)
+@router.post("/run", response_model=IngestJobCreateResult, status_code=202)
 def ingestion_run(
     req: RunRequest,
-    _: Principal = Depends(require_capability("administrar")),
+    response: Response,
+    principal: Principal = Depends(require_capability("administrar")),
     session: Session = Depends(get_db),
     resolver: ClientResolver = Depends(get_client_resolver),
-) -> RunResult:
-    """Backfill controlado de uma fonte (idempotente; retificação por versão/homologação)."""
-    return service.run(session, resolver, req)
+) -> IngestJobCreateResult:
+    """Adapta o contrato legado para um job durável e retorna sem esperar a ingestão."""
+    result = jobs_service.criar_job_legacy_run(
+        session,
+        principal,
+        req,
+        eager_resolver=resolver,
+    )
+    if result.precisa_confirmacao:
+        response.status_code = 200
+    return result
 
 
-@router.post("/replay", response_model=RunResult)
+@router.post("/replay", response_model=IngestJobCreateResult, status_code=202)
 def ingestion_replay(
+    response: Response,
     ente: str = Query(..., description="Código IBGE do ente afetado."),
     periodo: str = Query(..., description="Período canônico (ex.: 2024-B6)."),
     fonte: str | None = Query(None, description="Fonte específica; vazio = todas."),
-    _: Principal = Depends(require_capability("administrar")),
+    confirmar: bool = Query(False, description="Confirma explicitamente uma ação custosa."),
+    principal: Principal = Depends(require_capability("administrar")),
     session: Session = Depends(get_db),
     resolver: ClientResolver = Depends(get_client_resolver),
-) -> RunResult:
-    """Reprocessa o silver do ente/período a partir do bronze (sem tocar a rede)."""
-    return service.replay(session, resolver, ente=ente, periodo=periodo, fonte=fonte)
+) -> IngestJobCreateResult:
+    """Adapta o replay legado para um job durável, executado fora da requisição."""
+    result = jobs_service.criar_job_legacy_replay(
+        session,
+        principal,
+        ente=ente,
+        periodo=periodo,
+        fonte=fonte,
+        confirmar=confirmar,
+        eager_resolver=resolver,
+    )
+    if result.precisa_confirmacao:
+        response.status_code = 200
+    return result
+
+
+@router.get("/fontes", response_model=list[FonteCatalogo])
+def ingestion_fontes(
+    _: Principal = Depends(require_capability("administrar")),
+    session: Session = Depends(get_db),
+) -> list[FonteCatalogo]:
+    """Catálogo das fontes + última execução/OK, período recente e defasagem (spec 1B)."""
+    return service.listar_fontes(session)
+
+
+@router.get("/cobertura", response_model=CoberturaResponse)
+def ingestion_cobertura(
+    fonte: str | None = Query(None, description="Filtra por fonte (ex.: siconfi_rreo)."),
+    uf: str | None = Query(None, description="Filtra pela UF (2 dígitos IBGE, ex.: 23=CE)."),
+    ano: int | None = Query(None, description="Filtra pelo exercício."),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=1000),
+    _: Principal = Depends(require_capability("administrar")),
+    session: Session = Depends(get_db),
+) -> CoberturaResponse:
+    """Matriz por período; cada página seleciona grupos completos fonte×ente×ano."""
+    return service.cobertura(session, fonte=fonte, uf=uf, ano=ano, page=page, page_size=page_size)
+
+
+@router.post("/cobertura/refresh", response_model=dict)
+def ingestion_cobertura_refresh(
+    _: Principal = Depends(require_capability("administrar")),
+    session: Session = Depends(get_db),
+) -> dict:
+    """Re-materializa ``gold.mart_cobertura_fonte`` a partir do estado atual do medallion."""
+    n = service.refresh_cobertura(session)
+    return {"linhas": n}
 
 
 @router.get("/data", response_model=DataResponse)
@@ -71,3 +176,70 @@ def ingestion_data(
 ) -> DataResponse:
     """Leitura silver 'as of': versão vigente (default) ou histórica (``as_of``)."""
     return service.read_data(session, fonte=fonte, ente=ente, periodo=periodo, as_of=as_of)
+
+
+# --- Central de Dados: jobs assíncronos de ingestão (Sprint 24) ---
+# Todos os pontos de entrada, inclusive /run e /replay, convergem para a mesma fila.
+@router.post("/jobs", response_model=IngestJobCreateResult, status_code=202)
+def criar_job(
+    body: IngestJobCreate,
+    response: Response,
+    principal: Principal = Depends(require_capability("administrar")),
+    session: Session = Depends(get_db),
+) -> IngestJobCreateResult:
+    """Enfileira um job de ingestão. Acima do limiar, exige ``confirmar=true`` (ação custosa)."""
+    result = jobs_service.criar_job(session, principal, body)
+    if result.precisa_confirmacao:
+        response.status_code = 200  # nada foi aceito ainda: aguarda confirmação
+    return result
+
+
+@router.get("/jobs", response_model=list[IngestJobOut])
+def listar_jobs(
+    status: str | None = Query(None, description="na_fila|executando|concluido|falhou|cancelado."),
+    fonte: str | None = Query(None, description="Filtra por fonte."),
+    _: Principal = Depends(require_capability("administrar")),
+    session: Session = Depends(get_db),
+) -> list[IngestJobOut]:
+    """Jobs do escopo (RLS por org): em andamento e histórico."""
+    return jobs_service.listar(session, status=status, fonte=fonte)
+
+
+@router.get("/jobs/{job_id}", response_model=IngestJobOut)
+def obter_job(
+    job_id: uuid.UUID,
+    _: Principal = Depends(require_capability("administrar")),
+    session: Session = Depends(get_db),
+) -> IngestJobOut:
+    """Progresso, erros por item e resultado (contrato do polling do frontend)."""
+    return jobs_service.obter(session, job_id)
+
+
+@router.post("/jobs/{job_id}/cancelar", response_model=IngestJobOut)
+def cancelar_job(
+    job_id: uuid.UUID,
+    principal: Principal = Depends(require_capability("administrar")),
+    session: Session = Depends(get_db),
+) -> IngestJobOut:
+    """Cancela um job **só enquanto está na fila** (impede a execução)."""
+    return jobs_service.cancelar(session, principal, job_id)
+
+
+@router.post("/jobs/{job_id}/retry", response_model=IngestJobOut)
+def retry_job(
+    job_id: uuid.UUID,
+    principal: Principal = Depends(require_capability("administrar")),
+    session: Session = Depends(get_db),
+) -> IngestJobOut:
+    """Reexecuta um job que **falhou**, reprocessando apenas as unidades com erro."""
+    return jobs_service.retry(session, principal, job_id)
+
+
+@router.get("/retificacoes", response_model=list[RetificacaoItem])
+def listar_retificacoes(
+    desde: datetime | None = Query(None, description="Só retificações homologadas a partir daqui."),
+    _: Principal = Depends(require_capability("administrar")),
+    session: Session = Depends(get_db),
+) -> list[RetificacaoItem]:
+    """Entregas que superaram uma versão anterior (retificação bitemporal, §6.5)."""
+    return jobs_service.retificacoes(session, desde=desde)

@@ -10,13 +10,18 @@ else
 	PY ?= ./.venv/bin/python
 endif
 
-.PHONY: help up down bootstrap migrate revision seed test lint fmt run install
+.PHONY: help up down redis worker worker-logs queue-info smoke-infra bootstrap migrate revision seed test lint fmt run install
 
 help:
 	@echo "Comandos disponiveis:"
 	@echo "  make install    - instala deps no venv (-e .[dev])"
-	@echo "  make up          - sobe docker-compose (api, postgres, redis)"
+	@echo "  make up          - sobe Docker (api, postgres, Redis e worker RQ)"
 	@echo "  make down        - derruba docker-compose"
+	@echo "  make redis       - sobe somente o Redis persistente"
+	@echo "  make worker      - sobe o worker (e dependencias saudaveis)"
+	@echo "  make worker-logs - acompanha os logs do worker"
+	@echo "  make queue-info  - mostra filas, workers e contagens do RQ"
+	@echo "  make smoke-infra - valida Redis, migration/head, API e RQ"
 	@echo "  make bootstrap   - cria banco/role/extensao no Postgres local"
 	@echo "  make migrate     - alembic upgrade head"
 	@echo "  make revision m= - nova migration (autogenerate)"
@@ -34,6 +39,24 @@ up:
 
 down:
 	docker compose down
+
+redis:
+	docker compose up -d redis
+
+worker:
+	docker compose up -d --build worker
+
+worker-logs:
+	docker compose logs -f --tail=200 worker
+
+queue-info:
+	docker compose exec -T worker rq info --url redis://redis:6379/0
+
+smoke-infra:
+	docker compose exec -T redis redis-cli ping
+	docker compose exec -T api alembic current
+	docker compose exec -T api python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read().decode())"
+	docker compose exec -T worker rq info --url redis://redis:6379/0
 
 bootstrap:
 	$(PY) -m scripts.bootstrap_db

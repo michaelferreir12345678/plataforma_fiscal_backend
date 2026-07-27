@@ -8,22 +8,29 @@ controle (protegidos na borda pela capacidade ``administrar``).
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
     Uuid,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
+
+# Métricas de cobrança suportadas (op.assinatura.metrica_cobranca / op.organizacao).
+METRICAS_COBRANCA: tuple[str, ...] = ("por_ente", "por_populacao", "por_consulta_ia", "fixo")
 
 # Capacidades RBAC (op.papel_permissao.capacidade)
 CAPACIDADES: tuple[str, ...] = (
@@ -161,5 +168,72 @@ class AuditLog(Base):
     acao: Mapped[str] = mapped_column(Text, nullable=False)
     recurso: Mapped[str] = mapped_column(Text, nullable=False)
     ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class Assinatura(Base):
+    """op.assinatura — plano/preço/métrica de cobrança da organização (RLS por org_id)."""
+
+    __tablename__ = "assinatura"
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('ativa', 'suspensa', 'cancelada')", name="ck_assinatura_status"
+        ),
+        UniqueConstraint("org_id", name="uq_assinatura_org"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organizacao.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    plano: Mapped[str] = mapped_column(Text, nullable=False, default="padrao")
+    metrica_cobranca: Mapped[str] = mapped_column(Text, nullable=False)
+    preco_unitario: Mapped[Decimal] = mapped_column(Numeric, nullable=False, default=Decimal("0"))
+    moeda: Mapped[str] = mapped_column(String(3), nullable=False, default="BRL")
+    ciclo: Mapped[str] = mapped_column(String(12), nullable=False, default="mensal")
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="ativa")
+    inicio_vigencia: Mapped[date | None] = mapped_column(Date, nullable=True)
+    fim_vigencia: Mapped[date | None] = mapped_column(Date, nullable=True)
+    criada_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    atualizada_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class Fatura(Base):
+    """op.fatura — fatura por competência com empenho/contrato e memória (RLS por org_id)."""
+
+    __tablename__ = "fatura"
+    __table_args__ = (
+        CheckConstraint("status in ('aberta', 'paga', 'cancelada')", name="ck_fatura_status"),
+        UniqueConstraint("org_id", "competencia", name="uq_fatura_org_competencia"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organizacao.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    assinatura_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("assinatura.id", ondelete="SET NULL"), nullable=True
+    )
+    competencia: Mapped[str] = mapped_column(String(7), nullable=False)  # YYYY-MM
+    metrica_cobranca: Mapped[str] = mapped_column(Text, nullable=False)
+    quantidade: Mapped[Decimal] = mapped_column(Numeric, nullable=False, default=Decimal("0"))
+    preco_unitario: Mapped[Decimal] = mapped_column(Numeric, nullable=False, default=Decimal("0"))
+    valor_total: Mapped[Decimal] = mapped_column(Numeric, nullable=False, default=Decimal("0"))
+    moeda: Mapped[str] = mapped_column(String(3), nullable=False, default="BRL")
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="aberta")
+    empenho_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    contrato_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    vencimento: Mapped[date | None] = mapped_column(Date, nullable=True)
+    memoria: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    source_refs: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    emitida_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    criada_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
