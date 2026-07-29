@@ -20,7 +20,7 @@ REPO_FRONT=${REPO_FRONT:-git@github.com:michaelferreir12345678/plataforma_fiscal
 log() { echo -e "\n\033[1;36m==> $*\033[0m"; }
 
 # --------------------------------------------------------------------------- #
-log "1/8  Identidade da instância"
+log "1/9  Identidade da instância"
 TOKEN=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" \
   -H "X-aws-ec2-metadata-token-ttl-seconds: 300" || true)
 IP_PUBLICO=$(curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" \
@@ -30,7 +30,7 @@ echo "    IP público: $IP_PUBLICO"
 . /etc/os-release; echo "    SO: $PRETTY_NAME (codename: ${VERSION_CODENAME:-?})"
 
 # --------------------------------------------------------------------------- #
-log "2/8  Docker"
+log "2/9  Docker"
 if ! command -v docker >/dev/null 2>&1; then
   sudo apt-get update -qq
   sudo apt-get install -y -qq ca-certificates curl gnupg git nginx openssl
@@ -61,7 +61,7 @@ command -v nginx >/dev/null || sudo apt-get install -y -qq nginx
 DC="sudo docker compose"; $DC version >/dev/null 2>&1 || DC="sudo docker-compose"
 
 # --------------------------------------------------------------------------- #
-log "3/8  Repositórios"
+log "3/9  Repositórios"
 sudo mkdir -p "$RAIZ" && sudo chown "$USER:$USER" "$RAIZ"
 
 if [[ "$REPO_BACK" == git@* ]]; then
@@ -104,7 +104,7 @@ for par in "backend:$REPO_BACK" "frontend:$REPO_FRONT"; do
 done
 
 # --------------------------------------------------------------------------- #
-log "4/8  Segredos (gerados aqui; nunca trafegam)"
+log "4/9  Segredos (gerados aqui; nunca trafegam)"
 ENV="$RAIZ/backend/.env"
 if [ ! -f "$ENV" ]; then
   umask 077
@@ -128,7 +128,7 @@ else
 fi
 
 # --------------------------------------------------------------------------- #
-log "5/8  Publicação local da API (só 127.0.0.1)"
+log "5/9  Publicação local da API (só 127.0.0.1)"
 cat > "$RAIZ/backend/docker-compose.ec2.yml" <<'EOF'
 # Override de deploy: o compose de produção deixa a API em `expose` porque quem publica
 # é o proxy. Aqui o proxy é o nginx do host, então a porta abre apenas no loopback.
@@ -138,7 +138,7 @@ services:
       - "127.0.0.1:8000:8000"
 EOF
 
-log "6/8  Subindo os serviços (migrate roda antes da API)"
+log "6/9  Subindo os serviços (migrate roda antes da API)"
 cd "$RAIZ/backend"
 $DC -f docker-compose.prod.yml -f docker-compose.ec2.yml up -d --build
 echo "    aguardando a API responder…"
@@ -149,7 +149,7 @@ for i in $(seq 1 60); do
 done
 
 # --------------------------------------------------------------------------- #
-log "7/8  Frontend (build em container: sem Node no host)"
+log "7/9  Frontend (build em container: sem Node no host)"
 cd "$RAIZ/frontend"
 sudo docker run --rm -v "$PWD":/app -w /app node:22-alpine sh -lc '
   npm ci --silent && VITE_API_BASE_URL=/api npm run build
@@ -187,13 +187,39 @@ sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t && sudo systemctl reload nginx
 
 # --------------------------------------------------------------------------- #
-log "8/8  Seed (organizações e usuários de exemplo)"
+log "8/9  Seed (organizações e usuários de exemplo)"
 cd "$RAIZ/backend"
 if $DC -f docker-compose.prod.yml -f docker-compose.ec2.yml run --rm api python -m scripts.seed; then
   echo "    seed aplicado"
 else
   echo "    seed já aplicado ou falhou — verifique acima (não é fatal para o serviço)"
 fi
+
+# --------------------------------------------------------------------------- #
+log "9/9  Conformação de dim_ente (cadastro dos entes da carteira)"
+# Sem esta etapa a instalação nasce navegável mas **inerte**: os dados fiscais entram,
+# e o cockpit responde 422 "dim_ente sem esfera". Faz sentido — sem esfera não há limite
+# legal aplicável, porque município e estado têm tetos diferentes —, mas o operador não
+# tem como adivinhar que falta o cadastro. Então o bootstrap o resolve.
+$DC -f docker-compose.prod.yml -f docker-compose.ec2.yml run --rm api python - <<'PYEOF' || echo "    (conformação pulada; rode depois pela Central de Dados)"
+from app.core.db import admin_session
+from app.modules.ingestion import service
+from app.modules.ingestion.schemas import RunRequest
+from app.shared.ingestion.client import RealClientResolver
+from sqlalchemy import text
+
+with admin_session() as s:
+    entes = [r[0] for r in s.execute(text("SELECT DISTINCT cod_ibge FROM op.carteira_ente")).all()]
+print(f"entes da carteira: {entes or 'nenhum'}")
+if entes:
+    resolver = RealClientResolver()
+    try:
+        with admin_session() as s:
+            r = service.run(s, resolver, RunRequest(fonte="siconfi_entes", entes=entes, anos=[]))
+            print(f"cadastro ingerido: {r.ingeridos}/{r.total_jobs}")
+    finally:
+        resolver.close()
+PYEOF
 
 log "PRONTO"
 echo "  Frontend : http://$IP_PUBLICO"
