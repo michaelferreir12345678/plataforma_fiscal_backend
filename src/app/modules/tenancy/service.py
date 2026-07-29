@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.db import admin_session
@@ -26,6 +27,7 @@ from app.modules.tenancy.schemas import (
     CarteiraEnteOut,
     CarteiraLoteInput,
     CarteiraLoteResult,
+    EntePadrao,
     FaturaEmitInput,
     FaturaOut,
     FaturaPreview,
@@ -77,8 +79,40 @@ def authenticate(email: str, senha: str) -> TokenResponse:
     return TokenResponse(access_token=token)
 
 
+def _ente_padrao(session: Session, org: MembershipInfo | None) -> EntePadrao | None:
+    """Ente com que a sessão abre, derivado do **tipo da conta**.
+
+    Conta estadual abre no próprio Governo do Estado (código IBGE de 2 dígitos); as demais,
+    no primeiro ente da carteira. A escolha é do backend porque só ele sabe o tipo da conta
+    — no frontend isso virava uma variável de ambiente única, e o usuário da Sefaz abria em
+    Fortaleza toda vez.
+    """
+    from app.modules.catalog.models import DimEnte
+    from app.modules.tenancy.models import CarteiraEnte
+
+    if org is None:
+        return None
+    codigos = list(
+        session.scalars(
+            select(CarteiraEnte.cod_ibge).where(CarteiraEnte.org_id == org.org_id)
+        )
+    )
+    if org.escopo_ibges is not None:
+        # Membro restrito a um subconjunto: abrir fora dele daria 403 na primeira tela.
+        permitidos = set(org.escopo_ibges)
+        codigos = [c for c in codigos if c in permitidos] or sorted(permitidos)
+    if not codigos:
+        return None
+    estaduais = sorted(c for c in codigos if len(c) < 7)
+    escolhido = (
+        estaduais[0] if org.tipo_conta == "estado" and estaduais else sorted(codigos)[0]
+    )
+    ente = session.get(DimEnte, escolhido)
+    return EntePadrao(cod_ibge=escolhido, nome=(ente.nome if ente else escolhido))
+
+
 def build_me(usuario_id: uuid.UUID, org_ativa_id: uuid.UUID | None) -> MeResponse:
-    """Monta a resposta de ``GET /me`` (usuário + vínculos + org ativa)."""
+    """Monta a resposta de ``GET /me`` (usuário + vínculos + org ativa + ente padrão)."""
     with admin_session() as session:
         usuario = repository.get_usuario(session, usuario_id)
         if usuario is None:
@@ -93,6 +127,7 @@ def build_me(usuario_id: uuid.UUID, org_ativa_id: uuid.UUID | None) -> MeRespons
             org_ativa=org_ativa,
             memberships=infos,
             is_superuser=usuario.is_superuser,
+            ente_padrao=_ente_padrao(session, org_ativa),
         )
 
 

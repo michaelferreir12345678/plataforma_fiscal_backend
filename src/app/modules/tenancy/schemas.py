@@ -40,12 +40,27 @@ class MembershipInfo(BaseModel):
     )
 
 
+class EntePadrao(BaseModel):
+    """Ente com que a sessão deve abrir.
+
+    Quem decide é o backend, porque a resposta depende do **tipo da conta**: uma Sefaz
+    abre no próprio Governo do Estado; uma prefeitura, no seu município. Deixar isso numa
+    variável de ambiente do frontend fazia todo mundo abrir em Fortaleza — inclusive o
+    usuário estadual, que precisava trocar de ente a cada login.
+    """
+
+    cod_ibge: str
+    nome: str
+
+
 class MeResponse(BaseModel):
     usuario_id: uuid.UUID
     email: EmailStr
     nome: str
     org_ativa: MembershipInfo | None = None
     memberships: list[MembershipInfo] = Field(default_factory=list)
+    #: Sugestão de abertura; o contexto salvo do usuário continua tendo precedência.
+    ente_padrao: EntePadrao | None = None
     #: Operador da plataforma (Sprint 19). A UI usa para não oferecer uma rota que
     #: devolveria 403; a garantia continua sendo do backend, não desta flag.
     is_superuser: bool = False

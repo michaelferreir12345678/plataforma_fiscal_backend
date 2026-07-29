@@ -9,6 +9,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
@@ -308,6 +309,41 @@ def obter_dcl(
         return None
 
 
+def _capag_ausente(session: Session, cod_ibge: str, ano_ref: int) -> AppError:
+    """Explica **por que** não há CAPAG para o exercício, em vez de só dizer que não há.
+
+    A CAPAG não é apurada continuamente: o Tesouro publica uma vez por exercício, a partir
+    das contas do ano anterior já encerradas e homologadas. Consultar um quadrimestre de um
+    ano em curso e receber "sem dado" faz o gestor procurar defeito na plataforma — quando
+    a resposta é que a nota daquele exercício ainda não saiu.
+    """
+    escopo = "municípios" if len(cod_ibge) == 7 else "estados"
+    disponiveis = sorted(
+        session.scalars(
+            select(FatoCapag.ano_ref).where(FatoCapag.cod_ibge == cod_ibge).distinct()
+        )
+    )
+    if disponiveis:
+        ultimo = disponiveis[-1]
+        onde = (
+            f"A mais recente disponível é a de {ultimo} "
+            f"(apurada sobre o exercício de {ultimo - 1})."
+        )
+    else:
+        onde = "Não há nenhuma publicação da CAPAG carregada para este ente."
+    return AppError(
+        status=404,
+        title=f"CAPAG de {ano_ref} ainda não publicada",
+        detail=(
+            f"A CAPAG é publicada uma vez por exercício pelo Tesouro Nacional, a partir "
+            f"das contas do ano anterior já encerradas — não acompanha o quadrimestre. "
+            f"A nota de {ano_ref} para {escopo} ainda não foi divulgada. {onde} "
+            f"Enquanto a nova não sai, a nota vigente continua sendo a última publicada."
+        ),
+        type_="urn:plataforma-fiscal:error:capag-nao-publicada",
+    )
+
+
 def _relatorio_capag(cod_ibge: str) -> str:
     """Município e estado têm publicações CAPAG distintas — e entregas distintas.
 
@@ -327,12 +363,19 @@ def _ensure_capag(
     as_of: datetime | None,
 ) -> FatoCapag:
     periodo = str(ano_ref)
-    versao = _resolve_global(
-        session,
-        relatorio=_relatorio_capag(cod_ibge),
-        periodo=periodo,
-        as_of=as_of,
-    )
+    try:
+        versao = _resolve_global(
+            session,
+            relatorio=_relatorio_capag(cod_ibge),
+            periodo=periodo,
+            as_of=as_of,
+        )
+    except AppError as exc:
+        if exc.status != 404:
+            raise
+        # "Sem entrega nacional CAPAG-EST para 2026" não diz nada ao gestor; a mensagem
+        # do domínio diz por que não há e qual é a nota que continua valendo.
+        raise _capag_ausente(session, cod_ibge, ano_ref) from exc
     fato = repository.get_fato_capag(
         session,
         cod_ibge=cod_ibge,
@@ -348,10 +391,18 @@ def _ensure_capag(
         versao_entrega=versao,
     )
     if silver is None:
+        # A publicação daquele exercício existe, mas não traz este ente — acontece com
+        # município que não entregou as contas a tempo. Também merece explicação, e não
+        # a chave técnica da entrega.
         raise AppError(
             status=404,
-            title="CAPAG do ente ausente",
-            detail=f"Entrega CAPAG {ano_ref}/{versao} não contém {cod_ibge}.",
+            title=f"Ente sem CAPAG em {ano_ref}",
+            detail=(
+                f"A publicação da CAPAG de {ano_ref} não inclui este ente. Isso ocorre "
+                "quando as contas do exercício anterior não foram entregues ou "
+                "homologadas a tempo da apuração do Tesouro."
+            ),
+            type_="urn:plataforma-fiscal:error:capag-ente-ausente",
         )
     repository.upsert_fato_capag(
         session,
