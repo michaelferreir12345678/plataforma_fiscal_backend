@@ -10,8 +10,12 @@
 set -euo pipefail
 
 RAIZ=/opt/plataforma
-REPO_BACK=https://github.com/michaelferreir12345678/plataforma_fiscal_backend.git
-REPO_FRONT=https://github.com/michaelferreir12345678/plataforma_fiscal_frontend.git
+# Os repositórios são privados: o clone vai por SSH com **chave de deploy** — uma por
+# repositório, somente leitura, revogável de dentro do próprio repositório. A chave privada
+# nasce e morre nesta instância; nada é digitado nem colado.
+# Repositório público? Basta exportar as URLs https antes de rodar.
+REPO_BACK=${REPO_BACK:-git@github.com:michaelferreir12345678/plataforma_fiscal_backend.git}
+REPO_FRONT=${REPO_FRONT:-git@github.com:michaelferreir12345678/plataforma_fiscal_frontend.git}
 
 log() { echo -e "\n\033[1;36m==> $*\033[0m"; }
 
@@ -59,6 +63,37 @@ DC="sudo docker compose"; $DC version >/dev/null 2>&1 || DC="sudo docker-compose
 # --------------------------------------------------------------------------- #
 log "3/8  Repositórios"
 sudo mkdir -p "$RAIZ" && sudo chown "$USER:$USER" "$RAIZ"
+
+if [[ "$REPO_BACK" == git@* ]]; then
+  CHAVE="$HOME/.ssh/plataforma_deploy"
+  mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+  ssh-keygen -F github.com >/dev/null 2>&1 || \
+    ssh-keyscan -t ed25519 github.com >> "$HOME/.ssh/known_hosts" 2>/dev/null
+  if [ ! -f "$CHAVE" ]; then
+    ssh-keygen -t ed25519 -N "" -C "deploy-plataforma@ec2" -f "$CHAVE" >/dev/null
+  fi
+  export GIT_SSH_COMMAND="ssh -i $CHAVE -o IdentitiesOnly=yes"
+  if ! ssh -i "$CHAVE" -o IdentitiesOnly=yes -o BatchMode=yes -T git@github.com 2>&1 | grep -q "successfully authenticated"; then
+    cat <<AVISO
+
+  A chave de deploy ainda não foi autorizada no GitHub. Copie a linha abaixo e
+  cadastre-a em CADA repositório (backend e frontend):
+
+      Settings > Deploy keys > Add deploy key
+      (deixe "Allow write access" DESMARCADO — o deploy só precisa ler)
+
+  ------------------------------------------------------------------
+$(cat "$CHAVE.pub")
+  ------------------------------------------------------------------
+
+  Feito isso, rode este script de novo. Ele continua de onde parou.
+
+AVISO
+    exit 2
+  fi
+  echo "    chave de deploy autorizada"
+fi
+
 for par in "backend:$REPO_BACK" "frontend:$REPO_FRONT"; do
   dir="${par%%:*}"; url="${par#*:}"
   if [ -d "$RAIZ/$dir/.git" ]; then
