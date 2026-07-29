@@ -26,7 +26,7 @@ from app.modules.tenancy.models import CAPACIDADES, Licenca  # noqa: E402
 ADMIN_MUNICIPIO_EMAIL = "admin@municipio.gov.br"
 ADMIN_ESTADO_EMAIL = "admin@sefaz.gov.br"
 GESTOR_ESTADO_EMAIL = "gestor@sefaz.gov.br"
-SUPERUSER_EMAIL = "operador@erario.com.br"
+SUPERUSER_EMAIL = "operador@prumo.com.br"
 SENHA_PADRAO = "senha1234"  # noqa: S105 — apenas dados de exemplo local
 
 

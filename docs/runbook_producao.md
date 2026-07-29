@@ -69,7 +69,7 @@ docker compose -f docker-compose.prod.yml exec api python -m scripts.materializa
 ```
 
 **O seed de demonstração (`scripts/seed.py`) não vai para produção.** Ele cria
-organizações de exemplo e o operador `operador@erario.com.br` com senha conhecida. Em
+organizações de exemplo e o operador `operador@prumo.com.br` com senha conhecida. Em
 produção, a primeira organização nasce pelo control plane:
 `POST /platform/orgs` — e o primeiro superuser é criado uma única vez, à mão, com senha
 gerada na hora.

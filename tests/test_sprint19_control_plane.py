@@ -32,7 +32,7 @@ PERIODO = "2024-B6"
 @pytest.fixture
 def superuser():
     """Operador da plataforma: existe fora de qualquer organização (sem membership)."""
-    email = f"plataforma-{uuid.uuid4().hex}@erario.gov.br"
+    email = f"plataforma-{uuid.uuid4().hex}@prumo.gov.br"
     senha = "senha1234"
     with admin_session() as s:
         usuario = repository.create_usuario(
