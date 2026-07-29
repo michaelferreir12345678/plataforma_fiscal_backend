@@ -66,10 +66,39 @@ class GroundedContext:
     source_refs: list[dict] = field(default_factory=list)
 
 
-def indicadores_relevantes(pergunta: str) -> set[str]:
-    """Indicadores citados na pergunta. Vazio ⇒ visão geral (todos os fatos)."""
+# Página do produto → indicadores que ela mostra (Sprint 25E). "Pergunte sobre esta
+# tela" só é honesto se a tela realmente restringir o contexto recuperado.
+_PAGINA_INDICADORES: dict[str, set[str]] = {
+    "/pessoal": {"pessoal_executivo", "rcl"},
+    "/divida": {"divida_consolidada_liquida", "rcl"},
+    "/resultado": {"resultado_primario", "rcl"},
+    "/saude-educacao": {"saude_asps", "educacao_mde"},
+    "/receita": {"rcl"},
+    "/despesa": {"pessoal_executivo", "rcl"},
+    "/limites": {"pessoal_executivo", "divida_consolidada_liquida", "rcl"},
+    "/caixa": {"rcl"},
+}
+
+
+def indicadores_da_pagina(pagina: str | None) -> set[str]:
+    """Indicadores da tela de onde veio a pergunta (rota do frontend)."""
+    if not pagina:
+        return set()
+    return set(_PAGINA_INDICADORES.get(pagina.strip().rstrip("/").lower() or "/", set()))
+
+
+def indicadores_relevantes(pergunta: str, pagina: str | None = None) -> set[str]:
+    """Indicadores citados na pergunta — ou os da tela atual. Vazio ⇒ visão geral.
+
+    A pergunta manda: quem está na tela de dívida e pergunta sobre pessoal quer falar de
+    pessoal. A página só entra quando a pergunta não nomeia nenhum indicador ("e isto
+    aqui, está bom?"), que é justamente o caso em que o contexto da tela é a informação
+    que falta.
+    """
     tokens = set(vectors.tokenize(pergunta))
     alvos = {codigo for termo, codigo in _KEYWORD_INDICADOR.items() if termo in tokens}
+    if not alvos:
+        alvos = indicadores_da_pagina(pagina)
     # Tetos usam a RCL como denominador — traga a RCL como contexto.
     if alvos & {"pessoal_executivo", "divida_consolidada_liquida"}:
         alvos.add("rcl")
@@ -205,6 +234,7 @@ def build_context(
     as_of: datetime | None,
     top_k: int,
     todos_indicadores: bool = False,
+    pagina: str | None = None,
 ) -> GroundedContext:
     """Monta o contexto fundamentado (fatos + normas + incompletudes) para o serviço."""
     effective_as_of = as_of or datetime.now(UTC)
@@ -219,7 +249,7 @@ def build_context(
         as_of=effective_as_of,
     )
 
-    alvos = indicadores_relevantes(pergunta)
+    alvos = indicadores_relevantes(pergunta, pagina)
     if resolved_periodo is not None:
         fatos, source_refs, header = retrieve_indicadores(
             session, principal, cod_ibge=cod_ibge, periodo=resolved_periodo, as_of=effective_as_of

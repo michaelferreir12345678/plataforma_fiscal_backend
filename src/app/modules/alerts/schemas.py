@@ -54,6 +54,29 @@ class AlertaPatch(BaseModel):
     status: str = Field(description="nova | reconhecida | resolvida | descartada.")
 
 
+class HistoricoItem(AlertaOut):
+    """Alerta já tratado, com a assinatura de quem o fechou (Sprint 25E)."""
+
+    resolvido_em: datetime | None = None
+    resolvido_por: str | None = None  # e-mail do usuário; None se a conta foi removida
+    dias_ate_resolver: int | None = None
+
+
+class HistoricoAlertasResponse(BaseModel):
+    """Fila **fora** da tela do dia: o que já foi tratado, e em quanto tempo."""
+
+    escopo: str  # "ente" | "carteira"
+    cod_ibge: str | None = None
+    gerado_em: datetime
+    total: int
+    resolvidos: int
+    descartados: int
+    tempo_medio_dias: float | None = None
+    por_categoria: dict[str, int] = Field(default_factory=dict)
+    itens: list[HistoricoItem] = Field(default_factory=list)
+    observacao: str | None = None
+
+
 class CalendarioItem(BaseModel):
     relatorio: str
     periodo: str

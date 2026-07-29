@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -66,6 +67,48 @@ class ProjecaoResponse(BaseModel):
     projecao: list[PontoProjecao]
     cruzamento: CruzamentoLimite
     memoria: dict
+    source_ref: SourceRef
+
+
+class ModeloComparado(BaseModel):
+    """Uma das três camadas de projeção, lado a lado com as outras (Sprint 25E)."""
+
+    modelo: str
+    rotulo: str
+    disponivel: bool
+    motivo_indisponivel: str | None = None
+    escolhido: bool = False
+    valor_final: Decimal | None = None
+    ic_inferior_final: Decimal | None = None
+    ic_superior_final: Decimal | None = None
+    amplitude_ic_media: Decimal | None = None
+    erro_padrao: Decimal | None = None
+    r2: Decimal | None = None
+    n_obs: int | None = None
+    cruza_limite: bool = False
+    periodo_cruzamento: str | None = None
+    memoria: dict = Field(default_factory=dict)
+
+
+class ComparacaoModelosResponse(BaseModel):
+    """Comparação das camadas para o mesmo ente/indicador/horizonte.
+
+    **Não há backtest**: com séries de poucos períodos, separar treino e teste produziria
+    um erro medido em um único ponto — ruído apresentado como evidência. O que se compara
+    aqui é viabilidade, dispersão do ajuste e o que cada modelo projeta.
+    """
+
+    cod_ibge: str
+    indicador: str
+    descricao: str
+    unidade: str
+    horizonte: int
+    periodos_projetados: list[str] = Field(default_factory=list)
+    n_periodos_historicos: int
+    criterio_escolha: str
+    modelos: list[ModeloComparado] = Field(default_factory=list)
+    exogenas_fontes: dict[str, Any] = Field(default_factory=dict)
+    aviso: str
     source_ref: SourceRef
 
 

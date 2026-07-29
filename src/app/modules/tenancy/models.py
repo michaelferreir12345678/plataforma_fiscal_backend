@@ -22,6 +22,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    false,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -45,8 +46,18 @@ CAPACIDADES: tuple[str, ...] = (
 # Tipos de conta / organização (op.organizacao.tipo_conta)
 TIPOS_CONTA: tuple[str, ...] = ("prefeitura", "estado", "consultoria")
 
+# Licenciamento (op.licenca) — Sprint 19.
+# ``uf`` libera o território inteiro: os municípios **e** o ente estadual.
+TIPOS_LICENCA: tuple[str, ...] = ("ente", "uf", "global")
+LICENCA_ATIVA = "ativa"
+LICENCA_SUSPENSA = "suspensa"
+LICENCA_EXPIRADA = "expirada"
+STATUS_LICENCA: tuple[str, ...] = (LICENCA_ATIVA, LICENCA_SUSPENSA, LICENCA_EXPIRADA)
+
 _CAP_SQL = ", ".join(f"'{c}'" for c in CAPACIDADES)
 _TIPO_SQL = ", ".join(f"'{t}'" for t in TIPOS_CONTA)
+_TIPO_LICENCA_SQL = ", ".join(f"'{t}'" for t in TIPOS_LICENCA)
+_STATUS_LICENCA_SQL = ", ".join(f"'{s}'" for s in STATUS_LICENCA)
 
 
 class Organizacao(Base):
@@ -59,6 +70,7 @@ class Organizacao(Base):
     nome: Mapped[str] = mapped_column(Text, nullable=False)
     tipo_conta: Mapped[str] = mapped_column(String(20), nullable=False)
     metrica_cobranca: Mapped[str | None] = mapped_column(Text, nullable=True)
+    logo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     criada_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -72,6 +84,11 @@ class Usuario(Base):
     nome: Mapped[str] = mapped_column(Text, nullable=False)
     senha_hash: Mapped[str] = mapped_column(Text, nullable=False)
     mfa_ativo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    #: Operador da plataforma. Não é papel RBAC: papel vive **dentro** de uma
+    #: organização, e o superuser existe fora de todas.
+    is_superuser: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
 
 
 class Papel(Base):
@@ -153,6 +170,61 @@ class CarteiraEnte(Base):
     cod_ibge: Mapped[str] = mapped_column(String(7), nullable=False)
     grupo: Mapped[str | None] = mapped_column(Text, nullable=True)
     tag: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class Licenca(Base):
+    """O que a organização contratou — a chave comercial que nenhum tenant altera.
+
+    Histórico preservado: suspender troca o ``status``, não apaga a linha. "Esta
+    organização já teve acesso a este ente, e entre quais datas?" é pergunta de
+    auditoria e de cobrança, e some se a suspensão for um DELETE.
+    """
+
+    __tablename__ = "licenca"
+    __table_args__ = (
+        CheckConstraint(f"tipo in ({_TIPO_LICENCA_SQL})", name="licenca_tipo_valido"),
+        CheckConstraint(f"status in ({_STATUS_LICENCA_SQL})", name="licenca_status_valido"),
+        CheckConstraint(
+            "(tipo = 'ente' AND cod_ibge IS NOT NULL AND uf IS NULL) "
+            "OR (tipo = 'uf' AND uf IS NOT NULL AND cod_ibge IS NULL) "
+            "OR (tipo = 'global' AND cod_ibge IS NULL AND uf IS NULL)",
+            name="licenca_alvo_coerente",
+        ),
+        CheckConstraint(
+            "vigencia_fim IS NULL OR vigencia_fim >= vigencia_inicio",
+            name="licenca_vigencia_coerente",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organizacao.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    tipo: Mapped[str] = mapped_column(String(8), nullable=False)
+    cod_ibge: Mapped[str | None] = mapped_column(String(7), nullable=True)
+    uf: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    vigencia_inicio: Mapped[date] = mapped_column(Date, nullable=False)
+    #: ``None`` = sem prazo. Quando presente, vale **até este dia, inclusive**.
+    vigencia_fim: Mapped[date | None] = mapped_column(Date, nullable=True)
+    status: Mapped[str] = mapped_column(String(9), nullable=False, default=LICENCA_ATIVA)
+    observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    criada_por: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("usuario.id", ondelete="SET NULL"), nullable=True
+    )
+    criada_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    atualizada_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    def vigente_em(self, dia: date) -> bool:
+        """Ativa **e** dentro da vigência. Expirada por data não precisa de job para valer."""
+        if self.status != LICENCA_ATIVA:
+            return False
+        if dia < self.vigencia_inicio:
+            return False
+        return self.vigencia_fim is None or dia <= self.vigencia_fim
 
 
 class AuditLog(Base):

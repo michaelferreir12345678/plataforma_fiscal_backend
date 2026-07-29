@@ -21,6 +21,11 @@ class EnteRef(BaseModel):
 
     cod_ibge: str
     nome: str | None = None
+    #: O ente estadual existe para **toda** UF, mas abrir o cockpit dele depende de carteira,
+    #: licença e restrição de membership. Sem esta marca a tela oferecia o botão a quem
+    #: levaria 403, e o 403 chegava disfarçado de "ente sem período com dado".
+    acessivel: bool = True
+    motivo_indisponivel: str | None = None
 
 
 class IndicadorConsolidado(BaseModel):
@@ -132,6 +137,9 @@ class MapaUfEnte(BaseModel):
     """Valor de um município para o coroplético (ligado à malha por ``cod_ibge``)."""
 
     cod_ibge: str
+    #: Nome do município. O mapa é a única tela em que o usuário aponta para uma forma
+    #: geométrica: sem o nome, ele precisa decorar código IBGE para saber onde está.
+    nome: str | None = None
     valor_pct: Decimal | None = None
     faixa: str | None = None
     cor: str

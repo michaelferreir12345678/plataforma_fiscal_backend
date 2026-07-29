@@ -1,0 +1,160 @@
+# Compose de produção (Sprint 28).
+#
+# Três diferenças em relação ao `docker-compose.yml` de desenvolvimento, e cada uma
+# existe por um incidente que ela evita:
+#
+# 1. **Migration não roda no boot da API.** Em desenvolvimento há uma réplica e o
+#    `alembic upgrade` no comando é conveniente. Com N réplicas, todas sobem juntas e
+#    disputam o mesmo `alembic_version` — a segunda falha, o orquestrador reinicia, e o
+#    deploy entra em laço. Aqui a migração é um serviço **one-shot** que roda até o fim
+#    antes de a API existir.
+# 2. **Banco e fila não publicam porta.** Em desenvolvimento a porta em 127.0.0.1 ajuda
+#    a inspecionar. Em produção, porta publicada é superfície: quem precisa do banco
+#    entra pela rede interna do Compose.
+# 3. **Workers separados por responsabilidade.** Ingestão é longa e pode ser reiniciada;
+#    o agendador de relatórios/qualidade é curto e precisa de relógio contínuo. Juntos,
+#    um `restart` da ingestão derruba o agendamento.
+#
+# Uso:
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+#
+# `.env.prod` **nunca** é versionado: em nuvem, injete pelo gerenciador de segredos do
+# provedor (Secrets Manager, Parameter Store, Vault) e mantenha o arquivo só como
+# contrato de quais variáveis existem.
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql+psycopg2://${APP_DB_ROLE:?}:${APP_DB_PASSWORD:?}@postgres:5432/${POSTGRES_DB:?}
+  DATABASE_ADMIN_URL: postgresql+psycopg2://${POSTGRES_USER:?}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:?}
+  DB_NAME: ${POSTGRES_DB:?}
+  APP_DB_ROLE: ${APP_DB_ROLE:?}
+  APP_DB_PASSWORD: ${APP_DB_PASSWORD:?}
+  JWT_SECRET: ${JWT_SECRET:?}
+  REDIS_URL: redis://redis:6379/0
+  INGEST_WORKER_IN_PROCESS: "false"
+  APP_ENV: production
+  GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+  CORS_ORIGINS: ${CORS_ORIGINS:?}
+  # A API não arma relógio: quem agenda é o serviço `scheduler`.
+  SCHEDULER_EM_PROCESSO_SEPARADO: "true"
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+services:
+  postgres:
+    image: postgres:16
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: ${POSTGRES_DB:?}
+      # Fuso explícito: o cálculo fiscal usa datas de competência, e servidor em UTC
+      # com aplicação em America/Fortaleza já produziu divergência de um dia.
+      TZ: America/Fortaleza
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./var/backup:/backup
+    logging: *logging
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7
+    restart: always
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redisdata:/data
+    logging: *logging
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  # One-shot: sobe, migra, sai. A API só começa depois que este terminou com sucesso.
+  migrate:
+    build: .
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: *app-env
+    command: >
+      sh -c "python -m scripts.bootstrap_db && alembic upgrade head"
+    logging: *logging
+
+  api:
+    build: .
+    restart: always
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    environment: *app-env
+    # Sem `ports`: quem publica é o proxy reverso, que termina TLS e injeta HSTS.
+    expose:
+      - "8000"
+    command: >
+      uvicorn app.main:app --host 0.0.0.0 --port 8000
+      --workers ${API_WORKERS:-4} --proxy-headers --forwarded-allow-ips '*'
+    logging: *logging
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  ingest-worker:
+    build: .
+    restart: always
+    init: true
+    # A ingestão de um exercício inteiro leva dezenas de minutos; derrubá-la no meio
+    # deixa lease pendente. A janela de graça cobre a maior unidade de trabalho.
+    stop_grace_period: 65m
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    environment: *app-env
+    command: ["python", "-m", "app.workers.ingest_worker"]
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  scheduler:
+    build: .
+    restart: always
+    init: true
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    # Este é o processo do relógio. Ele arma os agendadores por ser quem é, não por
+    # configuração — a variável acima só existe para **desligá-los na API**.
+    environment: *app-env
+    command: ["python", "-m", "app.workers.scheduler_worker"]
+    logging: *logging
+
+volumes:
+  pgdata:
+  redisdata:

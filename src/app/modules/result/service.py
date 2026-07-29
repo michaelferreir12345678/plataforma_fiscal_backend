@@ -9,24 +9,31 @@ memória + as_of).
 
 from __future__ import annotations
 
+import json
 import re
+import uuid
 from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
+from app.core.deps import Principal
 from app.core.errors import AppError
 from app.modules.catalog import service as catalog_service
 from app.modules.debt import service as debt_service
 from app.modules.indicators import repository as indicators_repo
+from app.modules.indicators import serie_ajuste
+from app.modules.indicators.schemas import SerieAjuste
 from app.modules.result import repository, resultado
-from app.modules.result.models import FatoResultado
+from app.modules.result.models import FatoResultado, MetaFiscal
 from app.modules.result.schemas import (
     CascataOut,
     CascataPasso,
     ComparacaoResultado,
     ComponenteOut,
     MemoriaResultado,
+    MetaCadastro,
+    MetaFiscalUpsert,
     MetaOut,
     MetaResumo,
     ReconAjuste,
@@ -35,6 +42,8 @@ from app.modules.result.schemas import (
     ResultadoValores,
     SerieResultadoItem,
 )
+from app.modules.tenancy import repository as tenancy_repo
+from app.shared import periodo as periodo_util
 from app.shared.source_ref import SourceRef
 
 _ANEXO = "Anexo 06"
@@ -193,7 +202,10 @@ def _meta_resumo(ap: resultado.Apuracao) -> MetaResumo:
 
 
 # --- série e comparação ---
-def _serie(session: Session, cod_ibge: str) -> list[SerieResultadoItem]:
+def _serie(
+    session: Session, cod_ibge: str, base_periodo: str
+) -> tuple[list[SerieResultadoItem], SerieAjuste]:
+    """Série multi-exercício + insumos de comparabilidade (real por IPCA e per capita)."""
     serie: list[SerieResultadoItem] = []
     for periodo in repository.distinct_periodos_fato(session, cod_ibge=cod_ibge):
         versao = indicators_repo.resolve_versao_rreo(
@@ -213,7 +225,18 @@ def _serie(session: Session, cod_ibge: str) -> list[SerieResultadoItem]:
                 resultado_nominal=fato.resultado_nominal,
             )
         )
-    return serie
+    ajuste = serie_ajuste.calcular(
+        session, cod_ibge, [s.periodo for s in serie], base_periodo
+    )
+    por_periodo = serie_ajuste.indexar(ajuste)
+    for item in serie:
+        a = por_periodo.get(item.periodo)
+        item.resultado_primario_real = serie_ajuste.real(item.resultado_primario, a)
+        item.resultado_primario_per_capita = serie_ajuste.per_capita(
+            item.resultado_primario, a
+        )
+        item.populacao = a.populacao if a else None
+    return serie, ajuste
 
 
 def _comparacao(
@@ -256,16 +279,19 @@ def build_detalhe(
     """Cabeçalho (resultado × meta) + componentes primários + série (Padrão de Detalhe)."""
     fato, ap, versao = _obter(session, cod_ibge, periodo, as_of)
     valores = _valores(ap)
-    serie = _serie(session, cod_ibge)
+    serie, ajuste = _serie(session, cod_ibge, periodo)
     return ResultadoDetalhe(
         cod_ibge=cod_ibge,
         periodo=periodo,
         versao_entrega=versao,
         valores=valores,
+        # Detalhe é a via consumida por relatórios e agregados: **só meta oficial (A6)**.
+        # A meta declarada pela organização vive apenas em ``/resultado/meta``.
         meta=_meta_resumo(ap),
         receita_componentes=_componentes(ap.receita_componentes),
         despesa_componentes=_componentes(ap.despesa_componentes),
         serie=serie,
+        serie_ajuste=ajuste,
         comparacao=_comparacao(serie, periodo, valores.resultado_primario),
         periodo_breadcrumb=catalog_service.periodo_breadcrumb(session, periodo),
         source_ref=_source_ref(periodo, versao),
@@ -373,27 +399,91 @@ def build_reconciliacao(
     )
 
 
+def _aplicar_meta_manual(
+    resumo: MetaResumo, cadastros: list[MetaFiscal]
+) -> tuple[MetaResumo, list[MetaCadastro]]:
+    """Completa o resumo com a meta declarada pela organização (nunca sobrepõe o A6)."""
+    por_indicador = {c.indicador: c for c in cadastros}
+    primario = por_indicador.get("primario")
+    nominal = por_indicador.get("nominal")
+    meta_p = Decimal(primario.valor) if primario is not None else None
+    real_p = resumo.realizado_primario
+    comparavel = meta_p is not None and real_p is not None
+    novo = MetaResumo(
+        informada=True,
+        meta_primario=meta_p,
+        realizado_primario=real_p,
+        esforco_primario=(meta_p - real_p) if comparavel else None,  # type: ignore[operator]
+        atingido_primario=(real_p >= meta_p) if comparavel else None,  # type: ignore[operator]
+        meta_nominal=Decimal(nominal.valor) if nominal is not None else None,
+        realizado_nominal=resumo.realizado_nominal,
+    )
+    return novo, [_meta_cadastro(c) for c in cadastros]
+
+
+def _meta_cadastro(row: MetaFiscal) -> MetaCadastro:
+    return MetaCadastro(
+        id=row.id,
+        exercicio=row.exercicio,
+        indicador=row.indicador,
+        valor=Decimal(row.valor),
+        fonte_declarada=row.fonte_declarada,
+        observacao=row.observacao,
+        atualizado_em=row.atualizado_em,
+        atualizado_por=row.atualizado_por,
+    )
+
+
 def build_meta(
-    session: Session, cod_ibge: str, periodo: str, *, as_of: datetime | None = None
+    session: Session,
+    cod_ibge: str,
+    periodo: str,
+    *,
+    as_of: datetime | None = None,
+    org_id: uuid.UUID | None = None,
 ) -> MetaOut:
-    """Realizado × meta + projeção de fechamento (linear) e esforço necessário."""
+    """Realizado × meta + projeção de fechamento (linear) e esforço necessário.
+
+    A meta oficial é a do **RREO Anexo 6**. Quando o ente não a publica, cai para a meta da
+    LDO **declarada pela organização** (``op.meta_fiscal``) — passando ``org_id``. Essa via
+    é exclusiva da tela do ente: agregados e relatórios institucionais chamam sem ``org_id``
+    e continuam vendo apenas dado oficial (decisão §11.5 da auditoria).
+    """
     _, ap, versao = _obter(session, cod_ibge, periodo, as_of)
     resumo = _meta_resumo(ap)
     bimestre = _bimestre(periodo)
     fracao = Decimal(bimestre) / Decimal(6)
     real_p = resumo.realizado_primario
     projecao = (real_p / fracao) if (real_p is not None and fracao > 0) else None
+
+    origem = "a6" if resumo.informada else "ausente"
+    cadastros: list[MetaCadastro] = []
+    if not resumo.informada and org_id is not None:
+        exercicio = periodo_util.parse(periodo)[0]
+        registros = repository.list_metas_fiscais(
+            session, org_id=org_id, cod_ibge=cod_ibge, exercicio=exercicio
+        )
+        if registros:
+            resumo, cadastros = _aplicar_meta_manual(resumo, registros)
+            origem = "manual"
+
     esforco = (
         resumo.meta_primario - projecao
         if resumo.meta_primario is not None and projecao is not None
         else None
     )
-    obs = (
-        "Meta fiscal não informada no Anexo 6 deste ente/período."
-        if not resumo.informada
-        else "Projeção linear de fechamento (realizado ÷ fração do exercício); "
-        "esforço = meta − projeção."
-    )
+    obs = {
+        "a6": (
+            "Meta publicada pelo ente no RREO Anexo 6. Projeção linear de fechamento "
+            "(realizado ÷ fração do exercício); esforço = meta − projeção."
+        ),
+        "manual": (
+            "Meta da LDO cadastrada nesta organização — o ente não a publicou no Anexo 6. "
+            "Vale só nas telas deste ente: não entra em comparações agregadas nem em "
+            "relatório institucional."
+        ),
+        "ausente": "Meta fiscal não informada no Anexo 6 deste ente/período.",
+    }[origem]
     return MetaOut(
         cod_ibge=cod_ibge,
         periodo=periodo,
@@ -403,8 +493,88 @@ def build_meta(
         fracao_exercicio=fracao,
         projecao_primario=projecao,
         esforco_necessario=esforco,
+        origem=origem,
+        restrita_ao_ente=origem == "manual",
+        cadastros=cadastros,
         observacao=obs,
         source_ref=_source_ref(periodo, versao),
+    )
+
+
+# --- cadastro da meta da LDO (op.meta_fiscal) ---
+def listar_metas_fiscais(
+    session: Session, principal: Principal, cod_ibge: str
+) -> list[MetaCadastro]:
+    if principal.org_id is None:
+        return []
+    return [
+        _meta_cadastro(m)
+        for m in repository.list_metas_fiscais(
+            session, org_id=principal.org_id, cod_ibge=cod_ibge
+        )
+    ]
+
+
+def salvar_meta_fiscal(
+    session: Session, principal: Principal, cod_ibge: str, body: MetaFiscalUpsert
+) -> MetaCadastro:
+    """Cadastra/atualiza a meta da LDO do ente nesta organização (auditado)."""
+    if principal.org_id is None:
+        raise AppError(
+            status=403, title="Sem organização ativa",
+            detail="Cadastro de meta exige uma organização ativa.",
+        )
+    row = repository.upsert_meta_fiscal(
+        session,
+        {
+            "org_id": principal.org_id,
+            "cod_ibge": cod_ibge,
+            "exercicio": body.exercicio,
+            "indicador": body.indicador,
+            "valor": body.valor,
+            "fonte_declarada": body.fonte_declarada,
+            "observacao": body.observacao,
+            "atualizado_por": principal.usuario_id,
+        },
+    )
+    tenancy_repo.insert_audit_log(
+        session,
+        org_id=principal.org_id,
+        usuario_id=principal.usuario_id,
+        acao="meta_fiscal.salvar",
+        recurso=json.dumps(
+            {
+                "cod_ibge": cod_ibge,
+                "exercicio": body.exercicio,
+                "indicador": body.indicador,
+                "valor": str(body.valor),
+                "fonte_declarada": body.fonte_declarada,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+    )
+    return _meta_cadastro(row)
+
+
+def excluir_meta_fiscal(
+    session: Session, principal: Principal, cod_ibge: str, meta_id: uuid.UUID
+) -> None:
+    if principal.org_id is None or not repository.delete_meta_fiscal(
+        session, org_id=principal.org_id, meta_id=meta_id
+    ):
+        raise AppError(
+            status=404, title="Meta inexistente",
+            detail="Não há meta fiscal com esse identificador nesta organização.",
+        )
+    tenancy_repo.insert_audit_log(
+        session,
+        org_id=principal.org_id,
+        usuario_id=principal.usuario_id,
+        acao="meta_fiscal.excluir",
+        recurso=json.dumps(
+            {"cod_ibge": cod_ibge, "meta_id": str(meta_id)}, ensure_ascii=False, sort_keys=True
+        ),
     )
 
 

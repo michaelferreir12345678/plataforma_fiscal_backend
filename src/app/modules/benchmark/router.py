@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.core.deps import Principal, get_db, require_capability
 from app.modules.benchmark import service
 from app.modules.benchmark.schemas import (
+    BenchmarkEvolucaoResponse,
     BenchmarkRankingResponse,
     BenchmarkResponse,
     OrdemRanking,
@@ -44,6 +45,26 @@ def benchmark(
         coorte=coorte,
         periodo=periodo,
         as_of=as_of,
+    )
+
+
+@router.get("/evolucao", response_model=BenchmarkEvolucaoResponse)
+def evolucao(
+    ente: str = Query(..., description="Código IBGE do ente acompanhado."),
+    indicador: str | None = Query(None, description="Indicador de gold.mart_indicador."),
+    coorte: str | None = Query(
+        None, description="Coorte fixa da comparação; ausente resolve pela do ente."
+    ),
+    periodos: int = Query(6, ge=2, le=24, description="Tamanho da janela de períodos."),
+    as_of: datetime | None = Query(None, description="Reproduz os snapshots naquele instante."),
+    principal: Principal = Depends(require_capability("ver")),
+    session: Session = Depends(get_db),
+) -> BenchmarkEvolucaoResponse:
+    """Posição do ente na **mesma** coorte ao longo dos períodos (multi-período)."""
+    assert_ente_in_scope(session, principal, ente)
+    return service.build_evolucao(
+        session, cod_ibge=ente, indicador=indicador, coorte=coorte,
+        periodos=periodos, as_of=as_of,
     )
 
 

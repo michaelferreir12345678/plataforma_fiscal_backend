@@ -133,6 +133,8 @@ def build_limites(session: Session, cod_ibge: str, periodo: str) -> LimitesRespo
                     prudencial_pct=limite.prudencial_pct if limite else None,
                     distancia_teto=dist_teto,
                     distancia_alerta=dist_alerta,
+                    denominador=mart.denominador,
+                    base_valor=mart.base_valor,
                 )
             )
     return LimitesResponse(

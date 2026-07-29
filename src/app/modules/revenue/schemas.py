@@ -7,6 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.modules.indicators.schemas import SerieAjuste
 from app.shared.envelope import DrillChild, DrillNodeRef
 from app.shared.source_ref import SourceRef
 
@@ -34,6 +35,10 @@ class DependenciaResumo(BaseModel):
 class SerieReceitaItem(BaseModel):
     periodo: str
     arrecadado_acum: Decimal | None = None
+    # Comparabilidade multi-exercício (Sprint 25): nominal × real × por habitante.
+    arrecadado_real: Decimal | None = None  # a preços do período consultado (IPCA)
+    arrecadado_per_capita: Decimal | None = None
+    populacao: int | None = None
 
 
 class ComparacaoOut(BaseModel):
@@ -56,6 +61,7 @@ class ReceitaDetalhe(BaseModel):
     dependencia: DependenciaResumo
     composicao: list[DrillChild]  # raízes (categorias econômicas) com medidas
     serie: list[SerieReceitaItem]
+    serie_ajuste: SerieAjuste | None = None  # deflator IPCA + população (§ comparabilidade)
     comparacao: ComparacaoOut | None = None
     periodo_breadcrumb: list[DrillNodeRef]  # drill temporal UP (bimestre → ano)
     source_ref: SourceRef
@@ -127,7 +133,18 @@ class ConciliacaoItem(BaseModel):
     rreo_acum: Decimal | None = None
     externo_acum: Decimal | None = None
     divergencia_pct: Decimal | None = None
-    status: str  # conciliado | divergente | sem_dado_externo | sem_par_rreo
+    divergencia_rs: Decimal | None = None
+    # conciliado | divergente | contido | excede_agregado | sem_dado_externo | sem_par_rreo
+    status: str
+    # Como o lado RREO foi obtido: linha própria da transferência ou o agregado que a
+    # contém (nem todo ente abre FPM/FUNDEB no Anexo 01) — muda a leitura do resultado.
+    base_comparacao: str = "linha_especifica"  # linha_especifica | agregado | ausente
+    participacao_no_agregado_pct: Decimal | None = None
+    # Fonte dos DOIS lados (aceite da Sprint 25A): sem isto a divergência é inauditável.
+    tabela_externa: str  # tabela silver que sustenta o lado externo
+    periodo_externo: str | None = None  # janela agregada na fonte externa (ano/meses)
+    nos_rreo: list[str] = Field(default_factory=list)  # códigos casados no RREO A1
+    independente: bool = True  # False ⇒ derivado do próprio RREO (não é contraprova)
 
 
 class ConciliacaoOut(BaseModel):

@@ -14,6 +14,7 @@ from app.core.db import SessionLocal
 from app.modules.cash_rap.models import FatoDisponibilidade
 from app.modules.catalog.models import DimEnte
 from app.modules.health_edu.models import FatoEducacao, FatoSaude, FatoSaudeSubfuncao
+from app.modules.indicators.models import MartIndicador
 from app.modules.ingestion.models import (
     DimEntrega,
     SilverEnte,
@@ -171,6 +172,9 @@ def caso() -> Iterator[tuple[str, bool]]:
         session.commit()
     yield cod, False
     with SessionLocal() as session:
+        # Desde a Sprint 25C a apuração dos mínimos também escreve no mart; sem esta
+        # linha o banco de desenvolvimento acumularia entes sintéticos no benchmarking.
+        session.execute(delete(MartIndicador).where(MartIndicador.cod_ibge == cod))
         session.execute(delete(FatoSaudeSubfuncao).where(FatoSaudeSubfuncao.cod_ibge == cod))
         session.execute(delete(FatoSaude).where(FatoSaude.cod_ibge == cod))
         session.execute(delete(FatoEducacao).where(FatoEducacao.cod_ibge == cod))

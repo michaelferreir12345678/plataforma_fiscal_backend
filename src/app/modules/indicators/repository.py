@@ -10,11 +10,13 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from app.modules.catalog.models import DimEnte
 from app.modules.indicators.models import FatoRcl, MartIndicador
 from app.modules.ingestion import repository as ingestion_repo
-from app.modules.ingestion.models import SilverRreo
+from app.modules.ingestion.models import BcbIndice, IbgePopulacao, SilverRreo
 
 RELATORIO_RREO = "RREO"
+SERIE_IPCA = 433  # SGS/BCB — variação mensal do IPCA (%)
 
 
 def resolve_versao_rreo(
@@ -68,7 +70,13 @@ def upsert_mart_indicador(session: Session, valores: dict[str, Any]) -> None:
         index_elements=["cod_ibge", "periodo", "indicador", "versao_entrega"],
         set_={
             k: valores[k]
-            for k in ("valor_rs", "valor_pct_rcl", "faixa", "teto_pct", "source_ref")
+            for k in (
+                "valor_rs", "valor_pct_rcl", "faixa", "teto_pct", "source_ref",
+                # Sem estes dois no UPDATE, um recálculo manteria a base antiga e o
+                # percentual novo — a pior combinação possível numa linha auditável.
+                "denominador", "base_valor",
+            )
+            if k in valores
         },
     )
     session.execute(stmt)
@@ -89,3 +97,44 @@ def get_mart_indicador(
 
 def _num(value: Any) -> Decimal:
     return Decimal(str(value)) if value is not None else Decimal(0)
+
+
+# --- insumos de ajuste de série (deflação IPCA + per capita) ---
+def ipca_mensal(session: Session) -> dict[tuple[int, int], Decimal]:
+    """Variação mensal do IPCA (%) por (ano, mês), na versão vigente de cada data.
+
+    Fonte: ``silver.bcb_indice`` série 433 (SGS/BCB). Meses sem dado simplesmente não
+    aparecem — quem defla precisa tratar a lacuna, nunca assumir inflação zero.
+    """
+    rows = session.execute(
+        select(BcbIndice.data_ref, BcbIndice.valor, BcbIndice.versao_entrega)
+        .where(BcbIndice.codigo_serie == SERIE_IPCA, BcbIndice.valor.is_not(None))
+        .order_by(BcbIndice.data_ref, BcbIndice.versao_entrega)
+    ).all()
+    # Ordenado por versão: a última leitura de cada data é a vigente.
+    return {
+        (data.year, data.month): Decimal(str(valor)) for data, valor, _versao in rows
+    }
+
+
+def populacao_por_ano(session: Session, *, cod_ibge: str) -> dict[int, int]:
+    """População por ano de referência (``silver.ibge_populacao``, versão vigente)."""
+    rows = session.execute(
+        select(IbgePopulacao.ano_ref, IbgePopulacao.populacao)
+        .where(
+            IbgePopulacao.cod_ibge == cod_ibge,
+            IbgePopulacao.populacao.is_not(None),
+        )
+        .order_by(IbgePopulacao.ano_ref, IbgePopulacao.versao_entrega)
+    ).all()
+    return {int(ano): int(pop) for ano, pop in rows}
+
+
+def populacao_dim_ente(session: Session, *, cod_ibge: str) -> tuple[int, int | None] | None:
+    """População conformada da ``gold.dim_ente`` (fallback) com o ano de referência."""
+    row = session.execute(
+        select(DimEnte.populacao, DimEnte.pop_ano_ref).where(DimEnte.cod_ibge == cod_ibge)
+    ).first()
+    if row is None or row[0] is None:
+        return None
+    return int(row[0]), int(row[1]) if row[1] is not None else None

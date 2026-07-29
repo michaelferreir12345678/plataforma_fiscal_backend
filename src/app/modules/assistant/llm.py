@@ -16,12 +16,16 @@ inventada. Trocar de provedor é trocar o adaptador registrado em :func:`build_p
 from __future__ import annotations
 
 import importlib.util
+import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Protocol, runtime_checkable
 
 from app.core.config import Settings, get_settings
 from app.core.errors import AppError
+
+logger = logging.getLogger(__name__)
 
 
 def gemini_sdk_available() -> bool:
@@ -99,7 +103,11 @@ class LLMRequest:
     normas: tuple[NormaContexto, ...] = ()
     modelo: str | None = None
     temperatura: float = 0.2
-    max_tokens: int | None = 1024
+    #: Teto de saída. Precisa acomodar o **raciocínio** dos modelos 3.x, que sai do mesmo
+    #: orçamento: o ``gemini-3.5-flash`` gasta ~250 tokens pensando antes da primeira
+    #: palavra, e um teto apertado devolveria resposta vazia com o modelo saudável. É um
+    #: limite, não um gasto — elevar não encarece quem responde curto.
+    max_tokens: int | None = 2048
 
 
 @dataclass(frozen=True)
@@ -240,15 +248,59 @@ class LocalGroundedProvider:
 # --------------------------------------------------------------------------- #
 # Adaptador Google Gemini (SDK google-genai importado preguiçosamente).
 # --------------------------------------------------------------------------- #
+def _motivo_resposta_vazia(response: object, usage: object, modelo: str) -> str:
+    """Explica **por que** veio vazio, em vez de só constatar que veio.
+
+    Os modelos com raciocínio (Gemini 3.x) gastam tokens pensando **antes** de escrever, e
+    esses tokens saem do mesmo ``max_output_tokens``. Um teto curto produz resposta vazia
+    com o modelo funcionando perfeitamente — sem esta mensagem, o operador procuraria falha
+    de rede ou de credencial durante horas.
+    """
+    pensamento = int(getattr(usage, "thoughts_token_count", 0) or 0)
+    candidatos = getattr(response, "candidates", None) or []
+    razao = str(getattr(candidatos[0], "finish_reason", "") or "") if candidatos else ""
+    if "MAX_TOKENS" in razao.upper() and pensamento:
+        return (
+            f"O modelo {modelo} consumiu o limite de saída raciocinando "
+            f"({pensamento} tokens de raciocínio) e não sobrou espaço para a resposta. "
+            "Aumente ``max_tokens`` da requisição."
+        )
+    if razao and "STOP" not in razao.upper():
+        return f"O modelo {modelo} interrompeu a geração ({razao}) sem produzir texto."
+    return f"O modelo {modelo} retornou resposta vazia."
+
+
 class GeminiProvider:
     """Adaptador do Google Gemini via SDK oficial ``google-genai``.
 
     O SDK é importado **dentro** dos métodos: o módulo carrega sem a dependência e os
     testes rodam sem rede. ``modelo`` da requisição permite o ``gemini-2.5-pro`` no
-    resumo executivo; o default é o ``gemini-2.5-flash``.
+    resumo executivo; o default é o ``assistant_chat_model``.
+
+    **Fallback de modelo.** Se o principal está indisponível (modelo inexistente para a
+    chave, cota estourada, serviço fora), tenta os de reserva **em ordem**. Só isso: erro
+    de credencial ou de conteúdo **não** cai para outro modelo — um degrade silencioso
+    esconderia configuração errada, e o resultado sempre declara qual modelo respondeu,
+    para que a tela possa dizê-lo ao gestor.
     """
 
     name = "gemini"
+
+    #: Sinais de indisponibilidade do modelo (e não de erro do pedido).
+    _MARCAS_INDISPONIVEL = (
+        "not found",
+        "not_found",
+        "is not supported",
+        "does not exist",
+        "unavailable",
+        "overloaded",
+        "resource_exhausted",
+        "resource exhausted",
+        "quota",
+        "429",
+        "503",
+        "404",
+    )
 
     def __init__(
         self,
@@ -257,12 +309,27 @@ class GeminiProvider:
         chat_model: str,
         summary_model: str,
         timeout_s: float,
+        fallback_models: Sequence[str] = (),
     ) -> None:
         self._api_key = api_key
         self._chat_model = chat_model
         self._summary_model = summary_model
+        self._fallback_models = tuple(fallback_models)
         self._timeout_ms = int(timeout_s * 1000)
         self._client: object | None = None
+
+    def _modelos_a_tentar(self, pedido: str | None) -> list[str]:
+        """Principal + reservas, sem repetir. Modelo pedido explicitamente não tem reserva:
+        quem escolheu o ``gemini-2.5-pro`` para o resumo quer aquele modelo, não outro."""
+        if pedido:
+            return [pedido]
+        ordem = [self._chat_model, *self._fallback_models]
+        return list(dict.fromkeys(m for m in ordem if m))
+
+    @classmethod
+    def _indisponivel(cls, exc: Exception) -> bool:
+        texto = f"{exc.__class__.__name__}: {exc}".lower()
+        return any(marca in texto for marca in cls._MARCAS_INDISPONIVEL)
 
     def _ensure_client(self) -> object:
         if self._client is None:
@@ -277,7 +344,7 @@ class GeminiProvider:
 
     def chat(self, request: LLMRequest) -> LLMResult:  # pragma: no cover - requer rede/credencial
         client = self._ensure_client()
-        modelo = request.modelo or self._chat_model
+        candidatos = self._modelos_a_tentar(request.modelo)
         prompt = (
             f"{render_grounding(request)}\n\n"
             f"PERGUNTA DO GESTOR:\n{request.pergunta}\n\n"
@@ -288,30 +355,44 @@ class GeminiProvider:
         )
         try:
             from google.genai import types
+        except ImportError as exc:  # pragma: no cover - depende do ambiente
+            raise LLMProviderError(detail=f"SDK google-genai indisponível: {exc}") from exc
 
-            config = types.GenerateContentConfig(
-                system_instruction=request.system,
-                temperature=request.temperatura,
-                max_output_tokens=request.max_tokens,
-                http_options=types.HttpOptions(timeout=self._timeout_ms),
-            )
-            response = client.models.generate_content(  # type: ignore[attr-defined]
-                model=modelo, contents=prompt, config=config
-            )
-        except LLMProviderError:
-            raise
-        except Exception as exc:
-            raise LLMProviderError(detail=f"Falha na chamada ao Gemini: {exc}") from exc
-
-        texto = (getattr(response, "text", None) or "").strip()
-        if not texto:
-            raise LLMProviderError(detail="O Gemini retornou resposta vazia.")
-        usage = getattr(response, "usage_metadata", None)
-        entrada = int(getattr(usage, "prompt_token_count", 0) or 0)
-        saida = int(getattr(usage, "candidates_token_count", 0) or 0)
-        return LLMResult(
-            texto=texto, modelo=modelo, tokens_entrada=entrada, tokens_saida=saida
+        config = types.GenerateContentConfig(
+            system_instruction=request.system,
+            temperature=request.temperatura,
+            max_output_tokens=request.max_tokens,
+            http_options=types.HttpOptions(timeout=self._timeout_ms),
         )
+        ultimo: Exception | None = None
+        for indice, modelo in enumerate(candidatos):
+            try:
+                response = client.models.generate_content(  # type: ignore[attr-defined]
+                    model=modelo, contents=prompt, config=config
+                )
+            except Exception as exc:
+                ultimo = exc
+                if indice + 1 < len(candidatos) and self._indisponivel(exc):
+                    logger.warning(
+                        "Gemini %s indisponível (%s); tentando %s",
+                        modelo,
+                        exc.__class__.__name__,
+                        candidatos[indice + 1],
+                    )
+                    continue
+                raise LLMProviderError(detail=f"Falha na chamada ao Gemini: {exc}") from exc
+
+            usage = getattr(response, "usage_metadata", None)
+            texto = (getattr(response, "text", None) or "").strip()
+            if not texto:
+                raise LLMProviderError(detail=_motivo_resposta_vazia(response, usage, modelo))
+            return LLMResult(
+                texto=texto,
+                modelo=modelo,
+                tokens_entrada=int(getattr(usage, "prompt_token_count", 0) or 0),
+                tokens_saida=int(getattr(usage, "candidates_token_count", 0) or 0),
+            )
+        raise LLMProviderError(detail=f"Falha na chamada ao Gemini: {ultimo}")
 
 
 def build_provider(settings: Settings) -> LLMProvider:
@@ -326,6 +407,7 @@ def build_provider(settings: Settings) -> LLMProvider:
             chat_model=settings.assistant_chat_model,
             summary_model=settings.assistant_summary_model,
             timeout_s=settings.assistant_request_timeout_s,
+            fallback_models=settings.assistant_chat_fallback_models,
         )
     return LocalGroundedProvider()
 

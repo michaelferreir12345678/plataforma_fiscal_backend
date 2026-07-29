@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import delete, exists, or_, select
+from sqlalchemy import delete, exists, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -179,6 +179,32 @@ def rollup_present(
             )
         )
     )
+
+
+def rollup_present_pairs(
+    session: Session,
+    *,
+    cod_ibge: str,
+    periodo_versao: list[tuple[str, str]],
+) -> set[tuple[str, str]]:
+    """Pares mês×versão já materializados, resolvidos em uma única consulta."""
+
+    if not periodo_versao:
+        return set()
+    return {
+        (str(periodo), str(versao))
+        for periodo, versao in session.execute(
+            select(MartMscRollup.periodo, MartMscRollup.versao_entrega)
+            .where(
+                MartMscRollup.cod_ibge == cod_ibge,
+                tuple_(
+                    MartMscRollup.periodo,
+                    MartMscRollup.versao_entrega,
+                ).in_(periodo_versao),
+            )
+            .distinct()
+        )
+    }
 
 
 def rollup_children(
@@ -370,5 +396,6 @@ __all__ = [
     "rollup_matriz",
     "rollup_node",
     "rollup_present",
+    "rollup_present_pairs",
     "upsert_conta",
 ]

@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.modules.alerts.models import CalendarioObrigacao
@@ -324,6 +324,45 @@ def insert_agendamento(
     session.flush()
     session.refresh(row)
     return row
+
+
+def list_agendamentos(
+    session: Session, *, org_id: uuid.UUID, incluir_inativos: bool = True
+) -> list[RelatorioAgendamento]:
+    """Agendamentos da organização (RLS já filtra por org; o where é explícito)."""
+    stmt = select(RelatorioAgendamento).where(RelatorioAgendamento.org_id == org_id)
+    if not incluir_inativos:
+        stmt = stmt.where(RelatorioAgendamento.ativo.is_(True))
+    return list(
+        session.scalars(
+            stmt.order_by(
+                RelatorioAgendamento.ativo.desc(), RelatorioAgendamento.proxima_execucao
+            )
+        )
+    )
+
+
+def get_agendamento(
+    session: Session, *, org_id: uuid.UUID, agendamento_id: uuid.UUID
+) -> RelatorioAgendamento | None:
+    return session.scalar(
+        select(RelatorioAgendamento).where(
+            RelatorioAgendamento.id == agendamento_id,
+            RelatorioAgendamento.org_id == org_id,
+        )
+    )
+
+
+def delete_agendamento(
+    session: Session, *, org_id: uuid.UUID, agendamento_id: uuid.UUID
+) -> int:
+    result = session.execute(
+        delete(RelatorioAgendamento).where(
+            RelatorioAgendamento.id == agendamento_id,
+            RelatorioAgendamento.org_id == org_id,
+        )
+    )
+    return int(result.rowcount or 0)
 
 
 def list_due_agendamentos(session: Session, now: datetime) -> list[RelatorioAgendamento]:

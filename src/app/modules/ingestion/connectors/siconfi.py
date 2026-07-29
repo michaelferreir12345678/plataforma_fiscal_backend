@@ -37,6 +37,7 @@ from app.modules.ingestion.models import (
     SilverRgf,
     SilverRreo,
 )
+from app.shared import periodo as periodo_util
 from app.shared.ingestion.base import BaseConnector, IngestionJob
 
 
@@ -83,6 +84,9 @@ class SiconfiConnectorBase(BaseConnector):
 
     path: str
     default_periodos: tuple[int, ...] = (1,)
+    #: Tipo do período na notação canônica (§6.6). ``None`` = o conector não é
+    #: periódico dentro do exercício (DCA é anual) e não sofre o corte de calendário.
+    tipo_periodo: str | None = None
 
     def extract(self, job: IngestionJob) -> Any:
         return self.client.get_records(self.path, job.params)
@@ -98,16 +102,33 @@ class SiconfiConnectorBase(BaseConnector):
     ) -> IngestionJob:
         raise NotImplementedError
 
+    def periodos_do_ano(self, ano: int, explicitos: list[int] | None) -> list[int]:
+        """Períodos a buscar em ``ano``.
+
+        Período explícito é respeitado sem discussão — quem pede ``2026-B5`` sabe o que
+        quer (retificação, teste, verificação). Sem ele, o exercício **em andamento** só
+        rende os períodos que já terminaram: pedir o 6º bimestre de 2026 em julho de 2026
+        não é otimismo, é gerar trabalho garantido a vazio e registrar como "ausente" um
+        dado que ninguém deveria ter publicado.
+        """
+        if explicitos:
+            return list(explicitos)
+        padrao = list(self.default_periodos)
+        if self.tipo_periodo is None:
+            return padrao
+        possiveis = set(periodo_util.periodos_possiveis(ano, self.tipo_periodo, date.today()))
+        return [p for p in padrao if p in possiveis]
+
     def discover(self, state: dict[str, Any]) -> list[IngestionJob]:
         entes: list[str] = state.get("entes") or []
         anos: list[int] = state.get("anos") or []
-        periodos: list[int] = state.get("periodos") or list(self.default_periodos)
+        explicitos: list[int] | None = state.get("periodos") or None
         versao: str = state.get("versao") or "1"
         homologada_em = state.get("homologada_em")
         jobs: list[IngestionJob] = []
         for cod_ibge in entes:
             for ano in anos:
-                for periodo_num in periodos:
+                for periodo_num in self.periodos_do_ano(ano, explicitos):
                     jobs.append(
                         self.build_job(cod_ibge, ano, periodo_num, versao, homologada_em)
                     )
@@ -155,6 +176,7 @@ class RreoConnector(_RelatorioMixin, SiconfiConnectorBase):
     relatorio = "RREO"
     path = "tt/rreo"
     default_periodos = (1, 2, 3, 4, 5, 6)  # bimestres
+    tipo_periodo = "B"
     silver_model = SilverRreo
 
     def build_job(self, cod_ibge, ano, periodo_num, versao, homologada_em) -> IngestionJob:  # type: ignore[no-untyped-def]
@@ -188,6 +210,7 @@ class RgfConnector(_RelatorioMixin, SiconfiConnectorBase):
     relatorio = "RGF"
     path = "tt/rgf"
     default_periodos = (1, 2, 3)  # quadrimestres (semestral usa periodicidade="S" e 1..2)
+    tipo_periodo = "Q"
     silver_model = SilverRgf
     poderes_municipais = ("E", "L")
     poderes_estaduais = ("E", "L", "J", "M", "D")

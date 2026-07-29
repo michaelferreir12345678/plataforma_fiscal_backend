@@ -9,6 +9,7 @@ módulo — daí este utilitário compartilhado.
 from __future__ import annotations
 
 import re
+from datetime import date
 
 _RE = re.compile(r"^(\d{4})(?:-([BQSM])(\d{1,2}))?$")
 # Quantos períodos daquele tipo cabem num exercício.
@@ -66,9 +67,60 @@ def ordenar_chave(periodo: str) -> tuple[int, int]:
     return (ano, round(12 * num / POR_ANO[tipo]))
 
 
+def mes_final(periodo: str) -> int | None:
+    """Mês (1–12) em que o período fiscal se encerra. ``2024-B3`` → 6; ``2024`` → 12.
+
+    É o mês de referência para alinhar o período fiscal a séries mensais (IPCA/Selic).
+    """
+    try:
+        ano, tipo, num = parse(periodo)
+    except ValueError:
+        return None
+    del ano
+    if tipo is None or num is None:
+        return 12
+    if tipo == "M":
+        return num if 1 <= num <= 12 else None
+    if not 1 <= num <= POR_ANO[tipo]:
+        return None
+    return round(12 * num / POR_ANO[tipo])
+
+
 def mais_recente(periodos: list[str]) -> str | None:
     """O período cronologicamente mais recente da lista."""
     validos = [p for p in periodos if p]
     if not validos:
         return None
     return sorted(validos, key=ordenar_chave)[-1]
+
+
+#: Último mês de cada período, por tipo. Um bimestre fecha em meses pares; um
+#: quadrimestre em abril/agosto/dezembro; um semestre em junho/dezembro.
+_MES_FINAL_POR_TIPO = {"B": 2, "Q": 4, "S": 6, "M": 1}
+
+
+def periodos_possiveis(ano: int, tipo: str, hoje: date) -> list[int]:
+    """Períodos de ``ano`` que **já terminaram** em ``hoje``.
+
+    Exercício em andamento é o caso normal, não a exceção: em julho de 2026 existem
+    RREO até o 3º bimestre e RGF até o 1º quadrimestre — os demais ainda não
+    aconteceram. Pedi-los ao SICONFI não é otimismo, é gerar trabalho garantido a
+    vazio e, pior, registrar "ausência" de um dado que ninguém deveria ter publicado.
+
+    A regra aqui é deliberadamente conservadora: considera possível o período cujo
+    **último mês já se encerrou**, sem descontar o prazo legal de publicação. Se o ente
+    ainda não entregou, quem descobre isso é o conector — e aí a ausência é informação
+    de verdade (atraso), não ruído de calendário.
+
+    Exercício passado devolve todos; futuro, nenhum.
+    """
+    por_ano = POR_ANO.get(tipo.upper())
+    if por_ano is None:
+        raise ValueError(f"Tipo de período desconhecido: {tipo!r}")
+    if ano < hoje.year:
+        return list(range(1, por_ano + 1))
+    if ano > hoje.year:
+        return []
+    passo = _MES_FINAL_POR_TIPO[tipo.upper()]
+    # Um período n encerra no mês ``n * passo``; ele só é possível depois disso.
+    return [n for n in range(1, por_ano + 1) if n * passo < hoje.month]

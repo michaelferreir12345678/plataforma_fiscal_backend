@@ -16,6 +16,7 @@ from app.modules.debt.schemas import (
     DividaArvoreOut,
     DividaDetalhe,
     MemoriaDivida,
+    PvlOut,
     SimulacaoResponse,
     SimularOperacaoRequest,
 )
@@ -118,3 +119,14 @@ def simular_operacao(
         req,
         as_of=as_of,
     )
+
+
+@router.get("/entes/{cod_ibge}/divida/pvl", response_model=PvlOut)
+def pvl_divida(
+    cod_ibge: str,
+    principal: Principal = Depends(require_capability("ver")),
+    session: Session = Depends(get_db),
+) -> PvlOut:
+    """PVL/CDP (SADIPEM): pedidos de verificação de limites e decisões do Tesouro."""
+    assert_ente_in_scope(session, principal, cod_ibge)
+    return service.build_pvl(session, cod_ibge)

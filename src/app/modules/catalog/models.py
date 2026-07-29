@@ -34,6 +34,10 @@ class DimEnte(Base):
     pib_ano_ref: Mapped[int | None] = mapped_column(Integer, nullable=True)
     pop_source_ref: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     pib_source_ref: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    #: Brasão do ente, estampado no cabeçalho institucional dos relatórios (Sprint 16).
+    #: Mora na gold porque é atributo do **ente** — público e compartilhado —, não da
+    #: organização que o monitora.
+    brasao_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class DimPeriodo(Base):

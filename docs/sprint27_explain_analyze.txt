@@ -1,0 +1,246 @@
+# Sprint 27 - EXPLAIN ANALYZE (read-only)
+
+Generated on 2026-07-28 from the configured host database; DSN and credentials omitted.
+Command: python scripts/profile_sprint27.py --latency-runs 20
+
+## Query round-trip latency
+
+| Query | Runs | P50 ms | P95 ms | Max ms | Rows |
+|---|---:|---:|---:|---:|---:|
+| 01_msc_arvore | 20 | 9.758 | 18.919 | 18.972 | 4 |
+| 02_msc_matriz_mensal | 20 | 6.629 | 16.329 | 18.099 | 12 |
+| 03_ranking_uf | 20 | 38.901 | 49.038 | 55.037 | 170 |
+| 04_carteira_entes | 20 | 15.472 | 21.347 | 31.786 | 169 |
+| 05_benchmark_ranking | 20 | 63.009 | 202.108 | 271.648 | 176 |
+| 06_cobertura_total | 20 | 7.087 | 10.310 | 10.436 | 1 |
+| 07_cobertura_pagina | 20 | 45.549 | 88.607 | 92.686 | 595 |
+| 08_dashboard_indicadores | 20 | 6.042 | 8.592 | 20.619 | 14 |
+| 09_receita_arvore | 20 | 11.599 | 16.743 | 22.972 | 46 |
+| 10_despesa_arvore | 20 | 22.385 | 36.517 | 49.642 | 162 |
+
+## 01_msc_arvore
+
+GET /entes/{cod_ibge}/msc/arvore
+
+Sort  (cost=128.30..128.31 rows=4 width=142) (actual time=13.518..13.523 rows=4 loops=1)
+  Sort Key: m.cod_conta
+  Sort Method: quicksort  Memory: 25kB
+  Buffers: shared hit=20
+  InitPlan 1 (returns $0)
+    ->  Aggregate  (cost=114.61..114.62 rows=1 width=32) (actual time=13.242..13.244 rows=1 loops=1)
+          Buffers: shared hit=14
+          ->  Index Only Scan using uq_mart_msc_rollup_chave on mart_msc_rollup v  (cost=0.29..111.22 rows=1359 width=2) (actual time=0.129..5.928 rows=1359 loops=1)
+                Index Cond: ((cod_ibge = '3550308'::text) AND (periodo = '2022-M12'::text))
+                Heap Fetches: 18
+                Buffers: shared hit=14
+  ->  Index Scan using ix_mart_msc_rollup_children on mart_msc_rollup m  (cost=0.29..13.64 rows=4 width=142) (actual time=13.405..13.428 rows=4 loops=1)
+        Index Cond: (((cod_ibge)::text = '3550308'::text) AND (periodo = '2022-M12'::text) AND (parent_conta IS NULL))
+        Filter: (versao_entrega = $0)
+        Buffers: shared hit=20
+Planning Time: 3.257 ms
+Execution Time: 14.993 ms
+
+## 02_msc_matriz_mensal
+
+GET /entes/{cod_ibge}/msc/conta/{codigo}/saldos
+
+Sort  (cost=26.22..26.25 rows=11 width=142) (actual time=0.372..0.377 rows=12 loops=1)
+  Sort Key: mes
+  Sort Method: quicksort  Memory: 27kB
+  Buffers: shared hit=14
+  ->  Index Scan using ix_mart_msc_rollup_conta on mart_msc_rollup m  (cost=0.29..26.03 rows=11 width=142) (actual time=0.297..0.335 rows=12 loops=1)
+        Index Cond: (((cod_ibge)::text = '3550308'::text) AND (ano = 2022) AND (cod_conta = '3.3.2.3.1.41.00'::text))
+        Buffers: shared hit=14
+Planning Time: 0.621 ms
+Execution Time: 0.872 ms
+
+## 03_ranking_uf
+
+GET /uf/{uf}/ranking
+
+Limit  (cost=294.95..294.96 rows=1 width=29) (actual time=22.377..22.498 rows=170 loops=1)
+  Buffers: shared hit=1235
+  ->  Sort  (cost=294.95..294.96 rows=1 width=29) (actual time=22.372..22.424 rows=170 loops=1)
+        Sort Key: r.rcl_12m DESC NULLS LAST, r.cod_ibge
+        Sort Method: quicksort  Memory: 38kB
+        Buffers: shared hit=1235
+        ->  Nested Loop  (cost=0.56..294.94 rows=1 width=29) (actual time=0.271..21.284 rows=170 loops=1)
+              Join Filter: (r.versao_entrega = d.versao_entrega)
+              Buffers: shared hit=1235
+              ->  Nested Loop  (cost=0.28..294.47 rows=1 width=46) (actual time=0.197..11.885 rows=170 loops=1)
+                    Buffers: shared hit=725
+                    ->  Seq Scan on fato_rcl r  (cost=0.00..286.17 rows=1 width=26) (actual time=0.119..3.913 rows=170 loops=1)
+                          Filter: ((periodo_ref = '2024-B6'::text) AND (substr((cod_ibge)::text, 1, 2) = '23'::text) AND (length((cod_ibge)::text) = 7))
+                          Rows Removed by Filter: 3009
+                          Buffers: shared hit=215
+                    ->  Index Scan using pk_dim_ente on dim_ente e  (cost=0.28..8.30 rows=1 width=20) (actual time=0.043..0.043 rows=1 loops=170)
+                          Index Cond: ((cod_ibge)::text = (r.cod_ibge)::text)
+                          Buffers: shared hit=510
+              ->  Index Scan using ix_dim_entrega_periodo on dim_entrega d  (cost=0.28..0.46 rows=1 width=16) (actual time=0.051..0.051 rows=1 loops=170)
+                    Index Cond: (((cod_ibge)::text = (e.cod_ibge)::text) AND (relatorio = 'RREO'::text) AND (periodo = '2024-B6'::text))
+                    Filter: (vigente IS TRUE)
+                    Buffers: shared hit=510
+Planning:
+  Buffers: shared hit=41
+Planning Time: 10.013 ms
+Execution Time: 22.722 ms
+
+## 04_carteira_entes
+
+GET /carteira/entes
+
+Sort  (cost=65.60..65.61 rows=1 width=96) (actual time=4.241..4.284 rows=169 loops=1)
+  Sort Key: cod_ibge
+  Sort Method: quicksort  Memory: 47kB
+  Buffers: shared hit=57
+  ->  Bitmap Heap Scan on mart_carteira m  (cost=6.05..65.59 rows=1 width=96) (actual time=0.300..0.924 rows=169 loops=1)
+        Recheck Cond: ((periodo = '2024-B6'::text) AND (indicador = 'pessoal_executivo'::text))
+        Filter: (substr((cod_ibge)::text, 1, 2) = '23'::text)
+        Rows Removed by Filter: 8
+        Heap Blocks: exact=55
+        Buffers: shared hit=57
+        ->  Bitmap Index Scan on ix_mart_carteira_periodo_indicador  (cost=0.00..6.05 rows=177 width=0) (actual time=0.231..0.233 rows=425 loops=1)
+              Index Cond: ((periodo = '2024-B6'::text) AND (indicador = 'pessoal_executivo'::text))
+              Buffers: shared hit=2
+Planning Time: 0.672 ms
+Execution Time: 4.450 ms
+
+## 05_benchmark_ranking
+
+GET /benchmark/ranking
+
+Sort  (cost=23.90..23.92 rows=9 width=1612) (actual time=1.428..1.487 rows=176 loops=1)
+  Sort Key: posicao, cod_ibge
+  Sort Method: quicksort  Memory: 311kB
+  Buffers: shared hit=53
+  ->  Index Scan using ix_mart_benchmark_consulta on mart_benchmark b  (cost=0.41..23.76 rows=9 width=1612) (actual time=0.129..0.642 rows=176 loops=1)
+        Index Cond: ((coorte_id = 'a6b2a7ac-ff2b-5384-8fa5-68446441d866'::uuid) AND (indicador = 'investimento_rcl'::text) AND (periodo = '2024-B2'::text) AND ((snapshot_hash)::text = '8ab6259c31688c2f6d5c9f34dab2873507f9cf38acb3c7c598208373e2acc4f5'::text))
+        Buffers: shared hit=53
+Planning Time: 0.797 ms
+Execution Time: 2.099 ms
+
+## 06_cobertura_total
+
+GET /admin/ingestion/cobertura (contagem)
+
+Aggregate  (cost=497.25..497.26 rows=1 width=8) (actual time=4.120..4.123 rows=1 loops=1)
+  Buffers: shared hit=45
+  ->  HashAggregate  (cost=473.60..484.11 rows=1051 width=26) (actual time=3.853..4.045 rows=171 loops=1)
+        Group Key: c.fonte, c.cod_ibge, c.ano
+        Batches: 1  Memory Usage: 81kB
+        Buffers: shared hit=45
+        ->  Bitmap Heap Scan on mart_cobertura_fonte c  (cost=30.58..465.20 rows=1121 width=26) (actual time=0.468..1.356 rows=1016 loops=1)
+              Recheck Cond: ((fonte = 'siconfi_rreo'::text) AND ((uf)::text = '23'::text) AND (ano = 2024))
+              Heap Blocks: exact=41
+              Buffers: shared hit=45
+              ->  Bitmap Index Scan on ix_mart_cobertura_fonte_filtro  (cost=0.00..30.30 rows=1121 width=0) (actual time=0.419..0.419 rows=1016 loops=1)
+                    Index Cond: ((fonte = 'siconfi_rreo'::text) AND ((uf)::text = '23'::text) AND (ano = 2024))
+                    Buffers: shared hit=4
+Planning:
+  Buffers: shared hit=3
+Planning Time: 1.060 ms
+Execution Time: 4.458 ms
+
+## 07_cobertura_pagina
+
+GET /admin/ingestion/cobertura (pagina)
+
+Sort  (cost=158.08..158.09 rows=1 width=69) (actual time=24.059..24.212 rows=595 loops=1)
+  Sort Key: c.cod_ibge, c.periodo
+  Sort Method: quicksort  Memory: 90kB
+  Buffers: shared hit=3728
+  ->  Nested Loop  (cost=0.57..158.07 rows=1 width=69) (actual time=0.407..20.619 rows=595 loops=1)
+        Buffers: shared hit=3728
+        ->  Subquery Scan on g  (cost=0.29..149.75 rows=1 width=26) (actual time=0.287..7.360 rows=100 loops=1)
+              Filter: ((g.fonte = 'siconfi_rreo'::text) AND (g.ano = 2024))
+              Buffers: shared hit=1788
+              ->  Limit  (cost=0.29..148.25 rows=100 width=26) (actual time=0.284..7.242 rows=100 loops=1)
+                    Buffers: shared hit=1788
+                    ->  Group  (cost=0.29..1555.45 rows=1051 width=26) (actual time=0.281..7.175 rows=100 loops=1)
+                          Group Key: c_1.fonte, c_1.cod_ibge, c_1.ano
+                          Buffers: shared hit=1788
+                          ->  Index Scan using pk_mart_cobertura_fonte on mart_cobertura_fonte c_1  (cost=0.29..1547.04 rows=1121 width=26) (actual time=0.276..6.201 rows=590 loops=1)
+                                Index Cond: (fonte = 'siconfi_rreo'::text)
+                                Filter: (((uf)::text = '23'::text) AND (ano = 2024))
+                                Rows Removed by Filter: 1211
+                                Buffers: shared hit=1788
+        ->  Index Scan using pk_mart_cobertura_fonte on mart_cobertura_fonte c  (cost=0.29..8.31 rows=1 width=69) (actual time=0.100..0.121 rows=6 loops=100)
+              Index Cond: ((fonte = 'siconfi_rreo'::text) AND ((cod_ibge)::text = (g.cod_ibge)::text))
+              Filter: ((ano = 2024) AND ((uf)::text = '23'::text))
+              Rows Removed by Filter: 12
+              Buffers: shared hit=1940
+Planning:
+  Buffers: shared hit=3
+Planning Time: 2.477 ms
+Execution Time: 24.761 ms
+
+## 08_dashboard_indicadores
+
+GET /entes/{cod_ibge}/dashboard
+
+Sort  (cost=38.08..38.10 rows=9 width=455) (actual time=0.590..0.597 rows=14 loops=1)
+  Sort Key: indicador
+  Sort Method: quicksort  Memory: 33kB
+  Buffers: shared hit=10
+  ->  Bitmap Heap Scan on mart_indicador m  (cost=4.38..37.94 rows=9 width=455) (actual time=0.292..0.365 rows=14 loops=1)
+        Recheck Cond: (((cod_ibge)::text = '2304400'::text) AND (periodo = '2024-B6'::text))
+        Heap Blocks: exact=8
+        Buffers: shared hit=10
+        ->  Bitmap Index Scan on ix_mart_indicador_ente_periodo  (cost=0.00..4.38 rows=9 width=0) (actual time=0.259..0.260 rows=14 loops=1)
+              Index Cond: (((cod_ibge)::text = '2304400'::text) AND (periodo = '2024-B6'::text))
+              Buffers: shared hit=2
+Planning Time: 0.679 ms
+Execution Time: 0.739 ms
+
+## 09_receita_arvore
+
+GET /entes/{cod_ibge}/receita/arvore
+
+Merge Join  (cost=79.68..168.67 rows=46 width=207) (actual time=1.898..2.578 rows=46 loops=1)
+  Merge Cond: (r.origem_codigo = d.codigo)
+  Buffers: shared hit=81
+  ->  Index Scan using uq_fato_receita_chave on fato_receita r  (cost=0.42..88.48 rows=46 width=122) (actual time=0.112..0.258 rows=46 loops=1)
+        Index Cond: (((cod_ibge)::text = '23'::text) AND (periodo = '2023-B6'::text))
+        Buffers: shared hit=5
+  ->  Sort  (cost=79.23..79.43 rows=78 width=85) (actual time=1.730..1.755 rows=76 loops=1)
+        Sort Key: d.codigo
+        Sort Method: quicksort  Memory: 34kB
+        Buffers: shared hit=76
+        ->  Seq Scan on dim_origem_receita d  (cost=0.00..76.78 rows=78 width=85) (actual time=0.095..0.374 rows=78 loops=1)
+              Buffers: shared hit=76
+Planning Time: 2.590 ms
+Execution Time: 2.746 ms
+
+## 10_despesa_arvore
+
+GET /entes/{cod_ibge}/despesa/arvore
+
+Sort  (cost=396.36..396.79 rows=171 width=179) (actual time=7.361..7.423 rows=162 loops=1)
+  Sort Key: f.funcao_codigo, f.natureza_codigo
+  Sort Method: quicksort  Memory: 57kB
+  Buffers: shared hit=95
+  ->  Nested Loop  (cost=74.94..390.02 rows=171 width=179) (actual time=1.402..3.331 rows=162 loops=1)
+        Buffers: shared hit=95
+        ->  Hash Join  (cost=74.80..381.27 rows=171 width=144) (actual time=1.321..2.293 rows=162 loops=1)
+              Hash Cond: (f.funcao_codigo = fn.codigo)
+              Buffers: shared hit=75
+              ->  Index Scan using ix_fato_despesa_ente_periodo on fato_despesa f  (cost=0.42..306.43 rows=171 width=99) (actual time=0.113..0.551 rows=162 loops=1)
+                    Index Cond: (((cod_ibge)::text = '23'::text) AND (periodo = '2024-B3'::text))
+                    Buffers: shared hit=6
+              ->  Hash  (cost=71.39..71.39 rows=239 width=45) (actual time=0.982..0.986 rows=239 loops=1)
+                    Buckets: 1024  Batches: 1  Memory Usage: 27kB
+                    Buffers: shared hit=69
+                    ->  Seq Scan on dim_funcao fn  (cost=0.00..71.39 rows=239 width=45) (actual time=0.088..0.486 rows=239 loops=1)
+                          Buffers: shared hit=69
+        ->  Memoize  (cost=0.15..0.45 rows=1 width=35) (actual time=0.004..0.004 rows=1 loops=162)
+              Cache Key: f.natureza_codigo
+              Cache Mode: logical
+              Hits: 152  Misses: 10  Evictions: 0  Overflows: 0  Memory Usage: 2kB
+              Buffers: shared hit=20
+              ->  Index Scan using dim_natureza_pkey on dim_natureza n  (cost=0.14..0.44 rows=1 width=35) (actual time=0.028..0.028 rows=1 loops=10)
+                    Index Cond: (codigo = f.natureza_codigo)
+                    Buffers: shared hit=20
+Planning:
+  Buffers: shared hit=13
+Planning Time: 4.274 ms
+Execution Time: 8.214 ms

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import threading
+import time
 import uuid
+from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -49,6 +53,56 @@ SILVER_MODEL_BY_FONTE: dict[str, type] = {
     FONTE_DCA: SilverDca,
     FONTE_MSC: SilverMsc,
 }
+
+_COBERTURA_CACHE_TTL_SECONDS = 30.0
+_COBERTURA_CACHE_MAX_ENTRIES = 32
+_COBERTURA_CACHE_MIN_ROWS = 100
+_CoberturaIdentity = tuple[int, datetime | None]
+_CoberturaCacheKey = tuple[
+    str | None,
+    str | None,
+    int | None,
+    int,
+    int,
+    _CoberturaIdentity,
+]
+
+
+@dataclass(frozen=True)
+class _CachedCobertura:
+    stored_at: float
+    response: CoberturaResponse
+
+
+_cobertura_cache: OrderedDict[_CoberturaCacheKey, _CachedCobertura] = OrderedDict()
+_cobertura_cache_lock = threading.Lock()
+
+
+def _cobertura_cache_get(key: _CoberturaCacheKey) -> CoberturaResponse | None:
+    now = time.monotonic()
+    with _cobertura_cache_lock:
+        cached = _cobertura_cache.get(key)
+        if cached is None:
+            return None
+        if now - cached.stored_at > _COBERTURA_CACHE_TTL_SECONDS:
+            del _cobertura_cache[key]
+            return None
+        _cobertura_cache.move_to_end(key)
+        return cached.response
+
+
+def _cobertura_cache_put(
+    key: _CoberturaCacheKey,
+    response: CoberturaResponse,
+) -> None:
+    with _cobertura_cache_lock:
+        _cobertura_cache[key] = _CachedCobertura(
+            stored_at=time.monotonic(),
+            response=response,
+        )
+        _cobertura_cache.move_to_end(key)
+        while len(_cobertura_cache) > _COBERTURA_CACHE_MAX_ENTRIES:
+            _cobertura_cache.popitem(last=False)
 
 
 def _connector(fonte: str, client: Any) -> BaseConnector:
@@ -411,13 +465,26 @@ def cobertura(
     page_size: int = 100,
 ) -> CoberturaResponse:
     """Matriz por período, paginada em grupos completos fonte×ente×ano."""
+    identity = repository.cobertura_identity(
+        session,
+        fonte=fonte,
+        uf=uf,
+        ano=ano,
+    )
+    cache_key: _CoberturaCacheKey | None = None
+    if identity[0] >= _COBERTURA_CACHE_MIN_ROWS:
+        cache_key = (fonte, uf, ano, page, page_size, identity)
+        cached = _cobertura_cache_get(cache_key)
+        if cached is not None:
+            return cached
+
     rows, total = repository.query_cobertura(
         session, fonte=fonte, uf=uf, ano=ano, page=page, page_size=page_size
     )
     total_linhas, entes, periodos, fontes = repository.cobertura_resumo(
         session, fonte=fonte, uf=uf, ano=ano
     )
-    return CoberturaResponse(
+    response = CoberturaResponse(
         data=[
             CoberturaItem(
                 fonte=r.fonte,
@@ -439,3 +506,6 @@ def cobertura(
             total_linhas=total_linhas, entes=entes, periodos=periodos, fontes=fontes
         ),
     )
+    if cache_key is not None:
+        _cobertura_cache_put(cache_key, response)
+    return response

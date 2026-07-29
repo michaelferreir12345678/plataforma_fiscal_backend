@@ -34,6 +34,11 @@ class MemoriaMinimo(BaseModel):
 
 class SerieMinimoItem(BaseModel):
     periodo: str
+    exercicio: int
+    # Só o 6º bimestre fecha o exercício: um ponto parcial não é comparável a um fechado,
+    # e a tela precisa dizer isso em vez de desenhar os dois com o mesmo peso.
+    parcial: bool
+    estagio_legal: Literal["liquidado", "empenhado"]
     base_impostos_transferencias: Decimal
     despesa_aplicada: Decimal
     pct_aplicado: Decimal
@@ -44,9 +49,27 @@ class SerieMinimoItem(BaseModel):
 
 
 class SerieMinimoOut(BaseModel):
+    """Série plurianual de um mínimo — um ponto por exercício (Sprint 25C).
+
+    A cobertura viaja junto: dizer "5 anos" e devolver 1 ponto sem explicar por quê é
+    o mesmo que esconder a lacuna de ingestão.
+    """
+
     cod_ibge: str
     periodo: str
+    indicador: Literal["saude", "educacao"]
+    minimo_pct: Decimal
+    anos_solicitados: int
+    exercicios_com_dado: list[int] = Field(default_factory=list)
+    exercicios_sem_dado: list[int] = Field(default_factory=list)
+    cobertura_completa: bool
+    observacao: str | None = None
+    # Um ponto por exercício (comparável entre anos).
     data: list[SerieMinimoItem]
+    # Acumulado bimestre a bimestre **dentro do exercício consultado**. Responde outra
+    # pergunta — "estamos no caminho do piso?" — e por isso não se mistura com a série
+    # plurianual: 25% acumulados no 2º bimestre não são comparáveis a 25% no 6º.
+    trajetoria_exercicio: list[SerieMinimoItem] = Field(default_factory=list)
     source_ref: SourceRef
     as_of: datetime
 

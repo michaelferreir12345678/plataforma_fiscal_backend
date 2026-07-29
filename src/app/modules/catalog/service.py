@@ -217,6 +217,13 @@ def refresh_dim_ente(session: Session, cod_ibge: str) -> DimEnte | None:
     # não deve ser sobrescrito nem provocar um UPSERT com SET vazio.
     if not valores:
         return existing
+    # GETs analíticos consultam este conformador com frequência. Evite regravar a
+    # dimensão (e adquirir locks/WAL) quando as fontes ainda produzem os mesmos
+    # atributos já conformados.
+    if existing is not None and all(
+        getattr(existing, atributo) == valor for atributo, valor in valores.items()
+    ):
+        return existing
     repository.upsert_dim_ente(session, cod_ibge=cod_ibge, valores=valores)
     # O UPSERT Core não atualiza automaticamente uma instância ORM já presente no
     # identity map. Recarregar evita que a primeira requisição após o ETL ainda veja

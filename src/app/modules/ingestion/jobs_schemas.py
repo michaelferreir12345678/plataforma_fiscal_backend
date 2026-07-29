@@ -108,6 +108,37 @@ class IngestJobCreateResult(BaseModel):
     job: IngestJobOut | None = None
 
 
+class SaudeFila(BaseModel):
+    """Estado do consumidor da fila — o que faltava para 'Na fila' não mentir.
+
+    Um job aceito e entregue ao Redis fica ``na_fila`` para sempre quando nenhum worker
+    está escutando, e a tela não tinha como distinguir isso de "aguardando a vez".
+    """
+
+    consumidores: int = Field(description="Workers RQ registrados na fila de ingestão.")
+    consumidores_vivos: int = Field(
+        default=0,
+        description=(
+            "Workers com heartbeat recente. Um worker morto no meio de um job mantém o "
+            "registro até o timeout (1h), então contar registro não prova consumo."
+        ),
+    )
+    aguardando: int = Field(description="Jobs persistidos em na_fila.")
+    executando: int = Field(description="Jobs com claim ativo.")
+    fila_redis: int | None = Field(
+        default=None, description="Entregas pendentes no Redis; nulo se indisponível."
+    )
+    redis_disponivel: bool = True
+    detalhe: str | None = Field(
+        default=None, description="Explicação legível quando algo impede o consumo."
+    )
+
+    @property
+    def parada(self) -> bool:
+        """Há trabalho esperando e nada indica que alguém vá pegá-lo."""
+        return self.aguardando > 0 and self.consumidores_vivos == 0 and self.executando == 0
+
+
 class RetificacaoItem(BaseModel):
     """Uma entrega que superou a versão anterior (retificação bitemporal)."""
 

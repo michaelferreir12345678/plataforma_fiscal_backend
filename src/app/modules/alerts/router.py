@@ -15,6 +15,7 @@ from app.modules.alerts.schemas import (
     CalendarioResponse,
     CarteiraAlertasResponse,
     FilaAlertasResponse,
+    HistoricoAlertasResponse,
 )
 from app.shared.scope import assert_ente_in_scope
 
@@ -30,6 +31,21 @@ def alertas(
 ) -> FilaAlertasResponse:
     """Fila priorizada de alertas no escopo (motor avalia on-read; dedup idempotente)."""
     return service.listar_fila(session, principal, escopo=escopo, cod_ibge=ente)
+
+
+@router.get("/alertas/historico", response_model=HistoricoAlertasResponse)
+def historico_alertas(
+    escopo: str = Query("ente", description="ente | carteira."),
+    ente: str | None = Query(None, description="Código IBGE (obrigatório se escopo=ente)."),
+    categoria: str | None = Query(None, description="Filtra por categoria do alerta."),
+    limite: int = Query(100, ge=1, le=500),
+    principal: Principal = Depends(require_capability("ver")),
+    session: Session = Depends(get_db),
+) -> HistoricoAlertasResponse:
+    """Alertas já tratados, com quem resolveu, quando e em quantos dias."""
+    return service.historico(
+        session, principal, escopo=escopo, cod_ibge=ente, categoria=categoria, limite=limite
+    )
 
 
 @router.get("/entes/{cod_ibge}/calendario", response_model=CalendarioResponse)

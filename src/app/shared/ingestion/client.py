@@ -303,14 +303,31 @@ class IbgeAgregadosClient(_BaseHttpClient):
 
 
 class HttpFileClient(_BaseHttpClient):
-    """Baixa um arquivo (planilha) via GET em ``params['url']`` e retorna os bytes."""
+    """Baixa um arquivo (planilha) via GET em ``params['url']`` e retorna os bytes.
 
-    def __init__(self, base_url: str = "", **kwargs: Any) -> None:
-        super().__init__(base_url, **kwargs)
+    O timeout é maior que o dos clientes JSON porque estes arquivos são grandes: a planilha
+    da CAPAG dos municípios tem ~24 MB, e 60 s derrubavam o download no meio.
+    """
+
+    #: Este cliente busca a URL que receber; quem sabe **onde** o arquivo está é o conector.
+    #: A marca permite ao conector decidir se precisa consultar o catálogo da fonte — um
+    #: cliente que já entrega o conteúdo (teste, cache local) não precisa de descoberta.
+    requer_url = True
+
+    def __init__(self, base_url: str = "", *, timeout: float = 300.0, **kwargs: Any) -> None:
+        super().__init__(base_url, timeout=timeout, **kwargs)
 
     def fetch(self, params: dict[str, Any]) -> bytes:
+        url = str(params.get("url") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            # Sem isto o httpx estoura em ``UnsupportedProtocol``, e o operador lê um erro
+            # de biblioteca em vez do que de fato aconteceu: a fonte não foi configurada.
+            raise ValueError(
+                "Fonte de arquivo sem URL utilizável. Informe 'url' nos parâmetros da "
+                "integração ou use uma fonte com descoberta automática de catálogo."
+            )
         self._limiter.wait()
-        resp = self._client.get(params["url"])
+        resp = self._client.get(url, follow_redirects=True)
         resp.raise_for_status()
         return resp.content
 

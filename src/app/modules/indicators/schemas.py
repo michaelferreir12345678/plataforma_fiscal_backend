@@ -30,14 +30,42 @@ class RclResponse(BaseModel):
     source_ref: SourceRef
 
 
+class AjustePeriodo(BaseModel):
+    """Insumos de comparabilidade de um ponto da série (deflação + população)."""
+
+    periodo: str
+    fator_deflator: Decimal | None = None  # nominal × fator = preços do período base
+    ipca_acum_pct: Decimal | None = None  # inflação acumulada do período até a base
+    populacao: int | None = None
+    pop_ano_ref: int | None = None  # ano da estimativa efetivamente usada
+
+
+class SerieAjuste(BaseModel):
+    """Contexto para exibir uma série em valores reais e per capita (Sprint 25)."""
+
+    base_periodo: str
+    deflator_disponivel: bool
+    populacao_disponivel: bool
+    fonte_deflator: str
+    fonte_populacao: str | None = None
+    observacao: str | None = None
+    itens: list[AjustePeriodo]
+
+
 class IndicadorOut(BaseModel):
     cod_ibge: str
     periodo: str
     indicador: str
     esfera: str
     valor_rs: Decimal
-    valor_pct_rcl: Decimal
-    faixa: str
-    teto_pct: Decimal
+    # Indicadores gerenciais (Sprint 25D) não têm limite legal: não há faixa nem teto, e
+    # inventar um ("normal") faria o produto afirmar conformidade onde a lei nada exige.
+    valor_pct_rcl: Decimal | None = None
+    faixa: str | None = None
+    teto_pct: Decimal | None = None
     versao_entrega: str
     source_ref: SourceRef
+    # Sprint 25C: nem todo indicador do mart é percentual da RCL — os mínimos
+    # constitucionais têm base própria. Quem exibe o número precisa saber qual.
+    denominador: str = "rcl"
+    base_valor: Decimal | None = None

@@ -32,6 +32,7 @@ from app.modules.debt import repository as debt_repo
 from app.modules.debt import service as debt_service
 from app.modules.expense import service as expense_service
 from app.modules.health_edu import service as health_edu_service
+from app.modules.indicators import gerenciais
 from app.modules.indicators import service as indicators_service
 from app.modules.ingestion import repository as ingestion_repo
 from app.modules.ingestion.models import DimEntrega
@@ -117,22 +118,43 @@ def _materializar_dcl_mart(session: Session, cod_ibge: str, periodo_rgf: str) ->
     )
     if fato is None or fato.dcl is None:
         return
+    fonte = SourceRef(
+        relatorio="RGF", anexo="Anexo 02 — DDCL", periodo=periodo_rgf,
+        versao_entrega=versao_rgf,
+    )
+    componentes = (
+        fonte,
+        SourceRef(relatorio="RREO", anexo="Anexo 03", periodo=rreo, versao_entrega=versao_rreo),
+    )
+    if fato.rcl_ajustada is not None:
+        # O limite do art. 3º da Resolução 40/2001 incide sobre a **RCL Ajustada**, que
+        # o próprio Anexo 02 publica e o ``fato_divida`` já guarda. Passar só o valor
+        # absoluto para ``classificar_limite`` fazia o mart redividir pela RCL cheia e
+        # descartar o denominador correto — o percentual saía sempre **para menos**, que
+        # é o pior sentido do erro num monitor de limites.
+        indicators_service.classificar_sobre_base(
+            session,
+            cod_ibge,
+            rreo,
+            "divida_consolidada_liquida",
+            Decimal(fato.dcl),
+            Decimal(fato.rcl_ajustada),
+            denominador="rcl_ajustada",
+            versao_entrega=versao_rreo,
+            source_ref=fonte,
+            source_components=componentes,
+        )
+        return
+    # Ente que não publicou a RCL Ajustada: a RCL é a melhor aproximação disponível, e a
+    # linha fica marcada com o denominador que de fato usou.
     indicators_service.classificar_limite(
         session,
         cod_ibge,
         rreo,
         "divida_consolidada_liquida",
         Decimal(fato.dcl),
-        source_ref=SourceRef(
-            relatorio="RGF", anexo="Anexo 02 — DDCL", periodo=periodo_rgf,
-            versao_entrega=versao_rgf,
-        ),
-        source_components=(
-            SourceRef(relatorio="RGF", anexo="Anexo 02 — DDCL", periodo=periodo_rgf,
-                      versao_entrega=versao_rgf),
-            SourceRef(relatorio="RREO", anexo="Anexo 03", periodo=rreo,
-                      versao_entrega=versao_rreo),
-        ),
+        source_ref=fonte,
+        source_components=componentes,
     )
 
 
@@ -149,10 +171,15 @@ def materialize_ente(session: Session, cod_ibge: str) -> dict[str, int]:
         _safe(result_service.build_detalhe, session, cod_ibge, periodo)
         _safe(health_edu_service.build_saude, session, cod_ibge, periodo)
         _safe(health_edu_service.build_educacao, session, cod_ibge, periodo)
+        # Depende dos fatos acima (RCL, despesa, resultado) já estarem materializados.
+        _safe(gerenciais.materializar_gerenciais, session, cod_ibge, periodo)
         stats["rreo"] += 1
 
     for periodo in rgf_periodos:
-        _safe(personnel_service.build_detalhe, session, cod_ibge, periodo)
+        # Força a reapuração: o job é quem sabe que a regra pode ter mudado desde a
+        # última materialização. Sem isso, o fato de pessoal fica congelado e discorda
+        # do mart — duas telas com percentuais diferentes para o mesmo limite.
+        _safe_kw(personnel_service.build_detalhe, session, cod_ibge, periodo, forcar=True)
         _safe(debt_service.build_detalhe, session, cod_ibge, periodo)
         _safe(cash_rap_service.build_detalhe, session, cod_ibge, periodo)
         _safe(_materializar_dcl_mart, session, cod_ibge, periodo)
@@ -203,7 +230,16 @@ def materialize_scope(
     return total
 
 
-_BENCHMARK_INDICADORES = ("pessoal_executivo", "divida_consolidada_liquida")
+_BENCHMARK_INDICADORES = (
+    "pessoal_executivo",
+    "divida_consolidada_liquida",
+    # Sprint 25C: os mínimos passam a existir no mart e, portanto, no benchmarking.
+    "saude_minimo",
+    "educacao_mde",
+    "fundeb_profissionais",
+    # Sprint 25D: indicadores gerenciais (sem limite legal).
+    *gerenciais.INDICADORES_GERENCIAIS,
+)
 
 
 def materialize_benchmark(
@@ -251,35 +287,49 @@ def _safe_benchmark(
         return False
 
 
-def materialize_capag_todos(session: Session, *, versao: str | None = None) -> int:
-    """Materializa ``fato_capag`` para **todos** os entes de uma versão CAPAG (bulk).
+#: Relatórios que carregam publicação CAPAG (municípios e estados são conjuntos distintos).
+_RELATORIOS_CAPAG = ("CAPAG", "CAPAG-EST")
 
-    INSERT…SELECT direto do silver → gold: eficiente para os ~5.569 entes. Sem ``versao``,
-    usa a vigente de ``gold.dim_entrega`` (relatório CAPAG, entrega nacional 'BR');
-    informá-la explicitamente permite materializar uma entrega específica.
+
+def materialize_capag_todos(session: Session, *, versao: str | None = None) -> int:
+    """Materializa ``fato_capag`` a partir das entregas CAPAG **vigentes** (bulk).
+
+    INSERT…SELECT direto do silver → gold: eficiente para os ~5.569 entes por publicação.
+    Sem ``versao``, materializa **todas** as entregas vigentes de CAPAG — uma por
+    (escopo × exercício). Escolher só a mais recente, como antes, deixava a gold com os 27
+    estados de um ano e nenhum município: a carga terminava "com sucesso" e o dado não
+    chegava à tela. Informar ``versao`` mantém a materialização de uma entrega específica.
     """
-    vigente = versao or session.scalar(
-        select(DimEntrega.versao_entrega)
-        .where(DimEntrega.relatorio == "CAPAG", DimEntrega.vigente.is_(True))
-        .order_by(DimEntrega.homologada_em.desc())
-        .limit(1)
-    )
-    if vigente is None:
+    if versao is not None:
+        vigentes = [versao]
+    else:
+        vigentes = list(
+            session.scalars(
+                select(DimEntrega.versao_entrega).where(
+                    DimEntrega.relatorio.in_(_RELATORIOS_CAPAG),
+                    DimEntrega.vigente.is_(True),
+                )
+            )
+        )
+    if not vigentes:
         return 0
-    result = session.execute(
-        text(
-            """
-            INSERT INTO gold.fato_capag
-                (id, cod_ibge, ano_ref, nota_final, ind_endividamento, ind_poupanca,
-                 ind_liquidez, metodologia_versao, versao_entrega)
-            SELECT gen_random_uuid(), s.cod_ibge, s.ano_ref, s.nota_final,
-                   s.ind_endividamento, s.ind_poupanca, s.ind_liquidez,
-                   s.metodologia_versao, s.versao_entrega
-            FROM silver.tesouro_capag s
-            WHERE s.versao_entrega = :versao
-            ON CONFLICT ON CONSTRAINT uq_fato_capag_chave DO NOTHING
-            """
-        ),
-        {"versao": vigente},
-    )
-    return int(getattr(result, "rowcount", 0) or 0)
+    total = 0
+    for entrega in vigentes:
+        result = session.execute(
+            text(
+                """
+                INSERT INTO gold.fato_capag
+                    (id, cod_ibge, ano_ref, nota_final, ind_endividamento, ind_poupanca,
+                     ind_liquidez, metodologia_versao, versao_entrega)
+                SELECT gen_random_uuid(), s.cod_ibge, s.ano_ref, s.nota_final,
+                       s.ind_endividamento, s.ind_poupanca, s.ind_liquidez,
+                       s.metodologia_versao, s.versao_entrega
+                FROM silver.tesouro_capag s
+                WHERE s.versao_entrega = :versao
+                ON CONFLICT ON CONSTRAINT uq_fato_capag_chave DO NOTHING
+                """
+            ),
+            {"versao": entrega},
+        )
+        total += int(getattr(result, "rowcount", 0) or 0)
+    return total

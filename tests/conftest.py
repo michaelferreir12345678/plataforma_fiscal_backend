@@ -12,6 +12,7 @@ os.environ["ASSISTANT_PROVIDER"] = "local"
 import uuid  # noqa: E402
 from collections.abc import Iterator  # noqa: E402
 from dataclasses import dataclass, field  # noqa: E402
+from datetime import date  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 import pytest  # noqa: E402
@@ -29,7 +30,13 @@ from app.modules.catalog import service as catalog_service  # noqa: E402
 from app.modules.ingestion import integracoes  # noqa: E402
 from app.modules.limits import service as limits_service  # noqa: E402
 from app.modules.tenancy import repository  # noqa: E402
-from app.modules.tenancy.models import CAPACIDADES, AuditLog, Organizacao, Usuario  # noqa: E402
+from app.modules.tenancy.models import (  # noqa: E402
+    CAPACIDADES,
+    AuditLog,
+    Licenca,
+    Organizacao,
+    Usuario,
+)
 from scripts.bootstrap_db import ensure_role_and_database  # noqa: E402
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -88,6 +95,7 @@ def make_org():
         escopo: list[str] | None = None,
         senha: str = "senha1234",
         email: str | None = None,
+        licenciar: bool = True,
     ) -> OrgFixture:
         caps = capacidades if capacidades is not None else list(CAPACIDADES)
         entes = entes or []
@@ -102,6 +110,30 @@ def make_org():
                 repository.add_carteira_ente(
                     s, org_id=org.id, cod_ibge=cod, grupo=None, tag=None
                 )
+            # Desde a Sprint 19, carteira não dá acesso — licença dá. A fábrica licencia
+            # exatamente o que colocou na carteira (conta estadual recebe a UF inteira,
+            # como a expansão territorial da Sprint 4), espelhando o que
+            # ``platform.provisionar_org`` faz em produção. ``licenciar=False`` existe
+            # para os testes que precisam justamente do ente **não** licenciado.
+            if licenciar and entes:
+                if tipo_conta == "estado":
+                    for prefixo in {cod[:2] for cod in entes}:
+                        repository.add_licenca(
+                            s,
+                            Licenca(
+                                org_id=org.id, tipo="uf", uf=prefixo,
+                                vigencia_inicio=date.today(), status="ativa",
+                            ),
+                        )
+                else:
+                    for cod in entes:
+                        repository.add_licenca(
+                            s,
+                            Licenca(
+                                org_id=org.id, tipo="ente", cod_ibge=cod,
+                                vigencia_inicio=date.today(), status="ativa",
+                            ),
+                        )
             usuario = repository.create_usuario(
                 s, email=email, nome="Usuário", senha_hash=hash_password(senha), mfa_ativo=False
             )

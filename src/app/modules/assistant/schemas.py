@@ -20,6 +20,14 @@ class PerguntaRequest(BaseModel):
     as_of: datetime | None = Field(
         default=None, description="Reprodução bitemporal; default = versão vigente."
     )
+    pagina: str | None = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "Rota da tela de onde veio a pergunta (ex.: '/pessoal'). Usada só quando a "
+            "pergunta não nomeia indicador — 'pergunte sobre esta tela' (Sprint 25E)."
+        ),
+    )
 
 
 class ResumoExecutivoRequest(BaseModel):

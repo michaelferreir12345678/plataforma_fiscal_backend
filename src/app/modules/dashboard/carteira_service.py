@@ -8,7 +8,10 @@ subconjunto do usuário, ampliação estadual por UF) vem de ``shared/scope.py``
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+import threading
+import time
+from collections import Counter, OrderedDict, defaultdict
+from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy.orm import Session
@@ -56,6 +59,64 @@ CONFORMIDADE_COR: dict[str, str] = {
     "critico": "vermelho", "sem_dados": "cinza",
 }
 _STATUSES: tuple[str, ...] = ("conforme", "alerta", "prudencial", "critico", "sem_dados")
+_ENTES_CACHE_TTL_SECONDS = 30.0
+_ENTES_CACHE_MAX_ENTRIES = 32
+_ENTES_CACHE_MIN_SCOPE = 100
+
+_DimIdentity = tuple[tuple[str, str | None, str | None, str | None, int | None], ...]
+_PortfolioIdentity = tuple[tuple[str, str | None, str | None], ...]
+_MartIdentity = tuple[int, datetime | None]
+_EntesCacheKey = tuple[
+    str,
+    str,
+    int,
+    int,
+    str,
+    str | None,
+    str | None,
+    str | None,
+    tuple[str, ...],
+    _DimIdentity,
+    _PortfolioIdentity,
+    _MartIdentity,
+]
+
+
+@dataclass(frozen=True)
+class _CachedEntes:
+    stored_at: float
+    response: ListEnvelope[CarteiraEnteRow]
+
+
+_entes_cache: OrderedDict[_EntesCacheKey, _CachedEntes] = OrderedDict()
+_entes_cache_lock = threading.Lock()
+
+
+def _entes_cache_get(key: _EntesCacheKey) -> ListEnvelope[CarteiraEnteRow] | None:
+    now = time.monotonic()
+    with _entes_cache_lock:
+        cached = _entes_cache.get(key)
+        if cached is None:
+            return None
+        if now - cached.stored_at > _ENTES_CACHE_TTL_SECONDS:
+            del _entes_cache[key]
+            return None
+        _entes_cache.move_to_end(key)
+        return cached.response
+
+
+def _entes_cache_put(
+    key: _EntesCacheKey,
+    response: ListEnvelope[CarteiraEnteRow],
+) -> None:
+    with _entes_cache_lock:
+        _entes_cache[key] = _CachedEntes(
+            stored_at=time.monotonic(),
+            response=response,
+        )
+        _entes_cache.move_to_end(key)
+        while len(_entes_cache) > _ENTES_CACHE_MAX_ENTRIES:
+            _entes_cache.popitem(last=False)
 
 
 def conformidade_de_faixa(faixa: str | None) -> str:
@@ -243,8 +304,8 @@ def list_entes(
 ) -> ListEnvelope[CarteiraEnteRow]:
     """Grade/ranking paginado do escopo; ordenável por risco, filtrável por porte/região/tag."""
     scope_cods = scope.carteira_scope_ibges(session, principal)
-    por_ente = _mart_por_ente(session, scope_cods, periodo)
-    dim_map = {d.cod_ibge: d for d in catalog_repo.list_dim_entes(session, scope_cods)}
+    dim_rows = catalog_repo.list_dim_entes(session, scope_cods)
+    dim_map = {d.cod_ibge: d for d in dim_rows}
     carteira_rows = (
         tenancy_repo.list_carteira(session, principal.org_id)
         if principal.org_id is not None
@@ -252,6 +313,38 @@ def list_entes(
     )
     carteira_map = {c.cod_ibge: (c.grupo, c.tag) for c in carteira_rows}
 
+    cache_key: _EntesCacheKey | None = None
+    if len(scope_cods) >= _ENTES_CACHE_MIN_SCOPE:
+        dim_identity: _DimIdentity = tuple(
+            sorted((d.cod_ibge, d.nome, d.uf, d.regiao, d.populacao) for d in dim_rows)
+        )
+        portfolio_identity: _PortfolioIdentity = tuple(
+            sorted((c.cod_ibge, c.grupo, c.tag) for c in carteira_rows)
+        )
+        mart_identity = carteira_repo.mart_scope_identity(
+            session,
+            cods_ibge=scope_cods,
+            periodo=periodo,
+        )
+        cache_key = (
+            str(principal.org_id or ""),
+            periodo,
+            params.page,
+            params.page_size,
+            ordenar,
+            porte,
+            regiao,
+            tag,
+            tuple(sorted(scope_cods)),
+            dim_identity,
+            portfolio_identity,
+            mart_identity,
+        )
+        cached = _entes_cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+    por_ente = _mart_por_ente(session, scope_cods, periodo)
     universe = set(dim_map) | set(por_ente)
     linhas = [
         _ente_row(cod, dim_map.get(cod), por_ente.get(cod, []), carteira_map.get(cod, (None, None)))
@@ -268,7 +361,10 @@ def list_entes(
     linhas = _ordenar(linhas, ordenar)
     total = len(linhas)
     page_items = linhas[params.offset : params.offset + params.limit]
-    return paginate(page_items, total, params, source_ref=_source_ref(periodo))
+    response = paginate(page_items, total, params, source_ref=_source_ref(periodo))
+    if cache_key is not None:
+        _entes_cache_put(cache_key, response)
+    return response
 
 
 def build_mapa(

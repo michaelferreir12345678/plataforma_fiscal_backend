@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import delete, select
@@ -9,7 +11,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.modules.ingestion.models import SilverRreo
-from app.modules.result.models import FatoAjusteMetodologico, FatoResultado
+from app.modules.result.models import FatoAjusteMetodologico, FatoResultado, MetaFiscal
 from app.modules.result.resultado import MEDIDAS
 
 _ANEXO_MARCA = "06"
@@ -94,3 +96,61 @@ def read_anexo6(
             .order_by(SilverRreo.linha_seq)
         )
     )
+
+
+# --- op.meta_fiscal (meta da LDO declarada pela organização — Sprint 25B) ---
+def list_metas_fiscais(
+    session: Session, *, org_id: uuid.UUID, cod_ibge: str, exercicio: int | None = None
+) -> list[MetaFiscal]:
+    stmt = select(MetaFiscal).where(
+        MetaFiscal.org_id == org_id, MetaFiscal.cod_ibge == cod_ibge
+    )
+    if exercicio is not None:
+        stmt = stmt.where(MetaFiscal.exercicio == exercicio)
+    return list(session.scalars(stmt.order_by(MetaFiscal.exercicio.desc(), MetaFiscal.indicador)))
+
+
+def get_meta_fiscal(
+    session: Session, *, org_id: uuid.UUID, cod_ibge: str, exercicio: int, indicador: str
+) -> MetaFiscal | None:
+    return session.scalar(
+        select(MetaFiscal).where(
+            MetaFiscal.org_id == org_id,
+            MetaFiscal.cod_ibge == cod_ibge,
+            MetaFiscal.exercicio == exercicio,
+            MetaFiscal.indicador == indicador,
+        )
+    )
+
+
+def upsert_meta_fiscal(session: Session, valores: dict[str, Any]) -> MetaFiscal:
+    """Grava a meta do exercício/indicador (uma por chave), preservando quem criou."""
+    atual = get_meta_fiscal(
+        session,
+        org_id=valores["org_id"],
+        cod_ibge=valores["cod_ibge"],
+        exercicio=valores["exercicio"],
+        indicador=valores["indicador"],
+    )
+    if atual is None:
+        atual = MetaFiscal(**valores, criado_por=valores.get("atualizado_por"))
+        session.add(atual)
+    else:
+        atual.valor = valores["valor"]
+        atual.fonte_declarada = valores["fonte_declarada"]
+        atual.observacao = valores.get("observacao")
+        atual.atualizado_por = valores.get("atualizado_por")
+        atual.atualizado_em = datetime.now(UTC)
+    session.flush()
+    return atual
+
+
+def delete_meta_fiscal(session: Session, *, org_id: uuid.UUID, meta_id: uuid.UUID) -> bool:
+    row = session.scalar(
+        select(MetaFiscal).where(MetaFiscal.id == meta_id, MetaFiscal.org_id == org_id)
+    )
+    if row is None:
+        return False
+    session.delete(row)
+    session.flush()
+    return True

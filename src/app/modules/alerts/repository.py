@@ -64,13 +64,45 @@ def get_alerta(session: Session, *, org_id: uuid.UUID, alerta_id: uuid.UUID) -> 
     )
 
 
+def list_historico(
+    session: Session,
+    *,
+    org_id: uuid.UUID,
+    cods_ibge: Iterable[str] | None = None,
+    categoria: str | None = None,
+    limite: int = 100,
+) -> list[Alerta]:
+    """Alertas já tratados, do mais recentemente resolvido para o mais antigo."""
+    stmt = select(Alerta).where(
+        Alerta.org_id == org_id, Alerta.status.in_(("resolvida", "descartada"))
+    )
+    if cods_ibge is not None:
+        cods = list(cods_ibge)
+        stmt = stmt.where(Alerta.cod_ibge.in_(cods)) if cods else stmt.where(false())
+    if categoria:
+        stmt = stmt.where(Alerta.categoria == categoria)
+    stmt = stmt.order_by(
+        Alerta.resolvido_em.desc().nullslast(), Alerta.atualizado_em.desc()
+    ).limit(limite)
+    return list(session.scalars(stmt))
+
+
 def set_status(
-    session: Session, *, org_id: uuid.UUID, alerta_id: uuid.UUID, status: str, agora: datetime
+    session: Session, *, org_id: uuid.UUID, alerta_id: uuid.UUID, status: str, agora: datetime,
+    usuario_id: uuid.UUID | None = None,
 ) -> int:
+    tratado = status in ("resolvida", "descartada")
     result = session.execute(
         update(Alerta)
         .where(Alerta.id == alerta_id, Alerta.org_id == org_id)
-        .values(status=status, atualizado_em=agora)
+        .values(
+            status=status,
+            atualizado_em=agora,
+            # Reabrir um alerta apaga a assinatura: manter quem o fechou seria atribuir
+            # a essa pessoa um estado que ela não escolheu.
+            resolvido_em=agora if tratado else None,
+            resolvido_por=usuario_id if tratado else None,
+        )
     )
     return result.rowcount
 

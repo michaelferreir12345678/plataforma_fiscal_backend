@@ -14,6 +14,7 @@ from app.modules.forecast.schemas import (
     CenarioSalvo,
     CenarioSimularRequest,
     CenarioSimularResponse,
+    ComparacaoModelosResponse,
     ProjecaoResponse,
 )
 from app.shared.scope import assert_ente_in_scope
@@ -38,6 +39,24 @@ def projecao(
     assert_ente_in_scope(session, principal, cod_ibge)
     return service.build_projecao(
         session, cod_ibge, indicador, horizonte=horizonte, modelo=modelo, as_of=as_of
+    )
+
+
+@router.get(
+    "/entes/{cod_ibge}/projecao/comparacao", response_model=ComparacaoModelosResponse
+)
+def comparacao_modelos(
+    cod_ibge: str,
+    indicador: str = _INDICADOR_Q,
+    horizonte: int = Query(4, ge=1, le=24, description="Períodos à frente."),
+    as_of: datetime | None = _AS_OF_Q,
+    principal: Principal = Depends(require_capability("ver")),
+    session: Session = Depends(get_db),
+) -> ComparacaoModelosResponse:
+    """As três camadas lado a lado, com incerteza e o critério da escolha."""
+    assert_ente_in_scope(session, principal, cod_ibge)
+    return service.comparar_modelos(
+        session, cod_ibge, indicador, horizonte=horizonte, as_of=as_of
     )
 
 

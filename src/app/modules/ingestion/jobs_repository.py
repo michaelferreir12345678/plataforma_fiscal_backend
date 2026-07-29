@@ -144,6 +144,16 @@ def list_jobs(
     return list(session.scalars(stmt))
 
 
+def contar_por_status(session: Session, status: str) -> int:
+    """Contagem sob RLS — o que a organização enxerga é o que ela precisa destravar."""
+    return int(
+        session.scalar(
+            select(func.count()).select_from(IngestJob).where(IngestJob.status == status)
+        )
+        or 0
+    )
+
+
 def list_queued_jobs(session: Session, *, limit: int = 10_000) -> list[IngestJob]:
     """Jobs duráveis que precisam ser (re)entregues ao Redis após um restart."""
     return list(

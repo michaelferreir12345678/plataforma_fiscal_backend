@@ -327,12 +327,15 @@ def test_pos_job_nacional_atualiza_cobertura(
         resultado = ingest_jobs._recalcular(session, job, ["BR"])
 
     assert refresh_calls == [True]
-    assert resultado == {
-        "indicadores_recalculados": ["gold.mart_cobertura_fonte"],
-        "cobertura_antes": 10,
-        "cobertura_depois": 13,
-        "delta_cobertura": 3,
-    }
+    assert resultado["cobertura_antes"] == 10
+    assert resultado["cobertura_depois"] == 13
+    assert resultado["delta_cobertura"] == 3
+    # Sprint 26: a verificação de qualidade roda ao fim de toda carga.
+    assert resultado["indicadores_recalculados"] == [
+        "gold.data_quality_check",
+        "gold.mart_cobertura_fonte",
+    ]
+    assert "qualidade" in resultado
 
 
 def test_pos_job_capag_materializa_gold_e_cobertura(monkeypatch) -> None:
@@ -371,15 +374,17 @@ def test_pos_job_capag_materializa_gold_e_cobertura(monkeypatch) -> None:
         resultado = ingest_jobs._recalcular(session, job, ["BR"])
 
     assert capag_calls == [True]
-    assert resultado == {
-        "indicadores_recalculados": [
-            "gold.fato_capag",
-            "gold.mart_cobertura_fonte",
-        ],
-        "cobertura_antes": 0,
-        "cobertura_depois": 5570,
-        "delta_cobertura": 5570,
-    }
+    assert resultado["cobertura_antes"] == 0
+    assert resultado["cobertura_depois"] == 5570
+    assert resultado["delta_cobertura"] == 5570
+    # Sprint 26: toda carga termina verificando o que materializou; a lista passa a
+    # incluir a tabela de checks, e o resumo da verificação viaja no resultado do job.
+    assert resultado["indicadores_recalculados"] == [
+        "gold.data_quality_check",
+        "gold.fato_capag",
+        "gold.mart_cobertura_fonte",
+    ]
+    assert "qualidade" in resultado
 
 
 def test_timeout_do_produtor_nao_sobrescreve_claim_concorrente(make_org):

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections import defaultdict
-from dataclasses import dataclass
+import threading
+import time
+from collections import OrderedDict, defaultdict
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -17,24 +19,30 @@ from app.core.errors import AppError
 from app.modules.benchmark import repository
 from app.modules.benchmark.models import DimCoorte
 from app.modules.benchmark.schemas import (
+    BenchmarkEvolucaoResponse,
     BenchmarkRankingResponse,
     BenchmarkResponse,
     BenchmarkValue,
     CoberturaBenchmark,
     CoorteOut,
     DistribuicaoBenchmark,
+    EvolucaoPonto,
     IndicadorDisponivel,
     OrdemRanking,
     OrdenacaoRanking,
     Sentido,
 )
-from app.modules.catalog import service as catalog_service
+from app.modules.catalog import repository as catalog_repository
 from app.modules.catalog.models import DimEnte
+from app.modules.indicators import rotulos
 from app.modules.indicators.models import MartIndicador
 from app.modules.ingestion.models import DimEntrega
 from app.shared.source_ref import SourceRef, composite_version_key
 
 _CRITERIO_ORDEM = {"porte": 0, "regiao": 1, "pib": 2}
+_RANKING_CACHE_MIN_ROWS = 100
+_RANKING_CACHE_MAX_ENTRIES = 32
+_RANKING_CACHE_TTL_SECONDS = 30.0
 _LABELS = {
     "pessoal_executivo": "Pessoal do Executivo",
     "divida_consolidada_liquida": "Dívida consolidada líquida",
@@ -44,6 +52,9 @@ _LABELS = {
     "saude_minimo": "Aplicação em saúde",
     "educacao_mde": "Aplicação em educação (MDE)",
     "fundeb_profissionais": "FUNDEB — profissionais da educação",
+    "rcl_per_capita": "RCL por habitante",
+    "investimento_rcl": "Investimento sobre a RCL",
+    "resultado_primario_rcl": "Resultado primário sobre a RCL",
 }
 
 
@@ -86,8 +97,69 @@ class _Snapshot:
     source_refs: list[SourceRef]
 
 
+@dataclass(frozen=True)
+class _CachedSnapshot:
+    stored_at: float
+    snapshot: _Snapshot
+
+
+_snapshot_cache: OrderedDict[tuple[str, str, str, str, str], _CachedSnapshot] = (
+    OrderedDict()
+)
+_snapshot_cache_lock = threading.Lock()
+
+
+def _snapshot_cache_get(
+    key: tuple[str, str, str, str, str],
+) -> _Snapshot | None:
+    now = time.monotonic()
+    with _snapshot_cache_lock:
+        cached = _snapshot_cache.get(key)
+        if cached is None:
+            return None
+        if now - cached.stored_at > _RANKING_CACHE_TTL_SECONDS:
+            del _snapshot_cache[key]
+            return None
+        _snapshot_cache.move_to_end(key)
+        return cached.snapshot
+
+
+def _snapshot_cache_put(
+    key: tuple[str, str, str, str, str],
+    snapshot: _Snapshot,
+) -> None:
+    reusable = replace(
+        snapshot,
+        memoria={**snapshot.memoria, "snapshot_reutilizado": True},
+    )
+    with _snapshot_cache_lock:
+        _snapshot_cache[key] = _CachedSnapshot(
+            stored_at=time.monotonic(),
+            snapshot=reusable,
+        )
+        _snapshot_cache.move_to_end(key)
+        while len(_snapshot_cache) > _RANKING_CACHE_MAX_ENTRIES:
+            _snapshot_cache.popitem(last=False)
+
+
 def _label(indicador: str) -> str:
-    return _LABELS.get(indicador, indicador.replace("_", " ").strip().capitalize())
+    # `capitalize()` engolia as siglas do domínio ("Rcl per capita"); o registro canônico
+    # trata sigla e mantém o nome igual em todas as telas.
+    return _LABELS.get(indicador) or rotulos.rotulo(indicador)
+
+
+def _unidade(mart: MartIndicador) -> str:
+    """Unidade declarada da métrica — a base vem da linha, não de uma suposição.
+
+    Antes da Sprint 25C todo percentual do mart era da RCL. Com ASPS/MDE/FUNDEB no mart,
+    rotular tudo como ``percentual_rcl`` transformaria um número certo em informação
+    errada para quem lê o eixo do gráfico.
+    """
+    if mart.valor_pct_rcl is None:
+        # Um valor absoluto dividido pela população não é "R$": é R$ por habitante, e
+        # o eixo do gráfico precisa dizer isso.
+        return "brl_per_capita" if mart.denominador == "populacao" else "brl"
+    return f"percentual_{mart.denominador or 'rcl'}"
 
 
 def _source_ref(mart: MartIndicador) -> SourceRef:
@@ -482,9 +554,11 @@ def _anchor_indicator_is_reproducible(
 
 
 def _sentido(session: Session, indicador: str, esfera: str) -> Sentido:
-    sentido_legal = repository.get_sentido_limite(
-        session, indicador=indicador, esfera=esfera
-    )
+    sentido_legal = repository.get_sentido_limite(session, indicador=indicador, esfera=esfera)
+    return _sentido_legal(sentido_legal)
+
+
+def _sentido_legal(sentido_legal: str | None) -> Sentido:
     if sentido_legal == "teto":
         return "menor_melhor"
     if sentido_legal == "piso":
@@ -500,30 +574,41 @@ def _indicadores_disponiveis(
     as_of: datetime,
     allow_legacy_fallback: bool,
 ) -> list[IndicadorDisponivel]:
-    codigos = repository.list_indicadores_ente_periodo(
-        session, cod_ibge=ente.cod_ibge, periodo=periodo
+    marts = repository.list_marts_ente_periodo(
+        session,
+        cod_ibge=ente.cod_ibge,
+        periodo=periodo,
     )
+    marts_por_indicador: dict[str, list[MartIndicador]] = defaultdict(list)
+    for mart in marts:
+        marts_por_indicador[mart.indicador].append(mart)
+    codigos = sorted(marts_por_indicador)
     entregas = repository.list_entregas_rreo(
         session, cods_ibge=[ente.cod_ibge], periodo=periodo, as_of=as_of
     )
-    result: list[IndicadorDisponivel] = []
-    for codigo in codigos:
-        marts = repository.list_mart_indicador(
+    periodo_rgf = _rgf_periodo(periodo)
+    entregas_rgf = (
+        repository.list_entregas_relatorio(
             session,
             cods_ibge=[ente.cod_ibge],
-            indicador=codigo,
-            periodo=periodo,
+            relatorio="RGF",
+            periodo=periodo_rgf,
+            as_of=as_of,
         )
-        if codigo == "pessoal_executivo" and (periodo_rgf := _rgf_periodo(periodo)):
-            entregas_rgf = repository.list_entregas_relatorio(
-                session,
-                cods_ibge=[ente.cod_ibge],
-                relatorio="RGF",
-                periodo=periodo_rgf,
-                as_of=as_of,
-            )
+        if "pessoal_executivo" in marts_por_indicador and periodo_rgf is not None
+        else []
+    )
+    sentidos = repository.get_sentidos_limites(
+        session,
+        indicadores=codigos,
+        esfera=ente.esfera or "",
+    )
+    result: list[IndicadorDisponivel] = []
+    for codigo in codigos:
+        indicador_marts = marts_por_indicador[codigo]
+        if codigo == "pessoal_executivo" and periodo_rgf is not None:
             effective = _effective_personnel_rows(
-                marts,
+                indicador_marts,
                 entregas_rreo=entregas,
                 entregas_rgf=entregas_rgf,
                 periodo_rreo=periodo,
@@ -531,17 +616,19 @@ def _indicadores_disponiveis(
             ).get(ente.cod_ibge)
         else:
             effective = _effective_rows(
-                marts, entregas, allow_legacy_fallback=allow_legacy_fallback
+                indicador_marts,
+                entregas,
+                allow_legacy_fallback=allow_legacy_fallback,
             ).get(ente.cod_ibge)
         if effective is None:
             continue
-        unidade = "percentual_rcl" if effective.mart.valor_pct_rcl is not None else "brl"
+        unidade = _unidade(effective.mart)
         result.append(
             IndicadorDisponivel(
                 codigo=codigo,
                 rotulo=_label(codigo),
                 unidade=unidade,
-                sentido=_sentido(session, codigo, ente.esfera or ""),
+                sentido=_sentido_legal(sentidos.get(codigo)),
             )
         )
     return result
@@ -553,6 +640,7 @@ def _percent_rank(
     ente_destaque: str,
     as_of: datetime,
     coorte: DimCoorte,
+    per_capita: bool = False,
 ) -> list[BenchmarkValue]:
     """SQL PERCENT_RANK: (RANK - 1) / (N - 1), com RANK comum em empates."""
     ordered = sorted(rows, key=lambda item: (item[2], item[1].cod_ibge))
@@ -578,6 +666,13 @@ def _percent_rank(
                 destaque=dim.cod_ibge == ente_destaque,
                 as_of=as_of,
                 source_ref=source,
+                valor_per_capita=(
+                    valor / Decimal(dim.populacao)
+                    if per_capita and dim.populacao
+                    else None
+                ),
+                populacao=dim.populacao if per_capita else None,
+                pop_ano_ref=dim.pop_ano_ref if per_capita else None,
                 memoria={
                     "metrica_origem": (
                         "valor_pct_rcl"
@@ -624,6 +719,16 @@ def _percent_rank(
                         "inclusivo_superior": coorte.inclusivo_superior,
                         "source_ref": coorte.source_ref,
                     },
+                    "leitura_per_capita": (
+                        {
+                            "aplicavel": per_capita,
+                            "populacao": dim.populacao,
+                            "pop_ano_ref": dim.pop_ano_ref,
+                            "formula": "valor_rs ÷ população",
+                        }
+                        if per_capita
+                        else {"aplicavel": False, "motivo": "métrica já é uma razão"}
+                    ),
                     "atributos_ente_na_coorte": {
                         "populacao": dim.populacao,
                         "pop_ano_ref": dim.pop_ano_ref,
@@ -830,7 +935,9 @@ def _build_snapshot(
     periodo: str | None,
     as_of: datetime | None,
 ) -> _Snapshot:
-    dim_ente = catalog_service.refresh_dim_ente(session, cod_ibge)
+    # ``gold.dim_ente`` is conformed by ingestion/materialization. A page GET must
+    # not re-read silver and issue an UPSERT before every benchmark calculation.
+    dim_ente = catalog_repository.get_dim_ente(session, cod_ibge)
     if dim_ente is None or dim_ente.esfera is None:
         raise AppError(
             status=422,
@@ -929,11 +1036,18 @@ def _build_snapshot(
         )
 
     use_pct = target.mart.valor_pct_rcl is not None
-    unidade = "percentual_rcl" if use_pct else "brl"
+    denominador = target.mart.denominador
+    unidade = _unidade(target.mart)
     rows: list[tuple[_EffectiveMart, _BenchmarkEnte, Decimal]] = []
+    base_divergente = 0
     for peer_code, peer in effective.items():
         dim = dim_by_code.get(peer_code)
         if dim is None:
+            continue
+        # Comparar percentuais de bases diferentes (RCL × impostos+transferências) daria
+        # um ranking com números que não medem a mesma coisa.
+        if use_pct and peer.mart.denominador != denominador:
+            base_divergente += 1
             continue
         raw_value = peer.mart.valor_pct_rcl if use_pct else peer.mart.valor_rs
         if raw_value is not None:
@@ -949,7 +1063,12 @@ def _build_snapshot(
         )
 
     values = _percent_rank(
-        rows, ente_destaque=cod_ibge, as_of=snapshot_as_of, coorte=selected
+        rows,
+        ente_destaque=cod_ibge,
+        as_of=snapshot_as_of,
+        coorte=selected,
+        # Só uma métrica em R$ vira R$/hab; ``rcl_per_capita`` já nasce dividida.
+        per_capita=(unidade == "brl"),
     )
     values = _add_personnel_lineage(
         indicador=resolved_indicator,
@@ -982,6 +1101,16 @@ def _build_snapshot(
         len(existing_snapshot) == len(values)
         and {item.cod_ibge for item in existing_snapshot} == expected_codes
     )
+    response_as_of = snapshot_as_of
+    if snapshot_complete:
+        # Revalidations HTTP precisam de representação estável. Um snapshot
+        # imutável já materializado conserva o instante em que foi calculado, em
+        # vez de trocar ``as_of`` por ``now()`` a cada GET sem mudança fiscal.
+        response_as_of = existing_snapshot[0].as_of
+        values = [
+            item.model_copy(update={"as_of": response_as_of})
+            for item in values
+        ]
     if not snapshot_complete:
         _materialize(
             session,
@@ -1001,6 +1130,11 @@ def _build_snapshot(
         "materializado_em": "gold.mart_benchmark",
         "fonte_valores": "gold.mart_indicador",
         "metrica": "valor_pct_rcl" if use_pct else "valor_rs",
+        "denominador": denominador,
+        "base_valor_ente": (
+            str(target.mart.base_valor) if target.mart.base_valor is not None else None
+        ),
+        "entes_excluidos_por_base_divergente": base_divergente,
         "formula_percentil": "100 * (RANK(valor ASC) - 1) / (N - 1); N=1 => 0",
         "empates": "RANK comum; posições seguintes preservam a lacuna SQL-standard",
         "formula_quantis": "percentile_cont com interpolação linear Type 7: h=(N-1)*p",
@@ -1011,7 +1145,7 @@ def _build_snapshot(
         "entes_com_valor_comparavel": len(values),
         "entes_excluidos_sem_valor": len(cohort_dims) - len(values),
         "as_of_solicitado": as_of.isoformat() if as_of else None,
-        "as_of_efetivo": snapshot_as_of.isoformat(),
+        "as_of_efetivo": response_as_of.isoformat(),
         "rastreio": (
             "Cada ponto e sua versão estão persistidos em gold.mart_benchmark pelo "
             "snapshot_hash; source_refs abaixo identificam as entregas de origem."
@@ -1027,7 +1161,7 @@ def _build_snapshot(
         session,
         ente=ente,
         periodo=resolved_period,
-        as_of=snapshot_as_of,
+        as_of=response_as_of,
         allow_legacy_fallback=as_of is None,
     )
     elegiveis = len(cohort_dims)
@@ -1061,6 +1195,66 @@ def _build_snapshot(
     )
 
 
+def _build_snapshot_cached(
+    session: Session,
+    *,
+    cod_ibge: str,
+    indicador: str | None,
+    coorte_raw: str | None,
+    periodo: str | None,
+    as_of: datetime | None,
+) -> _Snapshot:
+    """Reuse a bounded, short-lived materialized snapshot for large rankings."""
+
+    cacheable = (
+        as_of is None
+        and indicador is not None
+        and coorte_raw is not None
+        and coorte_raw not in _CRITERIO_ORDEM
+        and periodo is not None
+    )
+    if cacheable:
+        assert indicador is not None
+        assert coorte_raw is not None
+        assert periodo is not None
+        identity = repository.latest_snapshot_identity(
+            session,
+            coorte=coorte_raw,
+            indicador=indicador,
+            periodo=periodo,
+            cod_ibge_ancora=cod_ibge,
+        )
+        if identity is not None and identity[1] >= _RANKING_CACHE_MIN_ROWS:
+            key = (cod_ibge, indicador, coorte_raw, periodo, identity[0])
+            cached = _snapshot_cache_get(key)
+            if cached is not None:
+                return cached
+
+    snapshot = _build_snapshot(
+        session,
+        cod_ibge=cod_ibge,
+        indicador=indicador,
+        coorte_raw=coorte_raw,
+        periodo=periodo,
+        as_of=as_of,
+    )
+    if cacheable:
+        assert indicador is not None
+        assert coorte_raw is not None
+        assert periodo is not None
+        identity = repository.latest_snapshot_identity(
+            session,
+            coorte=coorte_raw,
+            indicador=indicador,
+            periodo=periodo,
+            cod_ibge_ancora=cod_ibge,
+        )
+        if identity is not None and identity[1] >= _RANKING_CACHE_MIN_ROWS:
+            key = (cod_ibge, indicador, coorte_raw, periodo, identity[0])
+            _snapshot_cache_put(key, snapshot)
+    return snapshot
+
+
 def build_benchmark(
     session: Session,
     *,
@@ -1070,7 +1264,7 @@ def build_benchmark(
     periodo: str | None = None,
     as_of: datetime | None = None,
 ) -> BenchmarkResponse:
-    snapshot = _build_snapshot(
+    snapshot = _build_snapshot_cached(
         session,
         cod_ibge=cod_ibge,
         indicador=indicador,
@@ -1095,6 +1289,126 @@ def build_benchmark(
         ente=anchor,
         memoria=snapshot.memoria,
         source_refs=snapshot.source_refs,
+    )
+
+
+def build_evolucao(
+    session: Session,
+    *,
+    cod_ibge: str,
+    indicador: str | None = None,
+    coorte: str | None = None,
+    periodos: int = 6,
+    as_of: datetime | None = None,
+) -> BenchmarkEvolucaoResponse:
+    """Trajetória do ente **dentro da coorte**, período a período (Sprint 25D).
+
+    A foto de um período responde "onde estou"; a série responde "para onde estou indo
+    em relação a quem se parece comigo" — a pergunta que faz um gestor agir. A coorte é
+    fixada no período mais recente e repetida nos anteriores: se ela mudasse a cada
+    ponto, a variação de posição misturaria movimento do ente com troca de régua.
+
+    Período sem valor comparável **não vira ponto** e é devolvido em
+    ``periodos_sem_comparacao`` — interpolar posição em ranking não significa nada.
+    """
+    disponiveis = [
+        periodo
+        for periodo, codigo in repository.list_periodos_indicadores_ente(
+            session, cod_ibge=cod_ibge
+        )
+        if indicador is None or codigo == indicador
+    ]
+    if not disponiveis:
+        raise AppError(
+            status=404,
+            title="Indicador ausente",
+            detail=f"Sem mart_indicador de {indicador or 'qualquer indicador'} para {cod_ibge}.",
+        )
+    # list_periodos_indicadores_ente já vem em ordem decrescente de período.
+    janela = sorted(dict.fromkeys(disponiveis), reverse=True)[:periodos]
+
+    pontos: list[EvolucaoPonto] = []
+    sem_comparacao: list[str] = []
+    referencia: _Snapshot | None = None
+    coorte_fixa = coorte
+    for periodo in sorted(janela):
+        try:
+            snapshot = _build_snapshot(
+                session,
+                cod_ibge=cod_ibge,
+                indicador=indicador,
+                coorte_raw=coorte_fixa,
+                periodo=periodo,
+                as_of=as_of,
+            )
+        except AppError:
+            sem_comparacao.append(periodo)
+            continue
+        anchor = next(
+            (item for item in snapshot.valores if item.cod_ibge == cod_ibge), None
+        )
+        if anchor is None:
+            sem_comparacao.append(periodo)
+            continue
+        referencia = snapshot
+        coorte_fixa = coorte_fixa or snapshot.coorte.codigo
+        pontos.append(
+            EvolucaoPonto(
+                periodo=snapshot.periodo,
+                valor_ente=anchor.valor,
+                posicao=anchor.posicao,
+                quantidade=len(snapshot.valores),
+                percentil=anchor.percentil,
+                mediana=snapshot.distribuicao.mediana,
+                p10=snapshot.distribuicao.p10,
+                p90=snapshot.distribuicao.p90,
+                valor_ente_per_capita=anchor.valor_per_capita,
+                cobertura=snapshot.cobertura,
+                as_of=snapshot.as_of,
+                source_ref=anchor.source_ref,
+            )
+        )
+    if referencia is None:
+        raise AppError(
+            status=404,
+            title="Sem série comparável",
+            detail=(
+                f"Nenhum dos {len(janela)} períodos de {cod_ibge} tem coorte comparável "
+                f"para {indicador or 'o indicador resolvido'}."
+            ),
+        )
+    observacao = None
+    if sem_comparacao:
+        observacao = (
+            f"{len(pontos)} de {len(janela)} períodos entraram na comparação; sem coorte "
+            f"comparável em {', '.join(sem_comparacao)}. Períodos sem par não são "
+            "interpolados."
+        )
+    return BenchmarkEvolucaoResponse(
+        cod_ibge=cod_ibge,
+        indicador=referencia.indicador,
+        indicador_rotulo=referencia.indicador_rotulo,
+        unidade=referencia.unidade,
+        sentido=referencia.sentido,
+        coorte=referencia.coorte,
+        coortes_disponiveis=referencia.coortes_disponiveis,
+        indicadores_disponiveis=referencia.indicadores_disponiveis,
+        periodos_solicitados=periodos,
+        periodos_sem_comparacao=sem_comparacao,
+        observacao=observacao,
+        pontos=pontos,
+        memoria={
+            "coorte_fixada_em": referencia.coorte.codigo,
+            "regra_coorte": (
+                "A coorte é a mesma em todos os pontos; mudar a régua entre períodos "
+                "faria a posição variar sem que o ente tivesse mudado."
+            ),
+            "formula_percentil": referencia.memoria.get("formula_percentil"),
+            "metrica": referencia.memoria.get("metrica"),
+            "denominador": referencia.memoria.get("denominador"),
+            "materializado_em": "gold.mart_benchmark (um snapshot por período)",
+        },
+        source_refs=referencia.source_refs,
     )
 
 
@@ -1130,7 +1444,7 @@ def build_ranking(
     pagina: int = 1,
     por_pagina: int = 100,
 ) -> BenchmarkRankingResponse:
-    snapshot = _build_snapshot(
+    snapshot = _build_snapshot_cached(
         session,
         cod_ibge=cod_ibge,
         indicador=indicador,
@@ -1143,6 +1457,12 @@ def build_ranking(
     start = (pagina - 1) * por_pagina
     total = len(ordered)
     total_pages = max(1, (total + por_pagina - 1) // por_pagina)
+    page_items = [
+        item
+        if item.cod_ibge == cod_ibge
+        else item.model_copy(update={"memoria": None})
+        for item in ordered[start : start + por_pagina]
+    ]
     return BenchmarkRankingResponse(
         indicador=snapshot.indicador,
         indicador_rotulo=snapshot.indicador_rotulo,
@@ -1155,7 +1475,7 @@ def build_ranking(
         indicadores_disponiveis=snapshot.indicadores_disponiveis,
         ordenar=ordenar,
         ordem=ordem,
-        itens=ordered[start : start + por_pagina],
+        itens=page_items,
         ente_ancora=anchor,
         total=total,
         pagina=pagina,

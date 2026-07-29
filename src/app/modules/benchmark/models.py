@@ -120,7 +120,10 @@ class MartBenchmark(Base):
     percentil: Mapped[Decimal] = mapped_column(Numeric(12, 8), nullable=False)
     posicao: Mapped[int] = mapped_column(Integer, nullable=False)
     faixa: Mapped[str | None] = mapped_column(Text, nullable=True)
-    unidade: Mapped[str] = mapped_column(String(20), nullable=False)
+    # A unidade deixou de ser só 'percentual_rcl'/'brl' na Sprint 25C: os mínimos
+    # declaram a própria base ('percentual_impostos_transferencias'), que não cabia
+    # no varchar(20) original.
+    unidade: Mapped[str] = mapped_column(Text, nullable=False)
     sentido: Mapped[str] = mapped_column(String(20), nullable=False)
     versao_entrega: Mapped[str] = mapped_column(Text, nullable=False)
     as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

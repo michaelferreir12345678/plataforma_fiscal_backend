@@ -124,6 +124,21 @@ class AgendamentoCreate(BaseModel):
         return list(dict.fromkeys(value)) if value else value
 
 
+class AgendamentoPatch(BaseModel):
+    """Edição de um agendamento (Sprint 25E). Campos ausentes não são alterados."""
+
+    ativo: bool | None = None
+    periodicidade: str | None = None
+    periodo: str | None = None
+    formato: str | None = None
+    proxima_execucao: datetime | None = None
+
+    @field_validator("periodicidade", "formato", mode="before")
+    @classmethod
+    def _lower(cls, value: object) -> object:
+        return value.strip().lower() if isinstance(value, str) else value
+
+
 class AgendamentoOut(BaseModel):
     id: uuid.UUID
     modelo: str

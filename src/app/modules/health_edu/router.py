@@ -24,6 +24,7 @@ router = APIRouter(tags=["health_edu"])
 
 _PERIODO_Q = Query(..., description="Período RREO bimestral (ex.: 2024-B6).")
 _AS_OF_Q = Query(None, description="Consulta bitemporal 'as of'.")
+_ANOS_Q = Query(5, ge=1, le=10, description="Exercícios da janela da série plurianual.")
 
 
 @router.get("/entes/{cod_ibge}/saude", response_model=SaudeDetalhe)
@@ -55,16 +56,14 @@ def memoria_saude(
 def serie_saude(
     cod_ibge: str,
     periodo: str = _PERIODO_Q,
+    anos: int = _ANOS_Q,
     as_of: datetime | None = _AS_OF_Q,
     principal: Principal = Depends(require_capability("ver")),
     session: Session = Depends(get_db),
 ) -> SerieMinimoOut:
+    """Série plurianual do ASPS: um ponto por exercício, com a cobertura declarada."""
     assert_ente_in_scope(session, principal, cod_ibge)
-    detalhe = service.build_saude(session, cod_ibge, periodo, as_of=as_of)
-    return SerieMinimoOut(
-        cod_ibge=cod_ibge, periodo=periodo, data=detalhe.serie,
-        source_ref=detalhe.source_ref, as_of=detalhe.as_of,
-    )
+    return service.build_serie(session, cod_ibge, periodo, "saude", anos=anos, as_of=as_of)
 
 
 @router.get("/entes/{cod_ibge}/saude/arvore", response_model=MinimoArvoreOut)
@@ -125,15 +124,15 @@ def memoria_educacao(
 def serie_educacao(
     cod_ibge: str,
     periodo: str = _PERIODO_Q,
+    anos: int = _ANOS_Q,
     as_of: datetime | None = _AS_OF_Q,
     principal: Principal = Depends(require_capability("ver")),
     session: Session = Depends(get_db),
 ) -> SerieMinimoOut:
+    """Série plurianual do MDE: um ponto por exercício, com a cobertura declarada."""
     assert_ente_in_scope(session, principal, cod_ibge)
-    detalhe = service.build_educacao(session, cod_ibge, periodo, as_of=as_of)
-    return SerieMinimoOut(
-        cod_ibge=cod_ibge, periodo=periodo, data=detalhe.serie,
-        source_ref=detalhe.source_ref, as_of=detalhe.as_of,
+    return service.build_serie(
+        session, cod_ibge, periodo, "educacao", anos=anos, as_of=as_of
     )
 
 

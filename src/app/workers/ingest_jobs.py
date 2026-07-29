@@ -35,6 +35,8 @@ QUEUE_NAME = "ingest"
 JOB_TIMEOUT = 60 * 60
 ABANDONED_GRACE_SECONDS = 60
 MAINTENANCE_INTERVAL_SECONDS = 60
+# Folga sobre o intervalo de manutenção: um worker ocioso renova o heartbeat bem antes.
+HEARTBEAT_TOLERANCIA_SEGUNDOS = 150
 RESULT_TTL = 24 * 60 * 60
 FAILURE_TTL = 7 * 24 * 60 * 60
 _COVERAGE_LOCK = 0x53465024
@@ -72,6 +74,61 @@ def set_recalcular(value: bool) -> None:
 
 def now() -> datetime:
     return datetime.now(UTC)
+
+
+def inspecionar_fila() -> tuple[int, int, int | None, bool, str | None]:
+    """(registrados, vivos, profundidade, redis_ok, detalhe) do consumidor da fila.
+
+    "Vivo" depende do estado do worker, e os dois casos são diferentes:
+
+    * **ocupado** — precisa de heartbeat recente. Quem morre no meio de um job deixa a chave
+      no Redis até o timeout do job (uma hora), então contar registro diria "há consumidor"
+      durante todo esse tempo: o erro na direção mais perigosa, com a tela calma enquanto
+      nada anda. Por isso o worker sem fork pulsa durante a carga (ver ``ingest_worker``).
+    * **ocioso** — o RQ só pulsa a cada ciclo de espera (~405 s), mas renova o TTL da chave
+      a cada pulso; um ocioso morto **desaparece** de ``Worker.all`` em ~420 s. Aí a própria
+      expiração já é a prova de vida, e exigir heartbeat recente marcaria como morto um
+      worker perfeitamente saudável — o alarme falso que este endpoint existe para evitar.
+    """
+    try:
+        from rq import Queue, Worker
+        from rq.worker_registration import clean_worker_registry
+
+        connection = _conn()
+        fila = Queue(QUEUE_NAME, connection=connection)
+        clean_worker_registry(fila)
+        limite = now() - timedelta(seconds=HEARTBEAT_TOLERANCIA_SEGUNDOS)
+        workers = Worker.all(queue=fila)
+        def vivo(w: Any) -> bool:
+            if str(w.get_state()) != "busy":
+                return True  # ocioso: a expiração da chave já é a prova de vida
+            return w.last_heartbeat is not None and w.last_heartbeat >= limite
+
+        vivos = sum(1 for w in workers if vivo(w))
+        return len(workers), vivos, fila.count, True, None
+    except Exception as exc:  # noqa: BLE001 — indisponibilidade é resposta, não erro 500
+        logger.warning("Não foi possível inspecionar a fila de ingestão: %s", exc)
+        return 0, 0, None, False, (
+            f"Redis/RQ indisponível: {exc.__class__.__name__}: {exc}"[:400]
+        )
+
+
+def alinhar_death_penalty_da_plataforma() -> None:
+    """Alinha o limite de tempo dos *registries* do RQ ao suportado pela plataforma.
+
+    O RQ escolhe a classe do **worker** por plataforma (``get_default_death_penalty_class``),
+    mas deixa ``BaseRegistry.death_penalty_class`` fixo em ``UnixSignalDeathPenalty``. Em
+    Windows, limpar um registro cujo job tem ``on_failure`` estoura ``AttributeError:
+    module 'signal' has no attribute 'SIGALRM'`` e derruba o consumidor — exatamente na
+    rotina que existe para recuperar entregas órfãs, então uma entrega perdida passava a
+    matar o worker a cada manutenção.
+    """
+    from rq.registry import BaseRegistry
+    from rq.timeouts import get_default_death_penalty_class
+
+    # O atributo é anotado no RQ como a classe POSIX concreta, embora aceite qualquer
+    # ``BaseDeathPenalty``; é justamente essa anotação estreita que esconde o bug no Windows.
+    BaseRegistry.death_penalty_class = get_default_death_penalty_class()  # type: ignore[assignment]
 
 
 def _conn() -> Any:
@@ -182,12 +239,53 @@ def rq_work_horse_killed(
     )
 
 
+def _esta_na_lista(queue: Any, rq_id: str) -> bool:
+    """O id está mesmo na lista da fila, ou só o hash de status sobrou?
+
+    Um worker que morre entre o ``LPOP`` e a gravação do status deixa um registro dizendo
+    ``queued`` sem nada na lista. Confiar no status é confiar na lápide: o job some da fila
+    e a tela mostra "Na fila" para sempre.
+    """
+    try:
+        posicao = queue.connection.lpos(queue.key, rq_id)
+        if posicao is not None:
+            return True
+        # ``lpos`` devolve None tanto para ausente quanto para Redis antigo sem o comando;
+        # a varredura confirma antes de descartarmos uma entrega válida.
+        return rq_id in set(queue.get_job_ids())
+    except Exception:  # noqa: BLE001 — na dúvida, tratar como presente e não duplicar
+        return True
+
+
+def _worker_vivo(queue: Any, rq_job: Any) -> bool:
+    """O worker que assumiu esta entrega ainda dá sinal de vida?"""
+    from rq import Worker
+
+    nome = getattr(rq_job, "worker_name", None)
+    if not nome:
+        return False
+    try:
+        limite = now() - timedelta(seconds=HEARTBEAT_TOLERANCIA_SEGUNDOS)
+        return any(
+            w.name == nome and w.last_heartbeat is not None and w.last_heartbeat >= limite
+            for w in Worker.all(queue=queue)
+        )
+    except Exception:  # noqa: BLE001 — na dúvida, reentregar é o lado seguro
+        return False
+
+
 def _enqueue_unique(queue: Any, job: IngestJob) -> str:
     """Entrega idempotente usando ``unique=True`` do RQ 2.10.
 
     Uma entrega ativa com o mesmo id é reutilizada. Uma chave terminal deixada pelo
     Redis antes do claim SQL é removida e recriada, pois o PostgreSQL ainda declara
     essa tentativa como pendente.
+
+    ``STARTED`` **não** conta como ativa por si só. Esta função só é chamada para jobs que o
+    PostgreSQL declara ``na_fila``, e o claim SQL (``na_fila → executando``) acontece no
+    início da execução: se o SQL diz ``na_fila``, ninguém está executando. Um ``STARTED``
+    remanescente é lápide de worker morto, e tratá-lo como entrega viva congelava o job até
+    o timeout de uma hora — sem consumidor, sem erro e sem sinal na tela.
     """
     from rq.exceptions import DuplicateJobError, NoSuchJobError
     from rq.job import Job, JobStatus
@@ -205,7 +303,6 @@ def _enqueue_unique(queue: Any, job: IngestJob) -> str:
     }
     active = {
         JobStatus.QUEUED,
-        JobStatus.STARTED,
         JobStatus.DEFERRED,
         JobStatus.SCHEDULED,
     }
@@ -218,7 +315,16 @@ def _enqueue_unique(queue: Any, job: IngestJob) -> str:
                 existing = Job.fetch(rq_id, connection=queue.connection)
             except NoSuchJobError:
                 continue
-            if existing.get_status(refresh=True) in active:
+            status = existing.get_status(refresh=True)
+            if status == JobStatus.QUEUED and not _esta_na_lista(queue, rq_id):
+                # Diz "na fila" mas não está na fila: entrega perdida, não entrega viva.
+                existing.delete(remove_from_queue=True, delete_dependents=False)
+                continue
+            if status in active:
+                return rq_id
+            if status == JobStatus.STARTED and _worker_vivo(queue, existing):
+                # Corrida estreita: o worker acabou de fazer o claim e o SQL ainda não
+                # refletia. Reentregar aqui só geraria uma duplicata que o claim recusa.
                 return rq_id
             existing.delete(remove_from_queue=True, delete_dependents=False)
     queue.enqueue_call(**enqueue_options)
@@ -408,6 +514,7 @@ def _embedded_loop() -> None:
     class ThreadSimpleWorker(_ThreadSimpleWorkerMixin, SimpleWorker):
         pass
 
+    alinhar_death_penalty_da_plataforma()
     while not _STOP.is_set():
         try:
             connection = _conn()
@@ -783,6 +890,56 @@ def _cobertura_count(session: Session, job: IngestJob) -> int:
     return int(session.scalar(stmt) or 0)
 
 
+def _rodar_checks_pos_carga(
+    session: Session, job: IngestJob, entes: list[str]
+) -> dict[str, Any]:
+    """Executa os checks de qualidade dos entes carregados e emite os alertas."""
+    from app.modules.quality import service as quality_service
+
+    entes_verificados = 0
+    total_falha = 0
+    total_aviso = 0
+    total_alertas = 0
+    codigos_falha: set[str] = set()
+    for cod in entes:
+        periodo = _ultimo_periodo_rreo(session, cod)
+        if periodo is None:
+            continue
+        try:
+            saida = quality_service.executar_e_alertar(
+                session, cod, periodo, job_id=job.id, org_id=job.org_id
+            )
+        except Exception:  # noqa: BLE001 — verificação não pode derrubar a carga
+            continue
+        entes_verificados += 1
+        total_falha += saida.falha
+        total_aviso += saida.aviso
+        total_alertas += saida.alertas_emitidos
+        codigos_falha |= set(saida.codigos_falha)
+    return {
+        "entes": entes_verificados,
+        "falha": total_falha,
+        "aviso": total_aviso,
+        "alertas": total_alertas,
+        "codigos_falha": sorted(codigos_falha),
+    }
+
+
+def _ultimo_periodo_rreo(session: Session, cod_ibge: str) -> str | None:
+    from app.modules.ingestion.models import DimEntrega
+
+    return session.scalar(
+        select(DimEntrega.periodo)
+        .where(
+            DimEntrega.cod_ibge == cod_ibge,
+            DimEntrega.relatorio == "RREO",
+            DimEntrega.vigente.is_(True),
+        )
+        .order_by(DimEntrega.periodo.desc())
+        .limit(1)
+    )
+
+
 def _recalcular(session: Session, job: IngestJob, entes_ok: list[str]) -> dict[str, Any]:
     """Materializa gold/cobertura e falha explicitamente se a fase pós-job quebrar."""
     entes = [ente for ente in entes_ok if ente != "BR"]
@@ -835,7 +992,14 @@ def _recalcular(session: Session, job: IngestJob, entes_ok: list[str]) -> dict[s
     if int(stats.get("dca", 0)) > 0:
         recalculados.append("gold.fato_balanco")
     recalculados.append("gold.mart_cobertura_fonte")
+
+    # Sprint 26: toda carga termina verificando o que acabou de materializar. Rodar os
+    # checks aqui — e não num job separado — garante que nenhum dado entra em produção
+    # sem passar pelas invariantes; o resultado fica em gold.data_quality_check.
+    qualidade = _rodar_checks_pos_carga(session, job, entes)
+    recalculados.append("gold.data_quality_check")
     return {
+        "qualidade": qualidade,
         "indicadores_recalculados": sorted(set(recalculados)),
         "cobertura_antes": antes,
         "cobertura_depois": depois,

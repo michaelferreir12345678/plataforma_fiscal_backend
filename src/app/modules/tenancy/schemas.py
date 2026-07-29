@@ -46,6 +46,26 @@ class MeResponse(BaseModel):
     nome: str
     org_ativa: MembershipInfo | None = None
     memberships: list[MembershipInfo] = Field(default_factory=list)
+    #: Operador da plataforma (Sprint 19). A UI usa para não oferecer uma rota que
+    #: devolveria 403; a garantia continua sendo do backend, não desta flag.
+    is_superuser: bool = False
+
+
+class TrocarOrgInput(BaseModel):
+    """Troca da organização ativa. A senha é o crivo: mudar de organização muda tudo
+    o que a sessão enxerga, e um token esquecido não pode passear entre clientes."""
+
+    org_id: uuid.UUID
+    senha: str = Field(min_length=1)
+
+
+class AlterarSenhaInput(BaseModel):
+    senha_atual: str = Field(min_length=1)
+    senha_nova: str = Field(min_length=8)
+
+
+class PerfilInput(BaseModel):
+    nome: str = Field(min_length=1, max_length=160)
 
 
 # --- Organização ---
@@ -137,6 +157,13 @@ class CarteiraLoteResult(BaseModel):
     adicionados: list[str]
     removidos: list[str]
     ignorados: list[str] = Field(default_factory=list, description="Já presentes ou inexistentes.")
+    nao_licenciados: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Recusados por não estarem cobertos por licença ativa (Sprint 19). Lista "
+            "separada de 'ignorados': aqui a causa é comercial, não cadastral."
+        ),
+    )
     total_carteira: int
 
 

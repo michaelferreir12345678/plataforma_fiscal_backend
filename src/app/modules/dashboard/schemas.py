@@ -16,6 +16,9 @@ class SemaforoItem(BaseModel):
     valor_pct_rcl: Decimal | None = None
     teto_pct: Decimal | None = None
     sentido: str
+    # Desde a Sprint 25C o semáforo mistura bases (RCL, impostos+transferências,
+    # FUNDEB); sem declarar qual é, o mesmo percentual contaria duas histórias.
+    denominador: str = "rcl"
 
 
 class KpiItem(BaseModel):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterable
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import func, select
@@ -42,6 +43,25 @@ def list_mart_by_scope(
     if indicador is not None:
         stmt = stmt.where(MartCarteira.indicador == indicador)
     return list(session.scalars(stmt.order_by(MartCarteira.cod_ibge, MartCarteira.indicador)))
+
+
+def mart_scope_identity(
+    session: Session,
+    *,
+    cods_ibge: Iterable[str],
+    periodo: str,
+) -> tuple[int, datetime | None]:
+    """Contagem e última atualização do snapshot gold usado pela grade."""
+    cods = list(cods_ibge)
+    if not cods:
+        return 0, None
+    count, latest = session.execute(
+        select(func.count(), func.max(MartCarteira.atualizado_em)).where(
+            MartCarteira.cod_ibge.in_(cods),
+            MartCarteira.periodo == periodo,
+        )
+    ).one()
+    return int(count or 0), latest
 
 
 def insert_lote_job(

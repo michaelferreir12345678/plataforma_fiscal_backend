@@ -286,3 +286,39 @@ def list_ibges_por_prefixo(
             return []
         stmt = stmt.where(DimEnte.cod_ibge.in_(cods))
     return list(session.scalars(stmt.order_by(DimEnte.cod_ibge)))
+
+
+def entrega_vigente_identity(
+    session: Session,
+    *,
+    cods: Sequence[str],
+    relatorio: str,
+    periodo: str,
+) -> tuple[tuple[str, str, str | None], ...]:
+    """Identidade imutável das entregas que alimentam um ranking.
+
+    A consulta traz somente a chave da versão e o hash da entrega, em vez dos fatos
+    completos. Ela permite reutilizar por poucos segundos um ranking grande sem servir
+    dados de uma retificação nova.
+    """
+    cods = list(cods)
+    if not cods:
+        return ()
+    rows = session.execute(
+        select(
+            DimEntrega.cod_ibge,
+            DimEntrega.versao_entrega,
+            DimEntrega.hash_payload,
+        )
+        .where(
+            DimEntrega.cod_ibge.in_(cods),
+            DimEntrega.relatorio == relatorio,
+            DimEntrega.periodo == periodo,
+            DimEntrega.vigente.is_(True),
+        )
+        .order_by(DimEntrega.cod_ibge, DimEntrega.versao_entrega)
+    ).all()
+    return tuple(
+        (str(row.cod_ibge), str(row.versao_entrega), row.hash_payload)
+        for row in rows
+    )

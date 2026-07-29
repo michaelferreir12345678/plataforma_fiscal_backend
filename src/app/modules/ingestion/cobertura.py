@@ -11,6 +11,7 @@ B/Q/S/M ou anual), e semeia ``gold.catalogo_fonte`` do ``FONTE_META``.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
@@ -44,6 +45,7 @@ from app.modules.ingestion.models import (
 )
 
 _FREQ_POR_MARCA = {"M": 12, "B": 6, "Q": 3, "S": 2}
+_BULK_UPSERT_SIZE = 500
 
 
 def _freq_e_indice(periodo: str) -> tuple[int, int, int]:
@@ -179,72 +181,124 @@ def _uf_de(cod_ibge: str) -> str | None:
     return cod_ibge[:2] if cod_ibge and cod_ibge[:2].isdigit() else None
 
 
-def _upsert(session: Session, valores: dict[str, Any]) -> None:
-    stmt = pg_insert(MartCoberturaFonte).values(**valores)
-    stmt = stmt.on_conflict_do_update(
-        index_elements=["fonte", "cod_ibge", "periodo"],
-        set_={
-            k: valores[k]
-            for k in (
-                "uf",
-                "ano",
-                "n_registros",
-                "versao_entrega_vigente",
-                "ingerido_em",
-                "defasagem_periodos",
-                "atualizado_em",
-            )
-        },
-    )
-    session.execute(stmt)
+_IngestionKey = tuple[str, str, str, str]
 
 
-def _ingerido_em(session: Session, fonte: str, cod_ibge: str, periodo: str, versao: str) -> Any:
-    return session.scalar(
-        select(func.min(RawPayload.ingerido_em)).where(
-            RawPayload.fonte == fonte,
-            RawPayload.cod_ibge.in_([cod_ibge, "BR"]),
-            RawPayload.periodo == periodo,
-            RawPayload.versao == versao,
+def _ingestion_times(
+    session: Session,
+    fontes: Iterable[str],
+) -> dict[_IngestionKey, datetime]:
+    """Prefetch do primeiro payload por chave, substituindo uma consulta por linha."""
+    fontes = list(dict.fromkeys(fontes))
+    if not fontes:
+        return {}
+    rows = session.execute(
+        select(
+            RawPayload.fonte,
+            RawPayload.cod_ibge,
+            RawPayload.periodo,
+            RawPayload.versao,
+            func.min(RawPayload.ingerido_em),
+        )
+        .where(RawPayload.fonte.in_(fontes))
+        .group_by(
+            RawPayload.fonte,
+            RawPayload.cod_ibge,
+            RawPayload.periodo,
+            RawPayload.versao,
         )
     )
+    return {
+        (str(fonte), str(cod_ibge), str(periodo), str(versao)): ingerido_em
+        for fonte, cod_ibge, periodo, versao, ingerido_em in rows
+        if ingerido_em is not None
+    }
+
+
+def _resolve_ingestion_time(
+    times: dict[_IngestionKey, datetime],
+    *,
+    fonte: str,
+    cod_ibge: str,
+    periodo: str,
+    versao: str,
+) -> datetime | None:
+    """Mantém a semântica antiga: menor instante entre payload do ente e nacional."""
+    candidates = (
+        times.get((fonte, cod_ibge, periodo, versao)),
+        times.get((fonte, "BR", periodo, versao)),
+    )
+    return min((value for value in candidates if value is not None), default=None)
+
+
+def _upsert_many(
+    session: Session,
+    valores: Sequence[dict[str, Any]],
+) -> None:
+    """UPSERT multi-values limitado para não exceder parâmetros do PostgreSQL."""
+    update_columns = (
+        "uf",
+        "ano",
+        "n_registros",
+        "versao_entrega_vigente",
+        "ingerido_em",
+        "defasagem_periodos",
+        "atualizado_em",
+    )
+    for offset in range(0, len(valores), _BULK_UPSERT_SIZE):
+        batch = valores[offset : offset + _BULK_UPSERT_SIZE]
+        insert_stmt = pg_insert(MartCoberturaFonte).values(list(batch))
+        stmt = insert_stmt.on_conflict_do_update(
+            index_elements=["fonte", "cod_ibge", "periodo"],
+            set_={
+                column: getattr(insert_stmt.excluded, column)
+                for column in update_columns
+            },
+        )
+        session.execute(stmt)
 
 
 def refresh_cobertura(session: Session, *, hoje: date | None = None) -> int:
     """Materializa ``gold.mart_cobertura_fonte`` do estado atual (idempotente). Retorna linhas."""
     hoje = hoje or date.today()
     agora = datetime.now()
-    total = 0
+    valores_cobertura: list[dict[str, Any]] = []
     # Rematerialização completa: uma cobertura que sumiu (fonte retirou o período) deve
     # deixar de existir como linha, não persistir como zumbi de um refresh anterior.
     session.execute(delete(MartCoberturaFonte))
+    ingestion_times = _ingestion_times(session, _SILVER_ENTREGA_MODEL)
 
     # (1) Fontes por-ente registradas em dim_entrega (SICONFI/IBGE): cobertura da versão vigente.
     for fonte, (model, periodo_col) in _SILVER_ENTREGA_MODEL.items():
         relatorio = FONTE_RELATORIO[fonte]
+        # A subconsulta correlacionada preserva o zero de entregas sem silver e conduz
+        # o PostgreSQL ao índice composto (cod_ibge, período, versão). O LEFT JOIN
+        # agregado anterior podia virar Seq Scan integral quando estatísticas/autovacuum
+        # estavam atrasados após grandes backfills.
+        silver_count = (
+            select(func.count(model.id))
+            .where(
+                model.cod_ibge == DimEntrega.cod_ibge,
+                periodo_col == DimEntrega.periodo,
+                model.versao_entrega == DimEntrega.versao_entrega,
+            )
+            .correlate(DimEntrega)
+            .scalar_subquery()
+        )
         rows = session.execute(
             select(
                 DimEntrega.cod_ibge,
                 DimEntrega.periodo,
                 DimEntrega.versao_entrega,
-                func.count(model.id),
-            )
-            .join(
-                model,
-                (model.cod_ibge == DimEntrega.cod_ibge)
-                & (periodo_col == DimEntrega.periodo)
-                & (model.versao_entrega == DimEntrega.versao_entrega),
-                isouter=True,
+                silver_count,
             )
             .where(DimEntrega.relatorio == relatorio, DimEntrega.vigente.is_(True))
-            .group_by(DimEntrega.cod_ibge, DimEntrega.periodo, DimEntrega.versao_entrega)
         ).all()
         for cod_ibge, periodo, versao, n in rows:
             if cod_ibge == "BR":
                 continue
             ano = int(str(periodo)[:4]) if str(periodo)[:4].isdigit() else 0
-            _upsert(
-                session,
+            valores_cobertura.append(
                 {
                     "fonte": fonte,
                     "cod_ibge": cod_ibge,
@@ -253,12 +307,17 @@ def refresh_cobertura(session: Session, *, hoje: date | None = None) -> int:
                     "ano": ano,
                     "n_registros": int(n or 0),
                     "versao_entrega_vigente": versao,
-                    "ingerido_em": _ingerido_em(session, fonte, cod_ibge, periodo, versao),
+                    "ingerido_em": _resolve_ingestion_time(
+                        ingestion_times,
+                        fonte=fonte,
+                        cod_ibge=str(cod_ibge),
+                        periodo=str(periodo),
+                        versao=str(versao),
+                    ),
                     "defasagem_periodos": defasagem_periodos(periodo, hoje),
                     "atualizado_em": agora,
                 },
             )
-            total += 1
 
     # (2) Fontes nacionais ('BR' em dim_entrega) cujo dado por-ente vive no silver.
     # A entrega dessas fontes é 'BR' (arquivo/API nacional); a versão corrente é a última
@@ -274,8 +333,7 @@ def refresh_cobertura(session: Session, *, hoje: date | None = None) -> int:
         for cod_ibge, periodo, n in rows:
             periodo = str(periodo)
             ano = int(periodo[:4]) if periodo[:4].isdigit() else 0
-            _upsert(
-                session,
+            valores_cobertura.append(
                 {
                     "fonte": fonte,
                     "cod_ibge": cod_ibge,
@@ -289,7 +347,6 @@ def refresh_cobertura(session: Session, *, hoje: date | None = None) -> int:
                     "atualizado_em": agora,
                 },
             )
-            total += 1
 
     # (3) BCB (séries nacionais, sem ente): uma linha por série.
     bcb_vigente = session.scalar(
@@ -304,8 +361,7 @@ def refresh_cobertura(session: Session, *, hoje: date | None = None) -> int:
         )
     ).all():
         ano = ultima.year if ultima is not None else hoje.year
-        _upsert(
-            session,
+        valores_cobertura.append(
             {
                 "fonte": "bcb",
                 "cod_ibge": str(serie),
@@ -319,6 +375,6 @@ def refresh_cobertura(session: Session, *, hoje: date | None = None) -> int:
                 "atualizado_em": agora,
             },
         )
-        total += 1
 
-    return total
+    _upsert_many(session, valores_cobertura)
+    return len(valores_cobertura)

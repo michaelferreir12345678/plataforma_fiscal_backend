@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -13,10 +14,12 @@ from sqlalchemy.orm import Session
 from app.modules.assistant.models import ConversaUso
 from app.modules.catalog.models import DimEnte
 from app.modules.tenancy.models import (
+    LICENCA_ATIVA,
     Assinatura,
     AuditLog,
     CarteiraEnte,
     Fatura,
+    Licenca,
     Membership,
     MembershipEscopo,
     Organizacao,
@@ -46,6 +49,19 @@ def get_usuario_by_email(session: Session, email: str) -> Usuario | None:
 
 def get_usuario(session: Session, usuario_id: uuid.UUID) -> Usuario | None:
     return session.get(Usuario, usuario_id)
+
+
+def emails_por_usuario(
+    session: Session, *, ids: Iterable[uuid.UUID]
+) -> dict[uuid.UUID, str]:
+    """E-mail de cada id informado — para exibir quem assinou uma ação sem N queries."""
+    unicos = [i for i in dict.fromkeys(ids) if i is not None]
+    if not unicos:
+        return {}
+    linhas = session.execute(
+        select(Usuario.id, Usuario.email).where(Usuario.id.in_(unicos))
+    ).all()
+    return dict(linhas)  # type: ignore[arg-type]
 
 
 def create_usuario(
@@ -448,3 +464,43 @@ def query_auditoria(
         )
     )
     return rows, total
+
+
+# --- Licenças (Sprint 19) ---------------------------------------------------
+
+
+def list_licencas(
+    session: Session, org_id: uuid.UUID, *, somente_ativas: bool = False
+) -> list[Licenca]:
+    """Licenças da organização, mais recentes primeiro.
+
+    ``somente_ativas`` filtra pelo **status**; a vigência por data é decidida em
+    :meth:`Licenca.vigente_em`, para que uma licença expirada por prazo valha como
+    expirada sem depender de job que atualize o status.
+    """
+    conds = [Licenca.org_id == org_id]
+    if somente_ativas:
+        conds.append(Licenca.status == LICENCA_ATIVA)
+    return list(
+        session.scalars(select(Licenca).where(*conds).order_by(Licenca.criada_em.desc()))
+    )
+
+
+def get_licenca(session: Session, licenca_id: uuid.UUID) -> Licenca | None:
+    return session.get(Licenca, licenca_id)
+
+
+def add_licenca(session: Session, licenca: Licenca) -> Licenca:
+    session.add(licenca)
+    session.flush()
+    return licenca
+
+
+def count_licencas_por_org(session: Session) -> dict[uuid.UUID, int]:
+    """Licenças ativas por organização — para o painel de uso do superuser."""
+    rows = session.execute(
+        select(Licenca.org_id, func.count())
+        .where(Licenca.status == LICENCA_ATIVA)
+        .group_by(Licenca.org_id)
+    )
+    return {row[0]: int(row[1]) for row in rows}

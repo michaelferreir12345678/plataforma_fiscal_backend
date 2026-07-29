@@ -44,7 +44,9 @@ from app.modules.expense.schemas import (
     ViolacaoEstagio,
 )
 from app.modules.indicators import repository as indicators_repo
+from app.modules.indicators import serie_ajuste
 from app.modules.indicators import service as indicators_service
+from app.modules.indicators.schemas import SerieAjuste
 from app.shared.envelope import DrillEnvelope, Measures
 from app.shared.hierarchy import HierarchyNode, build_drill_envelope
 from app.shared.source_ref import SourceRef
@@ -344,7 +346,10 @@ def _rcl_12m(
 
 
 # --- série e comparação temporal ---
-def _serie(session: Session, cod_ibge: str) -> list[SerieDespesaItem]:
+def _serie(
+    session: Session, cod_ibge: str, base_periodo: str
+) -> tuple[list[SerieDespesaItem], SerieAjuste]:
+    """Série multi-exercício em nominal + real (IPCA) + per capita, a preços de ``base``."""
     serie: list[SerieDespesaItem] = []
     for periodo in repository.distinct_periodos_fato(session, cod_ibge=cod_ibge):
         versao = indicators_repo.resolve_versao_rreo(
@@ -358,7 +363,16 @@ def _serie(session: Session, cod_ibge: str) -> list[SerieDespesaItem]:
         serie.append(
             SerieDespesaItem(periodo=periodo, empenhado=_totais(nodes, medidas).empenhado)
         )
-    return serie
+    ajuste = serie_ajuste.calcular(
+        session, cod_ibge, [s.periodo for s in serie], base_periodo
+    )
+    por_periodo = serie_ajuste.indexar(ajuste)
+    for item in serie:
+        a = por_periodo.get(item.periodo)
+        item.empenhado_real = serie_ajuste.real(item.empenhado, a)
+        item.empenhado_per_capita = serie_ajuste.per_capita(item.empenhado, a)
+        item.populacao = a.populacao if a else None
+    return serie, ajuste
 
 
 def _comparacao(
@@ -421,7 +435,7 @@ def build_detalhe(
     nodes, medidas, _ = _carregar_arvore(session, cod_ibge, periodo, versao, eixo)
     totais = _totais(nodes, medidas)
     raiz = build_drill_envelope(nodes, None, period=periodo, node_measures=_measures_map(medidas))
-    serie = _serie(session, cod_ibge)
+    serie, ajuste = _serie(session, cod_ibge, periodo)
     rcl = _rcl_12m(session, cod_ibge, periodo, as_of)
     return DespesaDetalhe(
         cod_ibge=cod_ibge,
@@ -434,6 +448,7 @@ def build_detalhe(
         rcl_12m=rcl,
         composicao=raiz.children,
         serie=serie,
+        serie_ajuste=ajuste,
         comparacao=_comparacao(serie, periodo, totais.empenhado),
         periodo_breadcrumb=catalog_service.periodo_breadcrumb(session, periodo),
         source_ref=_source_ref(periodo, versao, _ANEXO_AMBOS),
@@ -567,6 +582,29 @@ def _cascata(totais: DespesaTotais) -> list[EstagioPasso]:
     return passos
 
 
+def _estagios_ausentes(totais: DespesaTotais) -> list[str]:
+    """Estágios que o anexo consultado não publicou (lacuna da fonte, não zero)."""
+    return [e for e in (*_CASCATA, "inscrito_rap") if getattr(totais, e) is None]
+
+
+def _observacao_estagios(eixo: str, totais: DespesaTotais) -> str | None:
+    """Explica a cascata incompleta apontando o anexo que publica o estágio faltante.
+
+    O RREO **Anexo 02** (função) não traz a coluna de despesas *pagas* — só o Anexo 01
+    (natureza) traz. Sem isso a cascata pararia em "liquidado" sem dizer por quê, e o
+    potencial de restos a pagar (empenhado − pago) sumiria da tela silenciosamente.
+    """
+    if totais.pago is None and eixo == cls.EIXO_FUNCAO:
+        return (
+            "O RREO Anexo 02 (função) não publica o estágio 'pago': a cascata completa "
+            "e o potencial de restos a pagar vêm do eixo natureza (Anexo 01)."
+        )
+    ausentes = _estagios_ausentes(totais)
+    if ausentes:
+        return f"Estágios não publicados nesta entrega: {', '.join(ausentes)}."
+    return None
+
+
 def _lacunas(totais: DespesaTotais) -> list[LacunaEstagio]:
     candidatas = [
         ("credito_a_empenhar", _lacuna(totais.dotacao_atualizada, totais.empenhado),
@@ -622,6 +660,8 @@ def build_estagios(
         cascata=_cascata(totais),
         lacunas=_lacunas(totais),
         por_eixo=por_eixo,
+        estagios_ausentes=_estagios_ausentes(totais),
+        observacao=_observacao_estagios(eixo, totais),
         source_ref=_source_ref(periodo, versao, _anexo_do_eixo(eixo)),
     )
 
@@ -660,14 +700,23 @@ def _execucao_estagio(
 
 
 def build_execucao(
-    session: Session, cod_ibge: str, periodo: str, *, as_of: datetime | None = None
+    session: Session,
+    cod_ibge: str,
+    periodo: str,
+    *,
+    eixo: str = cls.EIXO_FUNCAO,
+    as_of: datetime | None = None,
 ) -> ExecucaoOut:
-    """Ritmo de execução (empenho/liquidação/pagamento ÷ dotação) × esperado linear."""
+    """Ritmo de execução (empenho/liquidação/pagamento ÷ dotação) × esperado linear.
+
+    O ``eixo`` importa: o Anexo 02 (função) não publica despesas **pagas**, então o
+    ritmo de pagamento só existe no eixo natureza (Anexo 01). Base e numerador vêm
+    sempre do mesmo anexo — misturar eixos daria um percentual sem significado.
+    """
+    _validar_eixo(eixo)
     versao = _resolve_versao(session, cod_ibge, periodo, as_of)
     bimestre = _bimestre(periodo)
-    nodes, medidas, _ = _carregar_arvore(
-        session, cod_ibge, periodo, versao, cls.EIXO_FUNCAO
-    )
+    nodes, medidas, _ = _carregar_arvore(session, cod_ibge, periodo, versao, eixo)
     totais = _totais(nodes, medidas)
     base = totais.dotacao_atualizada
     esperado = Decimal(bimestre) / Decimal(6) * Decimal(100)
@@ -679,10 +728,11 @@ def build_execucao(
         cod_ibge=cod_ibge,
         periodo=periodo,
         versao_entrega=versao,
+        eixo=eixo,
         bimestre=bimestre,
         esperado_pct=esperado,
         estagios=estagios,
-        source_ref=_source_ref(periodo, versao, _ANEXO_AMBOS),
+        source_ref=_source_ref(periodo, versao, _anexo_do_eixo(eixo)),
     )
 
 

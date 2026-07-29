@@ -24,6 +24,8 @@ from app.modules.alerts import repository, rules
 from app.modules.catalog import service as catalog_service
 from app.modules.forecast import service as forecast_service
 from app.modules.forecast.periodos import parse_periodo
+from app.modules.health_edu import service as health_edu_service
+from app.modules.indicators import rotulos
 from app.modules.ingestion.models import DimEntrega
 from app.modules.limits import repository as limits_repo
 from app.modules.limits import service as limits_service
@@ -124,6 +126,7 @@ def avaliar_ente(
     n += _alertas_publicacao(session, org_id, cod_ibge, entregas, agora)
     n += _alertas_defasagem(session, org_id, cod_ibge, entregas, anchor, agora)
     n += _alertas_limite(session, org_id, cod_ibge, anchor, agora)
+    n += _alertas_minimos(session, org_id, cod_ibge, anchor, agora)
     if incluir_preditivo:
         n += _alertas_preditivos(session, org_id, cod_ibge, anchor, agora)
     return n
@@ -356,17 +359,102 @@ def _alertas_limite(
 
 
 def _titulo_limite(indicador: str, faixa: str | None) -> str:
-    rotulos = {
+    # O título do alerta é mais explícito que o rótulo de gráfico ("Aplicação **mínima** em
+    # saúde"), por isso o mapa local; o registro canônico cobre o que faltar.
+    locais = {
         "pessoal_executivo": "Despesa com pessoal (Executivo)",
-        "divida_consolidada_liquida": "Dívida consolidada líquida",
         "saude_minimo": "Aplicação mínima em saúde",
         "educacao_mde": "Aplicação mínima em educação (MDE)",
         "fundeb_profissionais": "FUNDEB em profissionais da educação",
-        "operacoes_credito": "Operações de crédito",
         "garantias": "Garantias concedidas",
         "aro": "Antecipação de Receita Orçamentária",
     }
-    return f"{rotulos.get(indicador, indicador)} — faixa {faixa}"
+    return f"{locais.get(indicador) or rotulos.rotulo(indicador)} — faixa {faixa}"
+
+
+# --------------------------------------------------------------------------- #
+# Risco de descumprimento dos mínimos (Sprint 25C: projeção da Sprint 11 → motor 15)
+# --------------------------------------------------------------------------- #
+_MINIMOS: dict[str, tuple[str, str]] = {
+    # indicador da projeção -> (indicador do limite legal, rótulo)
+    "saude": ("saude_minimo", "Aplicação mínima em saúde (ASPS)"),
+    "educacao": ("educacao_mde", "Aplicação mínima em educação (MDE)"),
+}
+
+
+def _alertas_minimos(
+    session: Session,
+    org_id: uuid.UUID,
+    cod_ibge: str,
+    anchor: str,
+    agora: datetime,
+) -> int:
+    """Sinaliza **risco** de não atingir o piso constitucional antes do fechamento.
+
+    O mínimo é apurado no encerramento do exercício: no 6º bimestre, ficar abaixo do
+    piso é descumprimento (o alerta de limite já o classifica como ``insuficiente``);
+    nos bimestres anteriores, é *trajetória* — e é aí que ainda dá para corrigir. Esta
+    regra consome a projeção da Sprint 11 (razão acumulada anualizada) sem recalcular
+    nada, e diz explicitamente que projeção não é apuração.
+    """
+    bimestre = parse_periodo(anchor).indice
+    if bimestre >= 6:
+        # No fechamento quem fala é o alerta de limite (faixa insuficiente). Sair aqui,
+        # antes de projetar: apurar saúde e educação para depois descartar custava mais
+        # do que todo o resto do motor somado.
+        return 0
+    try:
+        saude, educacao = health_edu_service.projetar_minimos(session, cod_ibge, anchor)
+    except AppError:
+        return 0
+    projecao = {"saude": saude, "educacao": educacao}
+    n = 0
+    for dominio, (indicador, rotulo) in _MINIMOS.items():
+        item = projecao[dominio]
+        if not item.abaixo_do_minimo_projetado:
+            continue
+        provs = limits_repo.providencias(session, indicador=indicador, faixa="insuficiente")
+        prov = provs[0] if provs else None
+        base = _ente_alerta_base(cod_ibge, org_id, agora)
+        repository.upsert_alerta(
+            session,
+            {
+                **base,
+                "chave": f"minimo_risco:{indicador}:{anchor}",
+                "categoria": "preditivo",
+                "severidade": rules.SEV_ATENCAO,
+                "prioridade": rules.prioridade(rules.SEV_ATENCAO, "preditivo"),
+                "titulo": (
+                    f"{rotulo} — trajetória projeta {item.pct_projetado:.2f}% "
+                    f"contra piso de {item.minimo_pct:.0f}%"
+                ),
+                "motivo_legal": (
+                    prov.base_legal if prov
+                    else "Piso constitucional de aplicação mínima."
+                ),
+                "acao_sugerida": (
+                    "Projeção do fechamento a partir do acumulado até "
+                    f"{_rotulo_periodo(anchor)} — não é apuração. Reforçar a execução "
+                    "vinculada nos bimestres restantes; a apuração definitiva é no 6º."
+                ),
+                "prazo": None,
+                "link": "/saude-educacao",
+                "indicador": indicador,
+                "periodo": anchor,
+                "source_ref": item.source_ref.model_dump(mode="json"),
+                "memoria": {
+                    "pct_acumulado": str(item.pct_atual),
+                    "pct_projetado": str(item.pct_projetado),
+                    "minimo_pct": str(item.minimo_pct),
+                    "valor_aplicado_projetado": str(item.valor_aplicado_projetado),
+                    "valor_minimo_projetado": str(item.valor_minimo_projetado),
+                    "metodo": item.metodo,
+                    "apuracao_definitiva": "6º bimestre (encerramento do exercício)",
+                },
+            },
+        )
+        n += 1
+    return n
 
 
 # --------------------------------------------------------------------------- #

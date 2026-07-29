@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import and_, delete, func, insert, select, text, update
+from sqlalchemy import and_, delete, func, insert, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -139,6 +140,82 @@ def resolve_versao(
         .order_by(DimEntrega.homologada_em.desc())
         .limit(1)
     )
+
+
+def resolve_versoes(
+    session: Session,
+    *,
+    cod_ibge: str,
+    relatorio: str,
+    periodos: Iterable[str],
+    as_of: datetime | None = None,
+) -> dict[str, str]:
+    """Resolve várias versões efetivas com uma única ida ao banco.
+
+    Preserva a regra de :func:`resolve_versao`: vigente no presente e a entrega
+    homologada mais recente por período para consultas bitemporais.
+    """
+
+    requested = list(dict.fromkeys(periodos))
+    if not requested:
+        return {}
+    stmt = select(
+        DimEntrega.periodo,
+        DimEntrega.versao_entrega,
+        DimEntrega.homologada_em,
+    ).where(
+        DimEntrega.cod_ibge == cod_ibge,
+        DimEntrega.relatorio == relatorio,
+        DimEntrega.periodo.in_(requested),
+    )
+    if as_of is None:
+        stmt = stmt.where(DimEntrega.vigente.is_(True))
+    else:
+        stmt = stmt.where(DimEntrega.homologada_em <= as_of)
+    rows = session.execute(
+        stmt.order_by(DimEntrega.periodo, DimEntrega.homologada_em.desc())
+    )
+    resolved: dict[str, str] = {}
+    for periodo, versao, _homologada_em in rows:
+        resolved.setdefault(str(periodo), str(versao))
+    return resolved
+
+
+def version_identity_for_year(
+    session: Session,
+    *,
+    cod_ibge: str,
+    ano: int,
+) -> tuple[tuple[str, str, str], ...]:
+    """Identidade vigente DCA/MSC usada para invalidar caches analíticos."""
+
+    rows = session.execute(
+        select(
+            DimEntrega.relatorio,
+            DimEntrega.periodo,
+            DimEntrega.versao_entrega,
+        )
+        .where(
+            DimEntrega.cod_ibge == cod_ibge,
+            DimEntrega.vigente.is_(True),
+            or_(
+                and_(
+                    DimEntrega.relatorio == "MSC",
+                    DimEntrega.periodo.like(f"{ano}-M%"),
+                ),
+                and_(
+                    DimEntrega.relatorio == "DCA",
+                    DimEntrega.periodo == str(ano),
+                ),
+            ),
+        )
+        .order_by(
+            DimEntrega.relatorio,
+            DimEntrega.periodo,
+            DimEntrega.versao_entrega,
+        )
+    )
+    return tuple((str(relatorio), str(periodo), str(versao)) for relatorio, periodo, versao in rows)
 
 
 def entrega_homologada_em(
@@ -409,18 +486,22 @@ def query_cobertura(
         .limit(page_size)
         .subquery()
     )
+    pagina_stmt = select(MartCoberturaFonte).join(
+        pagina_grupos,
+        and_(
+            MartCoberturaFonte.fonte == pagina_grupos.c.fonte,
+            MartCoberturaFonte.cod_ibge == pagina_grupos.c.cod_ibge,
+            MartCoberturaFonte.ano == pagina_grupos.c.ano,
+        ),
+    )
+    # Repetir o filtro na relacao externa e logicamente redundante, mas permite ao
+    # PostgreSQL usar ix_mart_cobertura_fonte_filtro antes do join. Sem isso, o plano
+    # observado na Sprint 27 fazia seq scan de todo o mart para uma pagina de uma UF.
+    if filtros:
+        pagina_stmt = pagina_stmt.where(*filtros)
     rows = list(
         session.scalars(
-            select(MartCoberturaFonte)
-            .join(
-                pagina_grupos,
-                and_(
-                    MartCoberturaFonte.fonte == pagina_grupos.c.fonte,
-                    MartCoberturaFonte.cod_ibge == pagina_grupos.c.cod_ibge,
-                    MartCoberturaFonte.ano == pagina_grupos.c.ano,
-                ),
-            )
-            .order_by(
+            pagina_stmt.order_by(
                 MartCoberturaFonte.fonte,
                 MartCoberturaFonte.cod_ibge,
                 MartCoberturaFonte.ano,
@@ -455,6 +536,31 @@ def cobertura_resumo(
         fontes_stmt = fontes_stmt.where(*filtros)
     fontes = sorted(str(f) for f in session.scalars(fontes_stmt))
     return int(total or 0), int(entes or 0), int(periodos or 0), fontes
+
+
+def cobertura_identity(
+    session: Session,
+    *,
+    fonte: str | None = None,
+    uf: str | None = None,
+    ano: int | None = None,
+) -> tuple[int, datetime | None]:
+    """Contagem e última atualização do recorte materializado de cobertura."""
+    filtros = []
+    if fonte:
+        filtros.append(MartCoberturaFonte.fonte == fonte)
+    if uf:
+        filtros.append(MartCoberturaFonte.uf == uf)
+    if ano:
+        filtros.append(MartCoberturaFonte.ano == ano)
+    stmt = select(
+        func.count(),
+        func.max(MartCoberturaFonte.atualizado_em),
+    )
+    if filtros:
+        stmt = stmt.where(*filtros)
+    count, latest = session.execute(stmt).one()
+    return int(count or 0), latest
 
 
 def last_run_por_fonte(session: Session) -> dict[str, dict[str, Any]]:

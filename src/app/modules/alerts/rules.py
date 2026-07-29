@@ -26,11 +26,15 @@ _SEV_PESO = {SEV_CRITICO: 0, SEV_ATENCAO: 1, SEV_INFORMATIVO: 2}
 # Categorias e desempate de prioridade dentro da mesma severidade.
 _CAT_PESO = {
     "limite": 0,
-    "prazo": 1,
-    "defasagem_fonte": 2,
-    "preditivo": 3,
-    "publicacao": 4,
-    "anomalia": 5,
+    # Sprint 26: um número errado é pior que um número atrasado — qualidade vem antes
+    # do prazo, porque o gestor pode estar decidindo com ele agora.
+    "qualidade_dado": 1,
+    "prazo": 2,
+    "falha_ingestao": 3,
+    "defasagem_fonte": 4,
+    "preditivo": 5,
+    "publicacao": 6,
+    "anomalia": 7,
 }
 
 # Faixa do limite → severidade do alerta.

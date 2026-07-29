@@ -17,9 +17,13 @@ carteira do usuário — consultoria vê só a sua; a conta estadual vê todos o
 from __future__ import annotations
 
 import math
+import threading
+import time
+from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -45,10 +49,14 @@ from app.modules.indicators.limites import LimiteLegal, classificar_faixa
 from app.shared import scope
 from app.shared.envelope import DrillEnvelope
 from app.shared.hierarchy import HierarchyNode, build_drill_envelope
+from app.shared.scope import EnteNaoLicenciadoError
 from app.shared.source_ref import SourceRef
 
 VERSAO_CALCULO = "v1"
 ESFERA_MUNICIPAL = "municipal"
+_RANKING_CACHE_TTL_SECONDS = 30.0
+_RANKING_CACHE_MAX_ENTRIES = 32
+_RANKING_CACHE_MIN_ENTES = 100
 
 # --- UF: sigla ↔ código IBGE (2 dígitos) ↔ nome. Dado de referência estável. ---
 _UFS: tuple[tuple[str, str, str], ...] = (
@@ -96,6 +104,53 @@ class _IndicadorSpec:
     fonte: str  # rótulo humano da origem
     relatorio: str
     sentido: str | None = None  # teto | piso (só para ratio)
+
+
+_RankingIdentity = tuple[tuple[str, str, str | None], ...]
+_RankingCacheKey = tuple[
+    str,
+    str,
+    str,
+    str | None,
+    str | None,
+    str,
+    tuple[str, ...],
+    _RankingIdentity,
+]
+
+
+@dataclass(frozen=True)
+class _CachedRanking:
+    stored_at: float
+    response: RankingUfResponse
+
+
+_ranking_cache: OrderedDict[_RankingCacheKey, _CachedRanking] = OrderedDict()
+_ranking_cache_lock = threading.Lock()
+
+
+def _ranking_cache_get(key: _RankingCacheKey) -> RankingUfResponse | None:
+    now = time.monotonic()
+    with _ranking_cache_lock:
+        cached = _ranking_cache.get(key)
+        if cached is None:
+            return None
+        if now - cached.stored_at > _RANKING_CACHE_TTL_SECONDS:
+            del _ranking_cache[key]
+            return None
+        _ranking_cache.move_to_end(key)
+        return cached.response
+
+
+def _ranking_cache_put(key: _RankingCacheKey, response: RankingUfResponse) -> None:
+    with _ranking_cache_lock:
+        _ranking_cache[key] = _CachedRanking(
+            stored_at=time.monotonic(),
+            response=response,
+        )
+        _ranking_cache.move_to_end(key)
+        while len(_ranking_cache) > _RANKING_CACHE_MAX_ENTRIES:
+            _ranking_cache.popitem(last=False)
 
 
 # v1 — indicadores aditivos seguros. Exclusão de dupla contagem intra-governamental:
@@ -349,6 +404,41 @@ _OBSERVACAO = (
 )
 
 
+def _ref_ente_estadual(
+    session: Session, principal: Principal, ente: Any | None
+) -> EnteRef | None:
+    """Referência ao ente estadual **com** o veredito de acesso já resolvido.
+
+    Ver o consolidado da UF não implica poder abrir o cockpit do Governo do Estado: são
+    escopos diferentes (agregado × nominal, §6.4). Resolver aqui evita oferecer um botão
+    que responderia 403 — e evita que o 403 chegue à tela como "ente sem período".
+    """
+    if ente is None:
+        return None
+    try:
+        scope.assert_ente_in_scope(session, principal, ente.cod_ibge)
+    except EnteNaoLicenciadoError:
+        return EnteRef(
+            cod_ibge=ente.cod_ibge,
+            nome=ente.nome,
+            acessivel=False,
+            motivo_indisponivel=(
+                "O ente estadual não está coberto pela licença vigente desta organização."
+            ),
+        )
+    except ScopeForbiddenError:
+        return EnteRef(
+            cod_ibge=ente.cod_ibge,
+            nome=ente.nome,
+            acessivel=False,
+            motivo_indisponivel=(
+                "O ente estadual não está na carteira/escopo deste usuário. O consolidado "
+                "dos municípios continua disponível."
+            ),
+        )
+    return EnteRef(cod_ibge=ente.cod_ibge, nome=ente.nome)
+
+
 def build_consolidado(
     session: Session, principal: Principal, uf: str, periodo: str
 ) -> ConsolidadoUfResponse:
@@ -398,7 +488,7 @@ def build_consolidado(
         uf=uf_prefixo,
         uf_nome=uf_nome(uf_prefixo),
         periodo=periodo,
-        ente_estadual=EnteRef(cod_ibge=ente.cod_ibge, nome=ente.nome) if ente else None,
+        ente_estadual=_ref_ente_estadual(session, principal, ente),
         n_municipios=len(municipios),
         n_municipios_com_dado=ref.n_entes_com_dado if ref else 0,
         cobertura_pct=ref.cobertura_pct if ref else None,
@@ -467,6 +557,34 @@ def build_ranking(
         raise AppError(status=404, title="Indicador inválido", detail=f"'{indicador}'.")
 
     cods = sorted(entes_no_escopo_uf(session, principal, uf_prefixo))
+    cache_key: _RankingCacheKey | None = None
+    if len(cods) >= _RANKING_CACHE_MIN_ENTES:
+        identity_relatorio = "RGF" if spec.codigo == "disponibilidade" else "RREO"
+        identity_periodo = (
+            _rgf_periodo_de(periodo) or periodo
+            if identity_relatorio == "RGF"
+            else periodo
+        )
+        identity = repo.entrega_vigente_identity(
+            session,
+            cods=cods,
+            relatorio=identity_relatorio,
+            periodo=identity_periodo,
+        )
+        cache_key = (
+            uf_prefixo,
+            spec.codigo,
+            periodo,
+            regiao,
+            porte,
+            ordenar,
+            tuple(cods),
+            identity,
+        )
+        cached = _ranking_cache_get(cache_key)
+        if cached is not None:
+            return cached
+
     dim = {e.cod_ibge: e for e in repo.list_municipios_uf(session, uf_prefixo)}
     regioes = _regiao_por_ente(session, uf_prefixo)
     limite = _limite_municipal(session, spec.codigo) if spec.tipo == "ratio" else None
@@ -526,7 +644,7 @@ def build_ranking(
         r.posicao = i + 1
         r.percentil = Decimal(round((n - i) / n * 100, 1)) if n > 0 else None
 
-    return RankingUfResponse(
+    response = RankingUfResponse(
         uf=uf_prefixo,
         periodo=periodo,
         indicador=spec.codigo,
@@ -539,6 +657,9 @@ def build_ranking(
         itens=linhas,
         source_ref=_source_ref(spec, periodo),
     )
+    if cache_key is not None:
+        _ranking_cache_put(cache_key, response)
+    return response
 
 
 # --- Distribuição / concentração (estatística anônima: territorial) ---
@@ -649,7 +770,9 @@ def build_mapa(
     if spec is None:
         raise AppError(status=404, title="Indicador inválido", detail=f"'{indicador}'.")
 
-    municipios = [e.cod_ibge for e in repo.list_municipios_uf(session, uf_prefixo)]
+    linhas_municipios = repo.list_municipios_uf(session, uf_prefixo)
+    municipios = [e.cod_ibge for e in linhas_municipios]
+    nomes = {e.cod_ibge: e.nome for e in linhas_municipios if e.nome}
     no_escopo = entes_no_escopo_uf(session, principal, uf_prefixo)
     limite = _limite_municipal(session, spec.codigo) if spec.tipo == "ratio" else None
 
@@ -667,6 +790,7 @@ def build_mapa(
         entes.append(
             MapaUfEnte(
                 cod_ibge=cod,
+                nome=nomes.get(cod),
                 valor_pct=pct if dentro else None,
                 faixa=faixa,
                 cor=cor,

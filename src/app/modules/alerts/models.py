@@ -53,6 +53,13 @@ class Alerta(Base):
     periodo: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_ref: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     memoria: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Sprint 25E: sem quem/quando, "resolvido" é uma afirmação sem responsável.
+    resolvido_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    resolvido_por: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("usuario.id", ondelete="SET NULL"), nullable=True
+    )
     criado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

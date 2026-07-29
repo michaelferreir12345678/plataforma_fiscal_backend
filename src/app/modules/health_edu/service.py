@@ -35,7 +35,9 @@ from app.modules.health_edu.schemas import (
     ProjecaoSerieItem,
     SaudeDetalhe,
     SerieMinimoItem,
+    SerieMinimoOut,
 )
+from app.modules.indicators import service as indicators_service
 from app.modules.ingestion import repository as ingestion_repo
 from app.modules.ingestion.models import DimEntrega, SilverRreo
 from app.shared.hierarchy import HierarchyNode, build_drill_envelope
@@ -314,6 +316,46 @@ def _expurgo(
     )
 
 
+def _componentes_lineage(
+    fonte: SourceRef, rgf: SourceRef | None
+) -> tuple[SourceRef, ...] | None:
+    """Linhagem do mart: RREO é a base; o RGF entra só quando o expurgo veio dele."""
+    return (fonte, rgf) if rgf is not None else None
+
+
+def _materializar_mart(
+    session: Session,
+    ctx: Contexto,
+    *,
+    indicador: str,
+    valor_rs: Decimal,
+    base_valor: Decimal,
+    denominador: str,
+    fonte: SourceRef,
+    source_rgf: SourceRef | None,
+) -> None:
+    """Publica o mínimo em ``gold.mart_indicador`` (Sprint 25C).
+
+    Sem esta linha, os mínimos ficavam invisíveis para tudo que lê a gold: semáforo do
+    dashboard, carteira, monitor de limites, motor de alertas e — o pedido da sprint —
+    o benchmarking com a coorte. A base declarada é a do próprio demonstrativo (impostos
+    e transferências; receitas do FUNDEB), **nunca** a RCL.
+    """
+    indicators_service.classificar_sobre_base(
+        session,
+        ctx.cod_ibge,
+        ctx.periodo,
+        indicador,
+        valor_rs,
+        base_valor,
+        denominador=denominador,
+        versao_entrega=ctx.versao_rreo,
+        as_of=ctx.requested_as_of,
+        source_ref=fonte,
+        source_components=_componentes_lineage(fonte, source_rgf),
+    )
+
+
 def _componente(
     codigo: str,
     rotulo: str,
@@ -434,6 +476,15 @@ def _apurar_saude(
             versao_rgf=versao_rgf,
         )
     assert fato is not None
+    _materializar_mart(
+        session, ctx,
+        indicador="saude_minimo",
+        valor_rs=Decimal(fato.despesa_aplicada),
+        base_valor=Decimal(fato.base_impostos_transferencias),
+        denominador="impostos_transferencias",
+        fonte=ctx.source_saude,
+        source_rgf=source_rgf,
+    )
     return fato, source_rgf, {
         "rpnp_reportado_rreo": reportado,
         "fontes_rgf_selecionadas": fontes,
@@ -531,6 +582,26 @@ def _apurar_educacao(
             versao_rgf=versao_rgf,
         )
     assert fato is not None
+    _materializar_mart(
+        session, ctx,
+        indicador="educacao_mde",
+        valor_rs=Decimal(fato.despesa_aplicada),
+        base_valor=Decimal(fato.base_impostos_transferencias),
+        denominador="impostos_transferencias",
+        fonte=ctx.source_educacao,
+        source_rgf=source_rgf,
+    )
+    # O FUNDEB tem base própria (receitas principais do fundo) — publicá-lo sob a base de
+    # impostos daria um percentual diferente do que a lei exige medir.
+    _materializar_mart(
+        session, ctx,
+        indicador="fundeb_profissionais",
+        valor_rs=Decimal(fato.fundeb_aplicado_profissionais),
+        base_valor=Decimal(fato.fundeb_base_profissionais),
+        denominador="fundeb",
+        fonte=ctx.source_educacao,
+        source_rgf=None,
+    )
     return fato, source_rgf, {
         "rpnp_reportado_rreo": reportado,
         "fontes_rgf_selecionadas": fontes,
@@ -543,8 +614,12 @@ def _apurar_educacao(
 def _serie_item(
     fato: FatoSaude | FatoEducacao, source: SourceRef, as_of: datetime
 ) -> SerieMinimoItem:
+    ano, bimestre = _periodo(fato.periodo)
     return SerieMinimoItem(
         periodo=fato.periodo,
+        exercicio=ano,
+        parcial=bimestre < 6,
+        estagio_legal="empenhado" if bimestre == 6 else "liquidado",
         base_impostos_transferencias=fato.base_impostos_transferencias,
         despesa_aplicada=fato.despesa_aplicada,
         pct_aplicado=fato.pct_aplicado,
@@ -581,6 +656,119 @@ def _serie(
         except AppError:
             continue
     return sorted(itens, key=lambda item: item.periodo)
+
+
+def _periodos_por_exercicio(
+    session: Session,
+    *,
+    cod_ibge: str,
+    numero: str,
+    ano_limite: int,
+    bimestre_limite: int,
+) -> dict[int, list[str]]:
+    """Períodos publicados por exercício, sem ultrapassar o corte consultado."""
+    por_ano: dict[int, list[str]] = {}
+    for periodo in repository.distinct_periodos_anexo(
+        session, cod_ibge=cod_ibge, numero=numero
+    ):
+        try:
+            ano, bimestre = _periodo(periodo)
+        except AppError:
+            continue
+        if ano > ano_limite or (ano == ano_limite and bimestre > bimestre_limite):
+            continue
+        por_ano.setdefault(ano, []).append(periodo)
+    return por_ano
+
+
+def build_serie(
+    session: Session,
+    cod_ibge: str,
+    periodo: str,
+    area: Literal["saude", "educacao"],
+    *,
+    anos: int = 5,
+    as_of: datetime | None = None,
+) -> SerieMinimoOut:
+    """Série plurianual do mínimo: **um ponto por exercício**, no seu fechamento.
+
+    A comparação que o gestor faz é entre exercícios ("aplicamos mais ou menos que no
+    ano passado?"), não entre bimestres de anos diferentes — 25% acumulados no 2º
+    bimestre e 25% no 6º medem coisas distintas. Por isso cada exercício entra pelo
+    período mais avançado que ele publicou (B6 quando fechado), e o exercício corrente
+    entra pelo período consultado, marcado como ``parcial``.
+
+    Exercícios sem Anexo 8/12 publicado **não viram ponto** e são devolvidos em
+    ``exercicios_sem_dado``: a ausência aparece como ausência.
+    """
+    ano_atual, bimestre_atual = _periodo(periodo)
+    numero = "12" if area == "saude" else "08"
+    por_ano = _periodos_por_exercicio(
+        session,
+        cod_ibge=cod_ibge,
+        numero=numero,
+        ano_limite=ano_atual,
+        bimestre_limite=bimestre_atual,
+    )
+    janela = list(range(ano_atual - anos + 1, ano_atual + 1))
+    itens: list[SerieMinimoItem] = []
+    minimo_pct = ZERO
+    fonte: SourceRef | None = None
+    instante: datetime | None = None
+    for exercicio in janela:
+        candidatos = por_ano.get(exercicio)
+        if not candidatos:
+            continue
+        escolhido = max(candidatos, key=lambda p: _periodo(p)[1])
+        try:
+            ctx = _contexto(session, cod_ibge, escolhido, as_of)
+            fato = (
+                _apurar_saude(session, ctx)[0]
+                if area == "saude"
+                else _apurar_educacao(session, ctx)[0]
+            )
+        except AppError:
+            continue
+        source = ctx.source_saude if area == "saude" else ctx.source_educacao
+        itens.append(_serie_item(fato, source, ctx.as_of))
+        minimo_pct = Decimal(fato.minimo_pct)
+        fonte, instante = source, ctx.as_of
+
+    com_dado = [item.exercicio for item in itens]
+    sem_dado = [ano for ano in janela if ano not in com_dado]
+    anexo = _ANEXO_SAUDE if area == "saude" else _ANEXO_EDUCACAO
+    if fonte is None:
+        # Nem o período consultado apurou: devolvemos a moldura vazia com a fonte
+        # esperada, para a tela dizer o que falta em vez de mostrar um gráfico vazio.
+        ctx = _contexto(session, cod_ibge, periodo, as_of)
+        fonte = ctx.source_saude if area == "saude" else ctx.source_educacao
+        instante = ctx.as_of
+        minimo_pct = _limite(
+            session, "saude_minimo" if area == "saude" else "educacao_mde", ctx.esfera
+        )
+    observacao = None
+    if sem_dado:
+        observacao = (
+            f"{len(com_dado)} de {anos} exercícios têm o RREO {anexo} publicado para este "
+            f"ente; sem dado em {', '.join(str(a) for a in sem_dado)}. A série mostra só "
+            "o que foi apurado — não há estimativa de exercício ausente."
+        )
+    assert instante is not None
+    return SerieMinimoOut(
+        cod_ibge=cod_ibge,
+        periodo=periodo,
+        indicador=area,
+        minimo_pct=minimo_pct,
+        anos_solicitados=anos,
+        exercicios_com_dado=com_dado,
+        exercicios_sem_dado=sem_dado,
+        cobertura_completa=not sem_dado,
+        observacao=observacao,
+        data=itens,
+        trajetoria_exercicio=_serie(session, cod_ibge, periodo, area, as_of),
+        source_ref=fonte,
+        as_of=instante,
+    )
 
 
 def build_saude(
@@ -843,6 +1031,31 @@ def _projecao(
         ),
         source_ref=source,
         as_of=as_of,
+    )
+
+
+def projetar_minimos(
+    session: Session, cod_ibge: str, periodo: str, *, as_of: datetime | None = None
+) -> tuple[ProjecaoIndicador, ProjecaoIndicador]:
+    """Só as duas projeções (saúde, educação) do período — sem a série plurianual.
+
+    Quem precisa apenas do veredito "a trajetória fura o piso?" — o motor de alertas —
+    não deve pagar a série de 5 exercícios: ela custava mais do que a apuração dos dois
+    domínios somados e era descartada em seguida.
+    """
+    ctx = _contexto(session, cod_ibge, periodo, as_of)
+    saude, _, _ = _apurar_saude(session, ctx)
+    educacao, _, _ = _apurar_educacao(session, ctx)
+    return (
+        _projecao(
+            "saude", periodo, saude.pct_aplicado, saude.minimo_pct,
+            saude.despesa_aplicada, saude.valor_minimo, ctx.source_saude, ctx.as_of,
+        ),
+        _projecao(
+            "educacao", periodo, educacao.pct_aplicado, educacao.minimo_pct,
+            educacao.despesa_aplicada, educacao.valor_minimo,
+            ctx.source_educacao, ctx.as_of,
+        ),
     )
 
 

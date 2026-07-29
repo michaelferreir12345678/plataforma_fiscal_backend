@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.orm import Session
 
 from app.core.deps import Principal, get_db, require_capability
@@ -12,6 +13,8 @@ from app.modules.result import service
 from app.modules.result.schemas import (
     CascataOut,
     MemoriaResultado,
+    MetaCadastro,
+    MetaFiscalUpsert,
     MetaOut,
     ReconciliacaoOut,
     ResultadoDetalhe,
@@ -71,9 +74,51 @@ def meta_resultado(
     principal: Principal = Depends(require_capability("ver")),
     session: Session = Depends(get_db),
 ) -> MetaOut:
-    """Realizado × meta fiscal (LDO) + projeção de fechamento e esforço necessário."""
+    """Realizado × meta fiscal (LDO) + projeção de fechamento e esforço necessário.
+
+    Tela do ente: considera a meta cadastrada pela organização quando o Anexo 6 não a
+    publica. Agregados e relatórios usam ``/resultado`` (só meta oficial).
+    """
     assert_ente_in_scope(session, principal, cod_ibge)
-    return service.build_meta(session, cod_ibge, periodo, as_of=as_of)
+    return service.build_meta(
+        session, cod_ibge, periodo, as_of=as_of, org_id=principal.org_id
+    )
+
+
+@router.get("/entes/{cod_ibge}/meta-fiscal", response_model=list[MetaCadastro])
+def listar_meta_fiscal(
+    cod_ibge: str,
+    principal: Principal = Depends(require_capability("ver")),
+    session: Session = Depends(get_db),
+) -> list[MetaCadastro]:
+    """Metas da LDO cadastradas por esta organização para o ente (dado privado do tenant)."""
+    assert_ente_in_scope(session, principal, cod_ibge)
+    return service.listar_metas_fiscais(session, principal, cod_ibge)
+
+
+@router.put("/entes/{cod_ibge}/meta-fiscal", response_model=MetaCadastro, status_code=200)
+def salvar_meta_fiscal(
+    cod_ibge: str,
+    body: MetaFiscalUpsert,
+    principal: Principal = Depends(require_capability("administrar")),
+    session: Session = Depends(get_db),
+) -> MetaCadastro:
+    """Cadastra/atualiza a meta da LDO do exercício (auditado; exige administrar)."""
+    assert_ente_in_scope(session, principal, cod_ibge)
+    return service.salvar_meta_fiscal(session, principal, cod_ibge, body)
+
+
+@router.delete("/entes/{cod_ibge}/meta-fiscal/{meta_id}", status_code=204, response_model=None)
+def excluir_meta_fiscal(
+    cod_ibge: str,
+    meta_id: uuid.UUID,
+    principal: Principal = Depends(require_capability("administrar")),
+    session: Session = Depends(get_db),
+) -> Response:
+    """Remove a meta cadastrada (auditado; exige administrar)."""
+    assert_ente_in_scope(session, principal, cod_ibge)
+    service.excluir_meta_fiscal(session, principal, cod_ibge, meta_id)
+    return Response(status_code=204)
 
 
 @router.get("/entes/{cod_ibge}/resultado/memoria", response_model=MemoriaResultado)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -14,6 +14,7 @@ from app.modules.reports import repository, service
 from app.modules.reports.schemas import (
     AgendamentoCreate,
     AgendamentoOut,
+    AgendamentoPatch,
     ModelosResponse,
     RelatorioCreate,
     RelatorioDetalheOut,
@@ -63,6 +64,37 @@ def agendar(
 ) -> AgendamentoOut:
     """Registra recorrência; o scheduler chama ``executar_agendamentos`` quando vencer."""
     return service.agendar(session, principal, body)
+
+
+@router.get("/agendamentos", response_model=list[AgendamentoOut])
+def listar_agendamentos(
+    principal: Principal = Depends(require_capability("gerar_relatorio")),
+    session: Session = Depends(get_db),
+) -> list[AgendamentoOut]:
+    """Agendamentos da organização, ativos primeiro (UI da Sprint 25E)."""
+    return service.listar_agendamentos(session, principal)
+
+
+@router.patch("/agendamentos/{agendamento_id}", response_model=AgendamentoOut)
+def editar_agendamento(
+    agendamento_id: uuid.UUID,
+    body: AgendamentoPatch,
+    principal: Principal = Depends(require_capability("gerar_relatorio")),
+    session: Session = Depends(get_db),
+) -> AgendamentoOut:
+    """Edita periodicidade/formato/período/próxima execução ou **desativa** a recorrência."""
+    return service.atualizar_agendamento(session, principal, agendamento_id, body)
+
+
+@router.delete("/agendamentos/{agendamento_id}", status_code=204, response_model=None)
+def excluir_agendamento(
+    agendamento_id: uuid.UUID,
+    principal: Principal = Depends(require_capability("gerar_relatorio")),
+    session: Session = Depends(get_db),
+) -> Response:
+    """Remove a recorrência. Para pausar sem perder o registro, use PATCH ``ativo=false``."""
+    service.excluir_agendamento(session, principal, agendamento_id)
+    return Response(status_code=204)
 
 
 @router.get("/{relatorio_id}", response_model=RelatorioDetalheOut)

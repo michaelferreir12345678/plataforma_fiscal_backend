@@ -16,9 +16,10 @@ from sqlalchemy.orm import Session
 
 from app.core.deps import Principal
 from app.core.errors import AppError, ScopeForbiddenError
-from app.modules.ingestion import jobs_repository
+from app.modules.ingestion import integracoes, jobs_repository
 from app.modules.ingestion.connectors.registry import CONNECTOR_REGISTRY, FONTE_META
 from app.modules.ingestion.jobs_models import (
+    STATUS_EXECUTANDO,
     STATUS_FALHOU,
     STATUS_NA_FILA,
     TIPOS,
@@ -30,6 +31,7 @@ from app.modules.ingestion.jobs_schemas import (
     IngestJobCreateResult,
     IngestJobOut,
     RetificacaoItem,
+    SaudeFila,
 )
 from app.modules.ingestion.schemas import RunRequest
 from app.modules.tenancy import repository as tenancy_repo
@@ -381,6 +383,43 @@ def listar(
     return [_to_out(j) for j in jobs_repository.list_jobs(session, status=status, fonte=fonte)]
 
 
+def saude_fila(session: Session) -> SaudeFila:
+    """Diz se existe alguém consumindo a fila — e não só quantos jobs esperam.
+
+    Sem isso, um worker ausente é indistinguível de um worker ocupado: os dois exibem
+    ``na_fila``. Quatro jobs já ficaram parados por dez minutos sem uma linha de aviso.
+    """
+    aguardando = jobs_repository.contar_por_status(session, STATUS_NA_FILA)
+    executando = jobs_repository.contar_por_status(session, STATUS_EXECUTANDO)
+    consumidores, vivos, profundidade, redis_ok, detalhe = ingest_jobs.inspecionar_fila()
+
+    saude = SaudeFila(
+        consumidores=consumidores,
+        consumidores_vivos=vivos,
+        aguardando=aguardando,
+        executando=executando,
+        fila_redis=profundidade,
+        redis_disponivel=redis_ok,
+        detalhe=detalhe,
+    )
+    if ingest_jobs.eager_enabled():
+        # No modo de teste a execução é inline: não há consumidor e não cabe alarme.
+        return saude.model_copy(update={"consumidores_vivos": max(vivos, 1), "detalhe": None})
+    if saude.detalhe is None and saude.parada:
+        saude.detalhe = (
+            "Nenhum worker de ingestão está consumindo a fila. Os jobs continuam "
+            "persistidos e começam sozinhos assim que um worker subir "
+            "(`python -m app.workers.ingest_worker`)."
+        )
+    elif saude.detalhe is None and aguardando and vivos == 0 and executando:
+        saude.detalhe = (
+            "Há execução em curso, mas nenhum worker deu sinal de vida recente. Se o "
+            "processo tiver caído, o lease é recuperado automaticamente e o job volta "
+            "para a fila sem perder o que já foi carregado."
+        )
+    return saude
+
+
 def obter(session: Session, job_id: uuid.UUID) -> IngestJobOut:
     job = jobs_repository.get_job(session, job_id)
     if job is None:
@@ -495,3 +534,100 @@ def _to_out(
     if logs is not None:
         result = result.model_copy(update={"logs": logs})
     return result
+
+
+# --- Leque de fontes (atualizar tudo de um exercício) ------------------------
+
+#: Sentinela aceita em ``IngestJobCreate.fonte`` para dizer "todas as fontes".
+FONTE_TODAS = "*"
+
+
+def _ordem_topologica(fontes: list[str]) -> list[str]:
+    """Ordena respeitando ``dependencias`` do registro.
+
+    RGF depende de RREO; o cronograma do SADIPEM depende das operações contratadas; o
+    PDF dos mínimos depende do RREO. Disparar fora de ordem não quebra — cada conector
+    é idempotente —, mas faz a fonte derivada rodar contra uma base que ainda não
+    chegou, e o resultado é uma lacuna que só some na próxima carga.
+    """
+    pendentes = list(fontes)
+    saida: list[str] = []
+    visto: set[str] = set()
+    # Kahn simplificado: o grafo é pequeno e raso, e um ciclo (que não deve existir)
+    # não pode travar a carga — o resto entra na ordem em que veio.
+    while pendentes:
+        avancou = False
+        for fonte in list(pendentes):
+            meta = FONTE_META.get(fonte)
+            deps = set(meta.dependencias) if meta else set()
+            if deps <= visto or not (deps & set(pendentes)):
+                saida.append(fonte)
+                visto.add(fonte)
+                pendentes.remove(fonte)
+                avancou = True
+        if not avancou:
+            saida.extend(pendentes)
+            break
+    return saida
+
+
+def fontes_do_leque(session: Session) -> tuple[list[str], list[str]]:
+    """``(a disparar, ignoradas)`` — respeitando os toggles de integração (Sprint 18).
+
+    Fonte com integração desligada **não** entra: o toggle existe justamente para
+    pausar um conector, e "atualizar tudo" não pode ser um atalho que o contorna.
+    """
+    disparar: list[str] = []
+    ignoradas: list[str] = []
+    for fonte in FONTE_META:
+        if integracoes.integracao_ativa(session, fonte):
+            disparar.append(fonte)
+        else:
+            ignoradas.append(fonte)
+    return _ordem_topologica(disparar), sorted(ignoradas)
+
+
+def criar_leque(
+    session: Session, principal: Principal, create: IngestJobCreate
+) -> list[IngestJobCreateResult]:
+    """Cria **um job por fonte** para o mesmo exercício.
+
+    Deliberadamente não é um job só: um mega-job que atravessa 17 conectores e três
+    APIs externas falha inteiro por causa de um, não diz onde parou e não dá para
+    retomar pela metade. Um job por fonte mantém cada um observável na fila, com
+    retentativa própria — e o operador vê qual fonte travou.
+
+    Fonte de escopo **nacional** (BCB, CAPAG, cadastro de entes) não recebe a lista de
+    entes: iterá-la por município repetiria a mesma chamada 185 vezes.
+    """
+    fontes, _ignoradas = fontes_do_leque(session)
+    resultados: list[IngestJobCreateResult] = []
+    for fonte in fontes:
+        meta = FONTE_META.get(fonte)
+        nacional = bool(meta and meta.escopo == "nacional")
+        pedido = create.model_copy(
+            update={
+                "fonte": fonte,
+                "entes": [] if nacional else list(create.entes),
+                # A confirmação já foi dada para o leque inteiro; repeti-la por fonte
+                # transformaria um clique em dezessete.
+                "confirmar": True,
+            }
+        )
+        resultados.append(_criar(session, principal, pedido))
+    return resultados
+
+
+def estimar_leque(
+    session: Session, create: IngestJobCreate, fontes: list[str]
+) -> int:
+    """Soma das estimativas de cada fonte — o alcance real do clique, antes dele."""
+    total = 0
+    for fonte in fontes:
+        meta = FONTE_META.get(fonte)
+        nacional = bool(meta and meta.escopo == "nacional")
+        pedido = create.model_copy(
+            update={"fonte": fonte, "entes": [] if nacional else list(create.entes)}
+        )
+        total += estimar(pedido)
+    return total

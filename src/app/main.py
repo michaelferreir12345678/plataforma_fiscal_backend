@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 
 from app.core.config import settings
 from app.core.errors import register_error_handlers
@@ -27,12 +28,16 @@ from app.modules.ingestion.router import integracoes_router
 from app.modules.ingestion.router import router as ingestion_router
 from app.modules.limits.router import router as limits_router
 from app.modules.personnel.router import router as personnel_router
+from app.modules.platform.router import router as platform_router
+from app.modules.quality.router import router as quality_router
 from app.modules.reports.router import router as reports_router
 from app.modules.result.router import router as result_router
 from app.modules.revenue.router import router as revenue_router
 from app.modules.tenancy.admin_router import router as tenancy_admin_router
 from app.modules.tenancy.router import router as tenancy_router
 from app.shared.audit import AuditMiddleware
+from app.shared.http_performance import GoldHttpOptimizationMiddleware
+from app.shared.seguranca import AuthRateLimitMiddleware, SecurityHeadersMiddleware
 
 # Versão da API — servida em /health para o rodapé do app (nada de versão fixa na UI).
 APP_VERSION = "0.1.0"
@@ -46,13 +51,35 @@ def create_app() -> FastAPI:
     )
 
     register_error_handlers(app)
+    # A ordem importa: o freio do login precisa responder **antes** de qualquer
+    # processamento da tentativa, e os cabeçalhos precisam alcançar toda resposta,
+    # inclusive a 429 emitida pelo próprio freio.
     app.add_middleware(AuditMiddleware)
+    app.add_middleware(
+        AuthRateLimitMiddleware,
+        limite=settings.auth_rate_limit_tentativas,
+        janela_segundos=settings.auth_rate_limit_janela_segundos,
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins_list,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+    )
+    # ETag sees canonical JSON; the outer GZip layer may then encode it. The
+    # validator is weak and the final response varies by auth scope and encoding.
+    app.add_middleware(
+        GoldHttpOptimizationMiddleware,
+        budget_ms=settings.http_performance_budget_ms,
+        sample_window=settings.http_performance_sample_window,
+    )
+    # Fora de tudo: cabeçalho de segurança acompanha 200, 304, 429 e erro igualmente.
+    app.add_middleware(SecurityHeadersMiddleware, hsts=settings.security_hsts_habilitado)
+    app.add_middleware(
+        GZipMiddleware,
+        minimum_size=settings.http_gzip_minimum_size,
+        compresslevel=settings.http_gzip_compresslevel,
     )
 
     @app.get("/health", tags=["infra"])
@@ -88,15 +115,22 @@ def create_app() -> FastAPI:
     app.include_router(carteira_router)
     app.include_router(estadual_router)
     app.include_router(geo_router)
+    app.include_router(quality_router)
+    app.include_router(platform_router)
 
     @app.on_event("startup")
     def recover_report_jobs() -> None:
         """Retoma fila persistida e dispara agendamentos vencidos após restart."""
-        from app.workers import ingest_jobs, report_tasks
+        from app.workers import ingest_jobs, quality_tasks, report_tasks
 
         report_tasks.recover_pending()
         report_tasks.executar_agendamentos()
-        report_tasks.start_scheduler()
+        # O relógio é de **um** processo. Com várias réplicas de uvicorn, cada uma
+        # emitiria o mesmo relatório e rodaria os mesmos checks — em produção quem
+        # agenda é o ``scheduler_worker``. Fora dela, subir junto é conveniente.
+        if not settings.scheduler_em_processo_separado:
+            report_tasks.start_scheduler()
+            quality_tasks.start_scheduler()
         # Reentrega pendências duráveis; o consumidor in-process é apenas opt-in local.
         ingest_jobs.recover_pending()
         if settings.ingest_worker_in_process:
@@ -107,7 +141,11 @@ def create_app() -> FastAPI:
         """Interrompe o relógio local sem abandonar os jobs já persistidos."""
         from app.workers import ingest_jobs, report_tasks
 
-        report_tasks.stop_scheduler()
+        if not settings.scheduler_em_processo_separado:
+            from app.workers import quality_tasks
+
+            report_tasks.stop_scheduler()
+            quality_tasks.stop_scheduler()
         if settings.ingest_worker_in_process:
             ingest_jobs.stop_worker()
 

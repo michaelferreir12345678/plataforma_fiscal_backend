@@ -12,11 +12,12 @@ Regras de honestidade aplicadas em todas as camadas:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.deps import Principal
@@ -24,6 +25,7 @@ from app.core.errors import AppError
 from app.modules.alerts import service as alerts_service
 from app.modules.catalog import service as catalog_service
 from app.modules.dashboard.cockpit_schemas import (
+    ChecagemAberta,
     CockpitQualidade,
     CockpitResponse,
     CockpitResumo,
@@ -41,23 +43,36 @@ from app.modules.dashboard.cockpit_schemas import (
 from app.modules.dashboard.service import COR_POR_FAIXA
 from app.modules.expense import repository as expense_repo
 from app.modules.expense.classificacao import SENTINELA
+from app.modules.expense.models import DimFuncao
 from app.modules.forecast import service as forecast_service
 from app.modules.indicators import repository as indicators_repo
+from app.modules.indicators import rotulos
 from app.modules.ingestion import repository as ingestion_repo
 from app.modules.ingestion.connectors.registry import FONTE_META
 from app.modules.limits import repository as limits_repo
 from app.modules.limits import service as limits_service
 from app.modules.personnel import repository as personnel_repo
+from app.modules.personnel.models import DimPoderOrgao
+from app.modules.quality import service as quality_service
 from app.modules.revenue import repository as revenue_repo
+from app.modules.revenue.models import DimOrigemReceita
 from app.shared import periodo as periodo_util
 from app.shared.source_ref import SourceRef
 
+# Rótulos curtos do cockpit (a tela é densa); tudo que não estiver aqui cai no registro
+# canônico, que nunca devolve o código cru — era assim que "investimento_rcl" chegava à tela.
 _ROTULO = {
     "pessoal_executivo": "Pessoal (Executivo)",
     "divida_consolidada_liquida": "Dívida Consolidada Líquida",
     "saude_minimo": "Saúde (mínimo)",
     "educacao_mde": "Educação (MDE)",
 }
+
+
+def _rotulo_indicador(codigo: str, padrao: str | None = None) -> str:
+    return _ROTULO.get(codigo) or rotulos.rotulo(codigo, padrao=padrao)
+
+
 _SEVERIDADE = {"verde": 0, "cinza": 0, "amarelo": 1, "laranja": 2, "vermelho": 3}
 _FAROL_POR_SEVERIDADE = {0: "conforme", 1: "alerta", 2: "prudencial", 3: "critico"}
 # Fontes que servem o cockpit — a camada de qualidade responde "posso confiar nisto?".
@@ -88,7 +103,7 @@ def _criticos(limites: Any) -> list[CriticoItem]:
         itens.append(
             CriticoItem(
                 indicador=it.indicador,
-                rotulo=_ROTULO.get(it.indicador, it.indicador),
+                rotulo=_rotulo_indicador(it.indicador),
                 sentido=it.sentido,
                 valor_pct=it.valor_pct_rcl,
                 valor_rs=it.valor_rs,
@@ -197,7 +212,7 @@ def _tendencias(
             itens.append(
                 TendenciaItem(
                     indicador=indicador,
-                    rotulo=_ROTULO.get(indicador, indicador),
+                    rotulo=_rotulo_indicador(indicador),
                     unidade="",
                     disponivel=False,
                     motivo_indisponivel=exc.detail or exc.title,
@@ -207,7 +222,7 @@ def _tendencias(
         itens.append(
             TendenciaItem(
                 indicador=indicador,
-                rotulo=_ROTULO.get(indicador, proj.descricao),
+                rotulo=_rotulo_indicador(indicador, proj.descricao),
                 unidade=proj.unidade,
                 modelo=proj.modelo,
                 historico=[PontoSerie(periodo=p.periodo, valor=p.valor) for p in proj.historico],
@@ -229,6 +244,30 @@ def _tendencias(
 
 
 # --- 4. Explicadores (Δ real por componente) -------------------------------
+def _rotulos(session: Session, modelo: Any, codigos: Iterable[str]) -> dict[str, str]:
+    """``{código: descrição}`` das dimensões, para o explicador falar em português.
+
+    O cockpit vinha exibindo ``10``, ``12`` e ``ENTE.EXEC`` porque montava o componente
+    com o código nos dois campos. O código é chave, não rótulo: quem lê a tela quer
+    "Saúde" e "Educação", e o nome já está na dimensão — faltava perguntar.
+    """
+    alvo = [c for c in dict.fromkeys(codigos) if c]
+    if not alvo:
+        return {}
+    linhas = session.execute(
+        select(modelo.codigo, modelo.descricao).where(modelo.codigo.in_(alvo))
+    ).all()
+    return {str(codigo): str(descricao) for codigo, descricao in linhas if descricao}
+
+
+def _com_rotulo(
+    mapa: dict[str, tuple[str, Decimal]], rotulos: Mapping[str, str]
+) -> dict[str, tuple[str, Decimal]]:
+    """Troca o rótulo pelo nome da dimensão; sem nome, o código continua valendo —
+    é feio, mas é honesto, e melhor do que apagar a linha."""
+    return {cod: (rotulos.get(cod, desc), valor) for cod, (desc, valor) in mapa.items()}
+
+
 def _top_variacoes(
     atual: Mapping[str, tuple[str, Decimal | None]],
     anterior: Mapping[str, tuple[str, Decimal | None]],
@@ -289,6 +328,8 @@ def _explicador_receita(
         return _indisponivel(
             dim, rotulo, medida, periodo, "Receita não materializada nos dois períodos."
         )
+    rotulos = _rotulos(session, DimOrigemReceita, [*atual, *ant])
+    atual, ant = _com_rotulo(atual, rotulos), _com_rotulo(ant, rotulos)
     return ExplicadorItem(
         dimensao=dim, rotulo=rotulo, medida=medida,
         periodo_atual=periodo, periodo_anterior=anterior,
@@ -327,6 +368,8 @@ def _explicador_despesa(
         return _indisponivel(
             dim, rotulo, medida, periodo, "Despesa não materializada nos dois períodos."
         )
+    rotulos = _rotulos(session, DimFuncao, [*atual, *ant])
+    atual, ant = _com_rotulo(atual, rotulos), _com_rotulo(ant, rotulos)
     return ExplicadorItem(
         dimensao=dim, rotulo=rotulo, medida=medida,
         periodo_atual=periodo, periodo_anterior=anterior,
@@ -370,6 +413,8 @@ def _explicador_pessoal(session: Session, cod_ibge: str, periodo_rgf: str | None
         return _indisponivel(
             dim, rotulo, medida, base, "Pessoal não materializado nos dois períodos."
         )
+    rotulos = _rotulos(session, DimPoderOrgao, [*atual, *ant])
+    atual, ant = _com_rotulo(atual, rotulos), _com_rotulo(ant, rotulos)
     return ExplicadorItem(
         dimensao=dim, rotulo=rotulo, medida=medida,
         periodo_atual=periodo_rgf, periodo_anterior=anterior,
@@ -529,15 +574,39 @@ def _qualidade(session: Session, cod_ibge: str) -> CockpitQualidade:
             )
         )
     maxima = max(defasagens) if defasagens else None
+    abertos = quality_service.selo_do_ente(session, cod_ibge)
+    falhas = [c for c in abertos if c.status == "falha"]
+    avisos = [c for c in abertos if c.status == "aviso"]
+    observacao = None
+    if not fontes:
+        observacao = "Sem cobertura materializada para este ente — rode o refresh da cobertura."
+    elif falhas:
+        observacao = (
+            f"{len(falhas)} verificação(ões) de qualidade em falha sobre estes números — "
+            "veja o painel na Central de Dados antes de usar o dado em decisão."
+        )
     return CockpitQualidade(
         fontes=fontes,
         defasagem_maxima=maxima,
-        confiavel=bool(fontes) and (maxima is None or maxima <= 2),
-        observacao=(
-            None
-            if fontes
-            else "Sem cobertura materializada para este ente — rode o refresh da cobertura."
-        ),
+        # Um check em falha derruba a confiabilidade mesmo com a fonte em dia: dado
+        # atual e errado é pior que dado velho e correto.
+        confiavel=bool(fontes) and (maxima is None or maxima <= 2) and not falhas,
+        observacao=observacao,
+        checks_abertos=[
+            ChecagemAberta(
+                check_codigo=c.check_codigo,
+                rotulo=c.rotulo,
+                status=c.status,
+                fonte=c.fonte,
+                periodo=c.periodo,
+                diferenca=c.diferenca,
+                tolerancia=c.tolerancia,
+                motivo=(c.detalhe or {}).get("motivo"),
+            )
+            for c in abertos
+        ],
+        n_checks_falha=len(falhas),
+        n_checks_aviso=len(avisos),
     )
 
 

@@ -38,6 +38,8 @@ from app.modules.cash_rap.schemas import (
 )
 from app.modules.catalog import service as catalog_service
 from app.modules.catalog.models import DimEnte
+from app.modules.indicators import serie_ajuste
+from app.modules.indicators.schemas import SerieAjuste
 from app.modules.ingestion import repository as ingestion_repo
 from app.shared.envelope import DrillEnvelope, Measures
 from app.shared.hierarchy import HierarchyNode, build_drill_envelope
@@ -321,7 +323,10 @@ def _carregar_rap(
 
 
 # --- série e comparação temporal ---
-def _serie(session: Session, cod_ibge: str) -> list[SerieCaixaItem]:
+def _serie(
+    session: Session, cod_ibge: str, base_periodo: str
+) -> tuple[list[SerieCaixaItem], SerieAjuste]:
+    """Série RGF multi-exercício + comparabilidade (a preços do período e por habitante)."""
     serie: list[SerieCaixaItem] = []
     for periodo in repository.distinct_periodos_silver_a5(session, cod_ibge=cod_ibge):
         versao = ingestion_repo.resolve_versao(
@@ -341,7 +346,18 @@ def _serie(session: Session, cod_ibge: str) -> list[SerieCaixaItem]:
                 rpnp_sem_lastro_total=sum((d.rpnp_sem_lastro or zero for d in disps), zero),
             )
         )
-    return serie
+    ajuste = serie_ajuste.calcular(
+        session, cod_ibge, [s.periodo for s in serie], base_periodo
+    )
+    por_periodo = serie_ajuste.indexar(ajuste)
+    for item in serie:
+        a = por_periodo.get(item.periodo)
+        item.rpnp_sem_lastro_real = serie_ajuste.real(item.rpnp_sem_lastro_total, a)
+        item.rpnp_sem_lastro_per_capita = serie_ajuste.per_capita(
+            item.rpnp_sem_lastro_total, a
+        )
+        item.populacao = a.populacao if a else None
+    return serie, ajuste
 
 
 def _comparacao(
@@ -378,7 +394,7 @@ def build_detalhe(
     itens = [_item_suficiencia(d) for d in disps]
     criticas = [i for i in itens if not i.suficiente]
     rap_itens, rap_consolidado, source_rap = _carregar_rap(session, cod_ibge, periodo, as_of)
-    serie = _serie(session, cod_ibge)
+    serie, ajuste = _serie(session, cod_ibge, periodo)
     zero = Decimal(0)
     return CaixaDetalhe(
         cod_ibge=cod_ibge,
@@ -394,6 +410,7 @@ def build_detalhe(
         rap_por_orgao=rap_itens,
         art42_aplicavel=caixa.fim_de_mandato(ano, ente.esfera),
         serie=serie,
+        serie_ajuste=ajuste,
         comparacao=_comparacao(serie, periodo, resumo.total_rpnp_sem_lastro),
         periodo_breadcrumb=catalog_service.periodo_breadcrumb(session, periodo),
         source_ref=_source_a5(periodo, versao),

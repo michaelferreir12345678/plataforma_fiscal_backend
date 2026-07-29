@@ -54,5 +54,9 @@ class FatoPessoal(Base):
     despesa_bruta: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
     exclusoes: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
     despesa_liquida: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
+    #: Denominador do limite, **como o ente publicou** no Anexo 01 (art. 20 da LRF sobre
+    #: a RCL ajustada, EC 105/2019). Guardado junto da apuração porque é dela que faz
+    #: parte: sem ele, o percentual não é reproduzível anos depois.
+    rcl_ajustada: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
     pct_rcl: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
     versao_entrega: Mapped[str] = mapped_column(Text, nullable=False)

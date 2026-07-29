@@ -52,10 +52,50 @@ class Base(DeclarativeBase):
     metadata = MetaData(schema="op", naming_convention=NAMING_CONVENTION)
 
 
+# O pool precisa ser dimensionado, não herdado. O padrão do SQLAlchemy — 5 conexões,
+# 10 de overflow, 30 s de espera — foi o gargalo que o teste de carga da Sprint 28
+# encontrou: 50 usuários simultâneos disputando 15 conexões, cada requisição segurando
+# a sua por mais de um segundo, formam fila até estourar os 30 s. O sintoma enganava,
+# porque parecia lentidão de consulta e era espera por conexão.
+#
+# O teto é o `max_connections` do Postgres (100 por padrão): a conta é
+# ``(pool_size + max_overflow) × réplicas da API + workers``, e ela tem de caber com
+# folga — deixar o banco recusar conexão é pior do que a API enfileirar.
+#
+# A espera curta é deliberada: pool saturado deve **falhar rápido e visível**, não
+# pendurar o usuário por meio minuto num carregamento que ele já abandonou.
 engine = create_engine(
-    settings.database_url, pool_pre_ping=True, future=True, json_serializer=_json_serializer
+    settings.database_url,
+    pool_pre_ping=True,
+    pool_size=settings.db_pool_size,
+    max_overflow=settings.db_max_overflow,
+    pool_timeout=settings.db_pool_timeout_s,
+    pool_recycle=settings.db_pool_recycle_s,
+    future=True,
+    json_serializer=_json_serializer,
 )
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
+
+_mapeamentos_prontos = False
+
+
+def garantir_mapeamentos() -> None:
+    """Registra **todos** os modelos antes da primeira sessão.
+
+    Um processo que importa só o módulo de que precisa deixa FKs entre schemas sem tabela
+    referenciada, e o erro (``NoReferencedTableError``) só aparece na primeira query — longe
+    do import que faltou. Garantir aqui cobre worker, scheduler, script e teste de uma vez,
+    em vez de exigir que cada entrypoint se lembre.
+
+    O import é tardio de propósito: ``models_registry`` depende de ``Base``, definida acima.
+    """
+    global _mapeamentos_prontos
+    if _mapeamentos_prontos:
+        return
+    _mapeamentos_prontos = True  # antes do import: modelos importam este módulo de volta
+    from app.core import models_registry
+
+    models_registry.importar_modelos()
 
 
 def apply_context(
@@ -97,6 +137,7 @@ def _reapply_rls_context(session: Session, transaction: Any, connection: Any) ->
 @contextmanager
 def admin_session() -> Iterator[Session]:
     """Sessão do plano de controle (``is_admin=on``): login, seed, gestão de orgs/users."""
+    garantir_mapeamentos()
     session = SessionLocal()
     try:
         apply_context(session, is_admin=True)
@@ -116,6 +157,7 @@ def tenant_session(
     user_id: uuid.UUID | None = None,
 ) -> Iterator[Session]:
     """Sessão do plano de dados (isolada por ``org_id`` via RLS)."""
+    garantir_mapeamentos()
     session = SessionLocal()
     try:
         apply_context(session, org_id=org_id, user_id=user_id, is_admin=False)

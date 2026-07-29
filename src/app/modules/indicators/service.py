@@ -13,7 +13,11 @@ from app.core.errors import AppError
 from app.modules.catalog import repository as catalog_repo
 from app.modules.catalog import service as catalog_service
 from app.modules.indicators import repository
-from app.modules.indicators.limites import LimiteLegal, calcular_indicador_sobre_rcl
+from app.modules.indicators.limites import (
+    LimiteLegal,
+    calcular_indicador_sobre_rcl,
+    classificar_faixa,
+)
 from app.modules.indicators.models import FatoRcl
 from app.modules.indicators.rcl import RclLinha
 from app.modules.indicators.rcl import calcular_rcl as _calcular_rcl_puro
@@ -184,20 +188,59 @@ def classificar_limite(
         prudencial_pct=limite_row.prudencial_pct,
     )
     calc = calcular_indicador_sobre_rcl(valor_rs, fato.rcl_12m, limite)
-    resolved_source = source_ref or _source_ref(periodo, versao)
+    return _persistir_indicador(
+        session,
+        cod_ibge=cod_ibge,
+        periodo=periodo,
+        indicador=indicador,
+        esfera=ente.esfera,
+        valor_rs=calc.valor_rs,
+        valor_pct=calc.valor_pct_rcl,
+        faixa=calc.faixa,
+        teto_pct=calc.teto_pct,
+        denominador="rcl",
+        base_valor=fato.rcl_12m,
+        versao=versao,
+        as_of=as_of,
+        source_ref=source_ref or _source_ref(periodo, versao),
+        source_components=source_components,
+    )
+
+
+def _persistir_indicador(
+    session: Session,
+    *,
+    cod_ibge: str,
+    periodo: str,
+    indicador: str,
+    esfera: str,
+    valor_rs: Decimal,
+    valor_pct: Decimal | None,
+    faixa: str | None,
+    teto_pct: Decimal | None,
+    denominador: str,
+    base_valor: Decimal | None,
+    versao: str,
+    as_of: datetime | None,
+    source_ref: SourceRef,
+    source_components: Sequence[SourceRef] | None,
+) -> IndicadorOut:
+    """Grava a linha do mart e devolve o contrato — comum a todos os denominadores."""
     persisted_source = {
-        **resolved_source.model_dump(mode="json"),
+        **source_ref.model_dump(mode="json"),
         "indicador": indicador,
-        "esfera": ente.esfera,
+        "esfera": esfera,
     }
     valores = {
         "cod_ibge": cod_ibge,
         "periodo": periodo,
         "indicador": indicador,
-        "valor_rs": calc.valor_rs,
-        "valor_pct_rcl": calc.valor_pct_rcl,
-        "faixa": calc.faixa,
-        "teto_pct": calc.teto_pct,
+        "valor_rs": valor_rs,
+        "valor_pct_rcl": valor_pct,
+        "faixa": faixa,
+        "teto_pct": teto_pct,
+        "denominador": denominador,
+        "base_valor": base_valor,
     }
     persisted_version = versao
     componentes = tuple(source_components or ())
@@ -247,11 +290,133 @@ def classificar_limite(
         cod_ibge=cod_ibge,
         periodo=periodo,
         indicador=indicador,
-        esfera=ente.esfera,
-        valor_rs=calc.valor_rs,
-        valor_pct_rcl=calc.valor_pct_rcl,
-        faixa=calc.faixa,
-        teto_pct=calc.teto_pct,
+        esfera=esfera,
+        valor_rs=valor_rs,
+        valor_pct_rcl=valor_pct,
+        faixa=faixa,
+        teto_pct=teto_pct,
         versao_entrega=persisted_version,
-        source_ref=resolved_source,
+        source_ref=source_ref,
+        denominador=denominador,
+        base_valor=base_valor,
+    )
+
+
+def registrar_indicador_gerencial(
+    session: Session,
+    cod_ibge: str,
+    periodo: str,
+    indicador: str,
+    *,
+    valor_rs: Decimal,
+    valor_pct: Decimal | None,
+    denominador: str,
+    base_valor: Decimal | None,
+    versao_entrega: str,
+    as_of: datetime | None = None,
+    source_ref: SourceRef,
+    source_components: Sequence[SourceRef] | None = None,
+) -> IndicadorOut:
+    """Materializa um indicador **sem limite legal** (Sprint 25D).
+
+    Investimento sobre a RCL, RCL por habitante e resultado primário sobre a RCL medem
+    gestão, não conformidade: a lei não fixa teto nem piso para eles. A linha vai ao mart
+    com ``faixa`` e ``teto_pct`` nulos — o semáforo e o motor de alertas, que só falam
+    quando há faixa, continuam em silêncio, e o benchmarking passa a ter o que comparar.
+    """
+    ente = catalog_service.refresh_dim_ente(session, cod_ibge)
+    if ente is None or ente.esfera is None:
+        raise AppError(
+            status=422, title="Esfera desconhecida",
+            detail=f"dim_ente sem esfera para {cod_ibge} (ingerir siconfi_entes).",
+        )
+    return _persistir_indicador(
+        session,
+        cod_ibge=cod_ibge,
+        periodo=periodo,
+        indicador=indicador,
+        esfera=ente.esfera,
+        valor_rs=valor_rs,
+        valor_pct=valor_pct,
+        faixa=None,
+        teto_pct=None,
+        denominador=denominador,
+        base_valor=base_valor,
+        versao=versao_entrega,
+        as_of=as_of,
+        source_ref=source_ref,
+        source_components=source_components,
+    )
+
+
+def classificar_sobre_base(
+    session: Session,
+    cod_ibge: str,
+    periodo: str,
+    indicador: str,
+    valor_rs: Decimal,
+    base_valor: Decimal,
+    *,
+    denominador: str,
+    versao_entrega: str,
+    poder: str = "",
+    as_of: datetime | None = None,
+    source_ref: SourceRef,
+    source_components: Sequence[SourceRef] | None = None,
+) -> IndicadorOut:
+    """Classifica um indicador cuja base **não é a RCL** e o materializa no mart.
+
+    É o caminho dos mínimos constitucionais (CF art. 198 e 212; LC 141/2012; Lei
+    14.113/2020): o denominador é a receita de impostos e transferências — ou, no
+    FUNDEB, as receitas principais do fundo. O cálculo do percentual e a faixa
+    continuam vindo de ``indicators.limites`` (fonte única de verdade, §7); o que muda
+    é de onde vem o 100%, e isso viaja gravado na linha (``denominador``/``base_valor``)
+    para que nenhum consumidor rotule ASPS como percentual da RCL.
+    """
+    ente = catalog_service.refresh_dim_ente(session, cod_ibge)
+    if ente is None or ente.esfera is None:
+        raise AppError(
+            status=422, title="Esfera desconhecida",
+            detail=f"dim_ente sem esfera para {cod_ibge} (ingerir siconfi_entes).",
+        )
+    limite_row = catalog_repo.get_limite(
+        session, indicador=indicador, esfera=ente.esfera, poder=poder
+    )
+    if limite_row is None:
+        raise AppError(
+            status=404, title="Limite não cadastrado",
+            detail=f"Sem limite para {indicador}/{ente.esfera}/{poder or '-'}.",
+        )
+    if base_valor <= 0:
+        raise AppError(
+            status=422,
+            title="Base inválida",
+            detail=f"O denominador '{denominador}' de {indicador} deve ser positivo.",
+        )
+    limite = LimiteLegal(
+        indicador=indicador,
+        esfera=ente.esfera,
+        poder=poder,
+        sentido=limite_row.sentido,
+        teto_pct=limite_row.teto_pct,
+        alerta_pct=limite_row.alerta_pct,
+        prudencial_pct=limite_row.prudencial_pct,
+    )
+    pct = valor_rs / base_valor * Decimal(100)
+    return _persistir_indicador(
+        session,
+        cod_ibge=cod_ibge,
+        periodo=periodo,
+        indicador=indicador,
+        esfera=ente.esfera,
+        valor_rs=valor_rs,
+        valor_pct=pct,
+        faixa=classificar_faixa(pct, limite),
+        teto_pct=limite.teto_pct,
+        denominador=denominador,
+        base_valor=base_valor,
+        versao=versao_entrega,
+        as_of=as_of,
+        source_ref=source_ref,
+        source_components=source_components,
     )

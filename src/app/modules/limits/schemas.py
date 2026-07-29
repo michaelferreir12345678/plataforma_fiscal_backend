@@ -22,6 +22,10 @@ class LimiteItem(BaseModel):
     prudencial_pct: Decimal | None = None
     distancia_teto: Decimal | None = None  # teto − valor (teto) / valor − piso (piso)
     distancia_alerta: Decimal | None = None
+    # Sprint 25C: com os mínimos no mart, a lista deixou de ser só percentuais da RCL.
+    # ``denominador`` é o que a tela usa para rotular a coluna sem mentir a base.
+    denominador: str = "rcl"
+    base_valor: Decimal | None = None
 
 
 class LimitesResponse(BaseModel):

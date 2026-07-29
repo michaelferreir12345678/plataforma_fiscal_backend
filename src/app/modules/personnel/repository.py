@@ -49,9 +49,14 @@ def upsert_fato(session: Session, valores: dict[str, Any]) -> None:
     stmt = pg_insert(FatoPessoal).values(**valores)
     stmt = stmt.on_conflict_do_update(
         index_elements=["cod_ibge", "periodo", "poder_codigo", "versao_entrega"],
+        # A lista é explícita para não sobrescrever a chave, mas por isso mesmo precisa
+        # acompanhar o modelo: uma coluna nova fora daqui é gravada no INSERT e ignorada
+        # em toda rematerialização — o valor calculado atualiza e a base que o produziu
+        # fica congelada, que é o pior dos dois mundos.
         set_={
             k: valores.get(k)
-            for k in ("despesa_bruta", "exclusoes", "despesa_liquida", "pct_rcl")
+            for k in ("despesa_bruta", "exclusoes", "despesa_liquida", "rcl_ajustada", "pct_rcl")
+            if k in valores
         },
     )
     session.execute(stmt)

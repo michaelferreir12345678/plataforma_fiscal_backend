@@ -91,13 +91,14 @@ def estagios_despesa(
 def execucao_despesa(
     cod_ibge: str,
     periodo: str = _PERIODO_Q,
+    eixo: Eixo = _EIXO_Q,
     as_of: datetime | None = _AS_OF_Q,
     principal: Principal = Depends(require_capability("ver")),
     session: Session = Depends(get_db),
 ) -> ExecucaoOut:
     """Ritmo da execução (empenho/liquidação/pagamento ÷ dotação) × esperado no período."""
     assert_ente_in_scope(session, principal, cod_ibge)
-    return service.build_execucao(session, cod_ibge, periodo, as_of=as_of)
+    return service.build_execucao(session, cod_ibge, periodo, eixo=eixo, as_of=as_of)
 
 
 @router.get("/entes/{cod_ibge}/despesa/rigidez", response_model=RigidezOut)

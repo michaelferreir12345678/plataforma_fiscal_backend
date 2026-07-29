@@ -17,6 +17,7 @@ from app.modules.ingestion.jobs_schemas import (
     IngestJobCreateResult,
     IngestJobOut,
     RetificacaoItem,
+    SaudeFila,
 )
 from app.modules.ingestion.schemas import (
     CoberturaResponse,
@@ -187,7 +188,31 @@ def criar_job(
     principal: Principal = Depends(require_capability("administrar")),
     session: Session = Depends(get_db),
 ) -> IngestJobCreateResult:
-    """Enfileira um job de ingestão. Acima do limiar, exige ``confirmar=true`` (ação custosa)."""
+    """Enfileira um job de ingestão. Acima do limiar, exige ``confirmar=true`` (ação custosa).
+
+    ``fonte="*"`` abre o **leque**: um job por fonte ativa, na ordem de dependência.
+    Deliberadamente não é um job só — dezessete conectores e três APIs externas num
+    job único falham inteiros por causa de um, e não dizem onde pararam.
+    """
+    if body.fonte == jobs_service.FONTE_TODAS:
+        fontes, ignoradas = jobs_service.fontes_do_leque(session)
+        if not body.confirmar:
+            # O leque é sempre ação custosa: confirmar por fonte viraria dezessete
+            # cliques, então a confirmação é uma só, aqui, com o alcance à vista.
+            response.status_code = 200
+            return IngestJobCreateResult(
+                precisa_confirmacao=True,
+                estimativa_itens=jobs_service.estimar_leque(session, body, fontes),
+                limiar=0,
+            )
+        resultados = jobs_service.criar_leque(session, principal, body)
+        total = sum(r.estimativa_itens for r in resultados)
+        return IngestJobCreateResult(
+            precisa_confirmacao=False,
+            estimativa_itens=total,
+            limiar=0,
+            job=resultados[0].job if resultados else None,
+        )
     result = jobs_service.criar_job(session, principal, body)
     if result.precisa_confirmacao:
         response.status_code = 200  # nada foi aceito ainda: aguarda confirmação
@@ -203,6 +228,15 @@ def listar_jobs(
 ) -> list[IngestJobOut]:
     """Jobs do escopo (RLS por org): em andamento e histórico."""
     return jobs_service.listar(session, status=status, fonte=fonte)
+
+
+@router.get("/jobs/saude", response_model=SaudeFila)
+def saude_da_fila(
+    _: Principal = Depends(require_capability("administrar")),
+    session: Session = Depends(get_db),
+) -> SaudeFila:
+    """Existe worker consumindo? Sem isso, 'Na fila' é indistinguível de 'ninguém escuta'."""
+    return jobs_service.saude_fila(session)
 
 
 @router.get("/jobs/{job_id}", response_model=IngestJobOut)

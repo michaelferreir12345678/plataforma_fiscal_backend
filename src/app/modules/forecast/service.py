@@ -32,8 +32,10 @@ from app.modules.forecast.schemas import (
     CenarioSalvo,
     CenarioSimularRequest,
     CenarioSimularResponse,
+    ComparacaoModelosResponse,
     CruzamentoLimite,
     LimiteImpacto,
+    ModeloComparado,
     PontoHistorico,
     PontoProjecao,
     ProjecaoResponse,
@@ -341,6 +343,122 @@ def build_projecao(
         as_of=as_of,
         gerado_em=gerado_em if persistir else None,
         exog=exog,
+    )
+
+
+_ROTULO_MODELO = {
+    "fechamento": "Fechamento (run-rate)",
+    "holt_winters": "Holt (nível + tendência)",
+    "regressao_exogenas": "Regressão com exógenas (FPM/IPCA/Selic)",
+}
+_MOTIVO_INDISPONIVEL = {
+    "fechamento": "Exige ao menos 2 observações da série.",
+    "holt_winters": "Exige ao menos 2 observações da série.",
+    "regressao_exogenas": (
+        "Exige graus de liberdade suficientes: séries curtas não sustentam a regressão "
+        "com exógenas."
+    ),
+}
+
+
+def comparar_modelos(
+    session: Session,
+    cod_ibge: str,
+    indicador: str,
+    *,
+    horizonte: int = 4,
+    as_of: datetime | None = None,
+) -> ComparacaoModelosResponse:
+    """As três camadas lado a lado, para o mesmo ente/indicador/horizonte (Sprint 25E).
+
+    O gestor pergunta "por que esse número e não outro?". Mostrar só o modelo escolhido
+    responde pela metade. Aqui aparecem os três — inclusive o **indisponível**, com o
+    motivo —, a amplitude do IC de cada um (a medida honesta de incerteza) e o critério
+    da escolha. Não há ranking por acurácia: a série é curta demais para um backtest que
+    não seja ruído, e fingir um erro fora da amostra seria pior que não medir.
+    """
+    if indicador_config(indicador) is None:
+        raise AppError(
+            status=404,
+            title="Indicador não projetável",
+            detail=f"Indicador '{indicador}' não está no catálogo de previsões.",
+        )
+    serie = carregar_serie(session, indicador, cod_ibge)
+    if len(serie.pontos) < 2:
+        raise AppError(
+            status=422,
+            title="Série insuficiente",
+            detail=f"Sem histórico suficiente de '{indicador}' para {cod_ibge} (mínimo 2).",
+        )
+    esfera = _ente_esfera(session, cod_ibge)
+    periodos_futuro = horizonte_periodos(serie.periodos[-1], horizonte)
+    exog = alinhar_exogenas(session, cod_ibge, serie.periodos, periodos_futuro)
+    resultados = _rodar_modelos(serie.valores, exog, horizonte)
+    limite = _limite_do_indicador(session, serie, esfera)
+    escolhido = next(m for m in _PREFERENCIA if m in resultados)
+
+    comparados: list[ModeloComparado] = []
+    for nome in _PREFERENCIA:
+        resultado = resultados.get(nome)
+        if resultado is None:
+            comparados.append(
+                ModeloComparado(
+                    modelo=nome,
+                    rotulo=_ROTULO_MODELO[nome],
+                    disponivel=False,
+                    motivo_indisponivel=_MOTIVO_INDISPONIVEL[nome],
+                )
+            )
+            continue
+        pontos, cruzamento = _pontos_projecao(resultado, periodos_futuro, limite)
+        final = pontos[-1]
+        amplitudes = [
+            float(p.ic_superior) - float(p.ic_inferior)
+            for p in pontos
+            if p.ic_superior is not None and p.ic_inferior is not None
+        ]
+        memoria = dict(resultado.memoria)
+        erro = memoria.get("erro_padrao_residuos", memoria.get("erro_padrao_incremento"))
+        r2 = memoria.get("r2")
+        n_obs = memoria.get("n_obs")
+        comparados.append(
+            ModeloComparado(
+                modelo=nome,
+                rotulo=_ROTULO_MODELO[nome],
+                disponivel=True,
+                escolhido=nome == escolhido,
+                valor_final=final.valor_previsto,
+                ic_inferior_final=final.ic_inferior,
+                ic_superior_final=final.ic_superior,
+                amplitude_ic_media=(
+                    _dec(sum(amplitudes) / len(amplitudes)) if amplitudes else None
+                ),
+                erro_padrao=_dec(float(erro)) if isinstance(erro, int | float) else None,
+                r2=_dec(float(r2)) if isinstance(r2, int | float) else None,
+                n_obs=int(n_obs) if isinstance(n_obs, int) else None,
+                cruza_limite=bool(cruzamento.cruza),
+                periodo_cruzamento=cruzamento.periodo_cruzamento,
+                memoria=memoria,
+            )
+        )
+    ultimo = serie.pontos[-1]
+    return ComparacaoModelosResponse(
+        cod_ibge=cod_ibge,
+        indicador=indicador,
+        descricao=serie.descricao,
+        unidade=serie.unidade,
+        horizonte=horizonte,
+        periodos_projetados=periodos_futuro,
+        n_periodos_historicos=len(serie.pontos),
+        criterio_escolha=(
+            "Ordem de preferência: regressão com exógenas → Holt → fechamento; usa-se a "
+            "primeira **viável** para a série. Não é escolha por acurácia medida — com "
+            f"{len(serie.pontos)} observações, um backtest mediria ruído."
+        ),
+        modelos=comparados,
+        exogenas_fontes=exog.fontes,
+        aviso="Projeção estatística; não é garantia de execução. IC a 95%.",
+        source_ref=SourceRef(**ultimo.source_ref),
     )
 
 

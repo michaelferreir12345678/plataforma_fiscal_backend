@@ -69,6 +69,48 @@ class BenchmarkValue(BaseModel):
     as_of: datetime
     source_ref: SourceRef
     memoria: dict[str, Any] | None = None
+    # Leitura per capita (Sprint 25D) — só para métricas em R$, e só quando a população
+    # do ente é conhecida. Nula em percentuais: dividir uma razão pela população não
+    # produz informação fiscal.
+    valor_per_capita: Decimal | None = None
+    populacao: int | None = None
+    pop_ano_ref: int | None = None
+
+
+class EvolucaoPonto(BaseModel):
+    """Uma leitura da coorte num período — a mesma coorte, período a período."""
+
+    periodo: str
+    valor_ente: Decimal
+    posicao: int
+    quantidade: int
+    percentil: Decimal
+    mediana: Decimal
+    p10: Decimal
+    p90: Decimal
+    valor_ente_per_capita: Decimal | None = None
+    cobertura: CoberturaBenchmark
+    as_of: datetime
+    source_ref: SourceRef
+
+
+class BenchmarkEvolucaoResponse(BaseModel):
+    """Trajetória do ente **dentro da coorte** ao longo dos períodos (Sprint 25D)."""
+
+    cod_ibge: str
+    indicador: str
+    indicador_rotulo: str
+    unidade: str
+    sentido: Sentido
+    coorte: CoorteOut
+    coortes_disponiveis: list[CoorteOut] = Field(default_factory=list)
+    indicadores_disponiveis: list[IndicadorDisponivel] = Field(default_factory=list)
+    periodos_solicitados: int
+    periodos_sem_comparacao: list[str] = Field(default_factory=list)
+    observacao: str | None = None
+    pontos: list[EvolucaoPonto] = Field(default_factory=list)
+    memoria: dict[str, Any] = Field(default_factory=dict)
+    source_refs: list[SourceRef] = Field(default_factory=list)
 
 
 class BenchmarkResponse(BaseModel):

@@ -11,6 +11,7 @@ import random
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
@@ -24,7 +25,7 @@ from app.modules.ingestion import repository as ing_repo
 from app.modules.ingestion import service as ing_service
 from app.modules.ingestion.schemas import RunRequest
 from app.modules.tenancy import repository as tenancy_repo
-from app.modules.tenancy.models import AuditLog, Fatura
+from app.modules.tenancy.models import AuditLog, Fatura, Licenca
 from tests.conftest import auth_header, login
 
 
@@ -234,8 +235,24 @@ def test_tenant_admin_nao_reativa_propria_assinatura(client, make_org) -> None:
 # --------------------------------------------------------------------------- #
 # Carteira em lote
 # --------------------------------------------------------------------------- #
+def _licenciar(org_id, cod_ibge: str) -> None:
+    """Licencia um ente avulso (Sprint 19): a carteira só aceita o que a licença cobre."""
+    with admin_session() as session:
+        tenancy_repo.add_licenca(
+            session,
+            Licenca(
+                org_id=org_id,
+                tipo="ente",
+                cod_ibge=cod_ibge,
+                vigencia_inicio=date.today(),
+                status="ativa",
+            ),
+        )
+
+
 def test_carteira_lote_idempotente(client, make_org, entes_pop: Entes) -> None:
     org = make_org(entes=[entes_pop.a])
+    _licenciar(org.org_id, entes_pop.b)
     h = auth_header(login(client, org.email, org.senha))
     r = client.post(
         "/carteira/lote",
@@ -253,6 +270,31 @@ def test_carteira_lote_idempotente(client, make_org, entes_pop: Entes) -> None:
     ).json()
     assert r2["removidos"] == [entes_pop.a]
     assert r2["total_carteira"] == 1
+
+
+def test_carteira_lote_recusa_ente_fora_da_licenca_sem_derrubar_o_resto(
+    client, make_org, entes_pop: Entes
+) -> None:
+    """Um ente fora da licença não pode invalidar a importação inteira (Sprint 19).
+
+    O administrador precisa ver o que passou **e** o que não passou — por isso os
+    recusados voltam em ``nao_licenciados``, lista distinta de ``ignorados`` (que é
+    duplicidade ou inexistência, causa cadastral e não comercial).
+    """
+    org = make_org(entes=[])
+    _licenciar(org.org_id, entes_pop.a)
+    h = auth_header(login(client, org.email, org.senha))
+
+    r = client.post(
+        "/carteira/lote",
+        headers=h,
+        json={"adicionar": [{"cod_ibge": entes_pop.a}, {"cod_ibge": entes_pop.b}], "remover": []},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["adicionados"] == [entes_pop.a]
+    assert body["nao_licenciados"] == [entes_pop.b]
+    assert body["total_carteira"] == 1
 
 
 # --------------------------------------------------------------------------- #

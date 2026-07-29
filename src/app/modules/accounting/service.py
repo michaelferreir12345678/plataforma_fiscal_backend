@@ -12,8 +12,11 @@ ver :func:`app.modules.accounting.pcasp.saldo_natural`.
 
 from __future__ import annotations
 
+import threading
+import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -23,17 +26,20 @@ from app.core.errors import AppError
 from app.modules.accounting import pcasp, repository
 from app.modules.accounting.models import MartMscRollup
 from app.modules.accounting.schemas import (
+    BalancoComparacaoOut,
     BalancoLinha,
     BalancoOut,
     BalancosIndex,
     BalancoTipoDisponivel,
+    CoberturaPatrimonio,
+    ComparacaoLinha,
     ConciliacaoCheck,
     ConciliacaoOut,
     MatrizMensalOut,
     MesSaldo,
     PatrimonioDetalhe,
 )
-from app.modules.catalog import service as catalog_service
+from app.modules.catalog import repository as catalog_repository
 from app.modules.ingestion import repository as ingestion_repo
 from app.shared.envelope import DrillChild, DrillEnvelope, DrillNodeRef
 from app.shared.hierarchy import make_path
@@ -43,6 +49,9 @@ _REL_MSC = "MSC"
 _REL_DCA = "DCA"
 _ZERO = Decimal(0)
 _TOL = Decimal("1.00")  # tolerância de conciliação (R$ 1,00; arredondamentos de centavos)
+_MSC_CONTEXT_CACHE_TTL_SECONDS = 30.0
+_MSC_CONTEXT_CACHE_MAX_ENTRIES = 64
+_MSC_CONTEXT_CACHE_MIN_MONTHS = 6
 
 # Balanços da DCA que materializamos (anexo → tipo canônico).
 _ANEXO_TIPO: dict[str, str] = {
@@ -100,16 +109,57 @@ class Contexto:
         return self.msc_meses[-1] if self.msc_meses else None
 
 
-def _uf_do_ente(session: Session, cod_ibge: str) -> str:
-    ente = catalog_service.refresh_dim_ente(session, cod_ibge)
-    if ente is not None and ente.uf:
-        return ente.uf
-    return _UF_POR_PREFIXO.get(cod_ibge[:2], "ZZ")
+@dataclass(frozen=True)
+class _CachedContexto:
+    stored_at: float
+    contexto: Contexto
 
 
-def _esfera_do_ente(session: Session, cod_ibge: str) -> str | None:
-    ente = catalog_service.refresh_dim_ente(session, cod_ibge)
-    return ente.esfera if ente is not None else None
+_ContextIdentity = tuple[tuple[str, str, str], ...]
+_ContextCacheKey = tuple[str, int, _ContextIdentity]
+_contexto_cache: OrderedDict[_ContextCacheKey, _CachedContexto] = OrderedDict()
+_contexto_cache_lock = threading.Lock()
+
+
+def _contexto_cache_get(
+    cod_ibge: str,
+    ano: int,
+    identity: _ContextIdentity,
+) -> Contexto | None:
+    key = (cod_ibge, ano, identity)
+    now = time.monotonic()
+    with _contexto_cache_lock:
+        cached = _contexto_cache.get(key)
+        if cached is None:
+            return None
+        if now - cached.stored_at > _MSC_CONTEXT_CACHE_TTL_SECONDS:
+            del _contexto_cache[key]
+            return None
+        _contexto_cache.move_to_end(key)
+        return cached.contexto
+
+
+def _contexto_cache_put(
+    contexto: Contexto,
+    identity: _ContextIdentity,
+) -> None:
+    key = (contexto.cod_ibge, contexto.ano, identity)
+    with _contexto_cache_lock:
+        _contexto_cache[key] = _CachedContexto(
+            stored_at=time.monotonic(),
+            contexto=contexto,
+        )
+        _contexto_cache.move_to_end(key)
+        while len(_contexto_cache) > _MSC_CONTEXT_CACHE_MAX_ENTRIES:
+            _contexto_cache.popitem(last=False)
+
+
+def _ente_contexto(session: Session, cod_ibge: str) -> tuple[str, str | None]:
+    """UF/esfera já conformadas na gold, lidas uma vez por materialização."""
+
+    ente = catalog_repository.get_dim_ente(session, cod_ibge)
+    uf = ente.uf if ente is not None and ente.uf else _UF_POR_PREFIXO.get(cod_ibge[:2], "ZZ")
+    return uf, ente.esfera if ente is not None else None
 
 
 def _source_dca(ano: int, versao: str | None, anexo: str | None = None) -> SourceRef:
@@ -318,12 +368,37 @@ def ensure_materializado(
     session: Session, cod_ibge: str, *, ano: int, as_of: datetime | None
 ) -> Contexto:
     """Materializa (idempotente) DCA + MSC do ano e devolve o contexto (versões resolvidas)."""
-    uf = _uf_do_ente(session, cod_ibge)
-    esfera = _esfera_do_ente(session, cod_ibge)
+    current_identity: _ContextIdentity | None = None
+    if as_of is None:
+        current_identity = ingestion_repo.version_identity_for_year(
+            session,
+            cod_ibge=cod_ibge,
+            ano=ano,
+        )
+        cached = _contexto_cache_get(cod_ibge, ano, current_identity)
+        if cached is not None:
+            return cached
+
+    uf, esfera = _ente_contexto(session, cod_ibge)
 
     # DCA (anual).
-    dca_versao = ingestion_repo.resolve_versao(
-        session, cod_ibge=cod_ibge, relatorio=_REL_DCA, periodo=str(ano), as_of=as_of
+    dca_versao = (
+        next(
+            (
+                versao
+                for relatorio, periodo, versao in current_identity
+                if relatorio == _REL_DCA and periodo == str(ano)
+            ),
+            None,
+        )
+        if current_identity is not None
+        else ingestion_repo.resolve_versao(
+            session,
+            cod_ibge=cod_ibge,
+            relatorio=_REL_DCA,
+            periodo=str(ano),
+            as_of=as_of,
+        )
     )
     if dca_versao is not None and not repository.balanco_present(
         session, cod_ibge=cod_ibge, ano=ano, versao_entrega=dca_versao
@@ -331,24 +406,44 @@ def ensure_materializado(
         _materializar_dca(session, cod_ibge, uf, ano, dca_versao)
 
     # MSC (mensal): resolve a versão vigente/as_of de cada mês presente no silver.
-    meses: list[MscMes] = []
-    for periodo in repository.distinct_msc_periodos(session, cod_ibge=cod_ibge, ano=ano):
-        versao = ingestion_repo.resolve_versao(
-            session, cod_ibge=cod_ibge, relatorio=_REL_MSC, periodo=periodo, as_of=as_of
+    periodos = repository.distinct_msc_periodos(session, cod_ibge=cod_ibge, ano=ano)
+    versoes = (
+        {
+            periodo: versao
+            for relatorio, periodo, versao in current_identity
+            if relatorio == _REL_MSC
+        }
+        if current_identity is not None
+        else ingestion_repo.resolve_versoes(
+            session,
+            cod_ibge=cod_ibge,
+            relatorio=_REL_MSC,
+            periodos=periodos,
+            as_of=as_of,
         )
+    )
+    pares = [(periodo, versoes[periodo]) for periodo in periodos if periodo in versoes]
+    materializados = repository.rollup_present_pairs(
+        session,
+        cod_ibge=cod_ibge,
+        periodo_versao=pares,
+    )
+    meses: list[MscMes] = []
+    for periodo, versao in pares:
         if versao is None:
             continue
         mes = int(periodo.split("-M")[1])
-        if not repository.rollup_present(
-            session, cod_ibge=cod_ibge, periodo=periodo, versao_entrega=versao
-        ):
+        if (periodo, versao) not in materializados:
             _materializar_msc_mes(session, cod_ibge, uf, periodo, mes, versao)
         meses.append(MscMes(periodo=periodo, mes=mes, versao=versao))
     meses.sort(key=lambda m: m.mes)
-    return Contexto(
+    contexto = Contexto(
         cod_ibge=cod_ibge, uf=uf, ano=ano, esfera=esfera,
         dca_versao=dca_versao, msc_meses=meses, as_of=as_of,
     )
+    if current_identity is not None and len(meses) >= _MSC_CONTEXT_CACHE_MIN_MONTHS:
+        _contexto_cache_put(contexto, current_identity)
+    return contexto
 
 
 def _anos_disponiveis(session: Session, cod_ibge: str) -> list[int]:
@@ -844,9 +939,61 @@ def _divergente(dif: Decimal | None) -> bool:
 
 
 # --- detalhe (Padrão de Detalhe / cabeçalho da página) ---
+def _cobertura(
+    session: Session, cod_ibge: str, *, tem_dca: bool, tem_msc: bool, meses: list[str]
+) -> CoberturaPatrimonio:
+    """Diz, em português, o que este ente publicou — e o que falta ingerir."""
+    anos_dca = sorted(set(repository.anos_com_dca(session, cod_ibge=cod_ibge)))
+    ausentes = [
+        fonte
+        for fonte, presente in (("DCA", tem_dca), ("MSC", tem_msc))
+        if not presente
+    ]
+    if tem_dca and tem_msc:
+        mensagem = (
+            f"DCA em {len(anos_dca)} exercício(s) e MSC mensal em {len(meses)} mês(es): "
+            "balanços e explorador de contas disponíveis."
+        )
+    elif tem_dca:
+        mensagem = (
+            f"DCA disponível em {', '.join(str(a) for a in anos_dca)}. Este ente **não** "
+            "publica a MSC mensal no SICONFI — sem ela não há explorador de contas PCASP "
+            "nem conciliação MSC↔DCA; os balanços anuais seguem completos."
+        )
+    elif tem_msc:
+        mensagem = (
+            "MSC mensal disponível, mas sem DCA ingerida: os balanços anuais dependem "
+            "da Declaração de Contas Anuais."
+        )
+    else:
+        mensagem = (
+            "Nenhuma fonte patrimonial ingerida para este ente: sem DCA (balanços "
+            "anuais) e sem MSC (saldos mensais por conta PCASP)."
+        )
+    return CoberturaPatrimonio(
+        tem_dca=tem_dca, tem_msc=tem_msc, anos_dca=anos_dca, meses_msc=meses,
+        fontes_ausentes=ausentes, mensagem=mensagem,
+    )
+
+
 def build_detalhe(
     session: Session, cod_ibge: str, ano: int | None, *, as_of: datetime | None = None
 ) -> PatrimonioDetalhe:
+    anos = _anos_disponiveis(session, cod_ibge)
+    if not anos and ano is None:
+        # Ente sem nenhuma fonte patrimonial. Antes isto era 404 e a tela caía no bloco
+        # de erro — o que empurrou a versão anterior a trocar o ente por um "de demo".
+        # Falta de dado não é falha: é cobertura, e a tela precisa poder dizê-lo.
+        return PatrimonioDetalhe(
+            cod_ibge=cod_ibge,
+            ano=datetime.now(UTC).year - 1,
+            as_of=as_of.isoformat() if as_of else None,
+            tem_msc=False,
+            tem_dca=False,
+            cobertura=_cobertura(
+                session, cod_ibge, tem_dca=False, tem_msc=False, meses=[]
+            ),
+        )
     ano_r = _resolver_ano(session, cod_ibge, ano)
     ctx = ensure_materializado(session, cod_ibge, ano=ano_r, as_of=as_of)
     ativo = passivo_pl = pl = vpd = vpa = None
@@ -878,7 +1025,109 @@ def build_detalhe(
         ativo=ativo, passivo_pl=passivo_pl, patrimonio_liquido=pl,
         vpd=vpd, vpa=vpa, resultado_patrimonial=resultado, balanco_fechado=balanco_fechado,
         meses_msc=[m.periodo for m in ctx.msc_meses],
-        anos_disponiveis=_anos_disponiveis(session, cod_ibge),
+        anos_disponiveis=anos or [ano_r],
         conciliado=conc.conciliado, n_divergencias=conc.n_divergencias,
+        cobertura=_cobertura(
+            session, cod_ibge, tem_dca=ctx.tem_dca, tem_msc=ctx.tem_msc,
+            meses=[m.periodo for m in ctx.msc_meses],
+        ),
         source_ref=source_ref,
+    )
+
+
+def build_balanco_comparacao(
+    session: Session,
+    cod_ibge: str,
+    tipo: str,
+    *,
+    anos: int = 4,
+    as_of: datetime | None = None,
+) -> BalancoComparacaoOut:
+    """Compara o mesmo balanço em vários exercícios, conta a conta (Sprint 25D).
+
+    Um balanço isolado responde "quanto tenho"; a comparação responde "para onde isto
+    está indo" — que é a pergunta de quem precisa justificar a variação do patrimônio ao
+    tribunal de contas. Exercícios em que a conta não aparece ficam **nulos**: zero e
+    "não publicado" são coisas diferentes num balanço.
+    """
+    if tipo not in _ANEXO_TIPO.values():
+        raise AppError(
+            status=422, title="Tipo inválido",
+            detail=f"tipo deve ser um de {sorted(_ANEXO_TIPO.values())}.",
+        )
+    disponiveis = sorted(repository.anos_com_dca(session, cod_ibge=cod_ibge))
+    if not disponiveis:
+        raise AppError(
+            status=404, title="DCA ausente",
+            detail=f"Ente {cod_ibge} não tem DCA ingerida — nada a comparar.",
+        )
+    janela = disponiveis[-anos:]
+    linhas: dict[str, ComparacaoLinha] = {}
+    anos_lidos: list[int] = []
+    anos_sem: list[int] = []
+    fontes: list[SourceRef] = []
+    for ano in janela:
+        ctx = ensure_materializado(session, cod_ibge, ano=ano, as_of=as_of)
+        if ctx.dca_versao is None:
+            anos_sem.append(ano)
+            continue
+        registros = repository.read_balanco(
+            session, cod_ibge=cod_ibge, ano=ano, tipo=tipo, versao_entrega=ctx.dca_versao
+        )
+        if not registros:
+            anos_sem.append(ano)
+            continue
+        anos_lidos.append(ano)
+        fontes.append(
+            _source_dca(ano, ctx.dca_versao, anexo=f"DCA-Anexo {_TIPO_ANEXO[tipo]}")
+        )
+        for registro in registros:
+            linha = linhas.setdefault(
+                registro.cod_conta,
+                ComparacaoLinha(
+                    cod_conta=registro.cod_conta,
+                    descricao=registro.conta_descricao,
+                    nivel=registro.nivel,
+                ),
+            )
+            # Um balanço pode trazer a mesma conta em mais de uma coluna; a comparação
+            # anual usa a coluna principal do exercício (a primeira lida).
+            if str(ano) not in linha.valores:
+                linha.valores[str(ano)] = registro.valor
+                if registro.valor is not None:
+                    linha.anos_com_valor.append(ano)
+
+    for linha in linhas.values():
+        presentes = [a for a in anos_lidos if linha.valores.get(str(a)) is not None]
+        if len(presentes) >= 2:
+            primeiro = linha.valores[str(presentes[0])]
+            ultimo = linha.valores[str(presentes[-1])]
+            assert primeiro is not None and ultimo is not None
+            linha.variacao_abs = ultimo - primeiro
+            if primeiro != 0:
+                linha.variacao_pct = (ultimo - primeiro) / abs(primeiro) * Decimal(100)
+
+    observacao = None
+    if anos_sem:
+        observacao = (
+            f"{len(anos_lidos)} de {len(janela)} exercícios têm o "
+            f"{_TIPO_ROTULO[tipo]}; sem dado em {', '.join(str(a) for a in anos_sem)}."
+        )
+    return BalancoComparacaoOut(
+        cod_ibge=cod_ibge,
+        tipo=tipo,
+        anexo=f"DCA-Anexo {_TIPO_ANEXO[tipo]}",
+        anos=anos_lidos,
+        anos_sem_balanco=anos_sem,
+        observacao=observacao,
+        linhas=sorted(linhas.values(), key=lambda item: item.cod_conta),
+        memoria={
+            "variacao": (
+                "último exercício com valor − primeiro exercício com valor; percentual "
+                "sobre o módulo do primeiro (contas de PL podem ser negativas)"
+            ),
+            "ausencia": "exercício sem a conta fica nulo — não é zero",
+            "origem": f"DCA Anexo {_TIPO_ANEXO[tipo]} ({_TIPO_ROTULO[tipo]})",
+        },
+        source_refs=fontes,
     )

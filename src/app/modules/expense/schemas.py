@@ -7,6 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.modules.indicators.schemas import SerieAjuste
 from app.shared.envelope import DrillChild, DrillNodeRef
 from app.shared.source_ref import SourceRef
 
@@ -25,6 +26,10 @@ class DespesaTotais(BaseModel):
 class SerieDespesaItem(BaseModel):
     periodo: str
     empenhado: Decimal | None = None
+    # Comparabilidade multi-exercício (Sprint 25): nominal × real × por habitante.
+    empenhado_real: Decimal | None = None  # a preços do período consultado (IPCA)
+    empenhado_per_capita: Decimal | None = None
+    populacao: int | None = None
 
 
 class ComparacaoDespesa(BaseModel):
@@ -48,6 +53,7 @@ class DespesaDetalhe(BaseModel):
     rcl_12m: Decimal | None = None
     composicao: list[DrillChild]  # raízes do eixo (funções ou categorias) com medidas
     serie: list[SerieDespesaItem]
+    serie_ajuste: SerieAjuste | None = None  # deflator IPCA + população (§ comparabilidade)
     comparacao: ComparacaoDespesa | None = None
     periodo_breadcrumb: list[DrillNodeRef]  # drill temporal UP (bimestre → ano)
     source_ref: SourceRef
@@ -132,6 +138,8 @@ class EstagiosOut(BaseModel):
     cascata: list[EstagioPasso]
     lacunas: list[LacunaEstagio]
     por_eixo: list[EstagioItem]
+    estagios_ausentes: list[str] = Field(default_factory=list)  # não publicados no anexo
+    observacao: str | None = None  # por que a cascata está incompleta, quando estiver
     source_ref: SourceRef
 
 
@@ -151,6 +159,7 @@ class ExecucaoOut(BaseModel):
     cod_ibge: str
     periodo: str
     versao_entrega: str
+    eixo: str = "funcao"  # anexo de origem: função (A02) não publica 'pago'
     bimestre: int
     esperado_pct: Decimal  # fração do exercício decorrida (calendário linear)
     estagios: list[ExecucaoEstagio]

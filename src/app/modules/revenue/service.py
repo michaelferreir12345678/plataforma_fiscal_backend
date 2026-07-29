@@ -17,7 +17,9 @@ from sqlalchemy.orm import Session
 from app.core.errors import AppError
 from app.modules.catalog import service as catalog_service
 from app.modules.indicators import repository as indicators_repo
+from app.modules.indicators import serie_ajuste
 from app.modules.indicators import service as indicators_service
+from app.modules.indicators.schemas import SerieAjuste
 from app.modules.revenue import natureza, repository
 from app.modules.revenue.models import DimOrigemReceita, FatoReceita
 from app.modules.revenue.schemas import (
@@ -48,6 +50,13 @@ _OBSERVACAO_CONCILIACAO = (
     "Divergência sinalizada como qualidade de dado: o valor oficial do RREO "
     "permanece inalterado; a fonte externa serve de contraprova."
 )
+
+# Termos de casamento do lado RREO. O ente pode abrir a transferência em linha própria
+# ou parar na espécie; nesse caso comparamos com o agregado que **necessariamente** a
+# contém (contenção, não equivalência).
+_TERMOS_FPM = ("FPM", "FUNDO DE PARTICIPACAO DOS MUNICIPIOS")
+_AGREGADO_UNIAO = ("TRANSFERENCIAS DA UNIAO",)
+_AGREGADO_ESTADOS = ("TRANSFERENCIAS DOS ESTADOS",)
 
 Medidas = dict[str, Decimal]
 
@@ -291,7 +300,10 @@ def build_arvore(
     )
 
 
-def _serie(session: Session, cod_ibge: str) -> list[SerieReceitaItem]:
+def _serie(
+    session: Session, cod_ibge: str, base_periodo: str
+) -> tuple[list[SerieReceitaItem], SerieAjuste]:
+    """Série multi-exercício em nominal + real (IPCA) + per capita, a preços de ``base``."""
     serie: list[SerieReceitaItem] = []
     for periodo in repository.distinct_periodos_fato(session, cod_ibge=cod_ibge):
         versao = indicators_repo.resolve_versao_rreo(
@@ -305,7 +317,16 @@ def _serie(session: Session, cod_ibge: str) -> list[SerieReceitaItem]:
                 periodo=periodo, arrecadado_acum=_totais(nodes, medidas).arrecadado_acum
             )
         )
-    return serie
+    ajuste = serie_ajuste.calcular(
+        session, cod_ibge, [s.periodo for s in serie], base_periodo
+    )
+    por_periodo = serie_ajuste.indexar(ajuste)
+    for item in serie:
+        a = por_periodo.get(item.periodo)
+        item.arrecadado_real = serie_ajuste.real(item.arrecadado_acum, a)
+        item.arrecadado_per_capita = serie_ajuste.per_capita(item.arrecadado_acum, a)
+        item.populacao = a.populacao if a else None
+    return serie, ajuste
 
 
 def _comparacao(
@@ -340,7 +361,7 @@ def build_detalhe(
         nodes, None, period=periodo,
         node_measures={c: dict(m) for c, m in medidas.items()},
     )
-    serie = _serie(session, cod_ibge)
+    serie, ajuste = _serie(session, cod_ibge, periodo)
     return ReceitaDetalhe(
         cod_ibge=cod_ibge,
         periodo=periodo,
@@ -351,6 +372,7 @@ def build_detalhe(
         dependencia=_dependencia(nodes, medidas),
         composicao=raiz.children,
         serie=serie,
+        serie_ajuste=ajuste,
         comparacao=_comparacao(serie, periodo, totais.arrecadado_acum),
         periodo_breadcrumb=catalog_service.periodo_breadcrumb(session, periodo),
         source_ref=_source_ref(periodo, versao),
@@ -513,18 +535,19 @@ def _parse_periodo_bimestral(periodo: str) -> tuple[int, list[int]]:
 
 def _rreo_por_descricao(
     nodes: list[HierarchyNode], medidas: dict[str, Medidas], termos: tuple[str, ...]
-) -> Decimal | None:
-    """Soma do ``arrecadado_acum`` dos nós cuja descrição contém os termos.
+) -> tuple[Decimal | None, list[str]]:
+    """Soma do ``arrecadado_acum`` dos nós cuja descrição contém os termos, + os códigos.
 
     Considera apenas as **correspondências mais profundas** (descarta um nó quando um
-    descendente também corresponde), evitando dupla contagem de subtotais.
+    descendente também corresponde), evitando dupla contagem de subtotais. Devolver os
+    códigos casados é o que torna o lado RREO da conciliação auditável na tela.
     """
     correspondentes = [
         n for n in nodes
         if any(t in natureza.normalizar_texto(n.descricao) for t in termos)
     ]
     if not correspondentes:
-        return None
+        return None, []
     parent_de = {n.codigo: n.parent_codigo for n in nodes}
 
     def descende_de(codigo: str, ancestral: str) -> bool:
@@ -540,23 +563,76 @@ def _rreo_por_descricao(
         n for n in correspondentes
         if not any(c != n.codigo and descende_de(c, n.codigo) for c in codigos)
     ]
-    return sum(
+    total = sum(
         (medidas.get(n.codigo, {}).get("arrecadado_acum", Decimal(0)) for n in folhas),
         Decimal(0),
     )
+    return total, sorted(n.codigo for n in folhas)
+
+
+def _janela_externa(ano: int, meses: list[int]) -> str:
+    return f"{ano} · meses {meses[0]}–{meses[-1]}" if meses else str(ano)
+
+
+def _agregado_de(termo: str) -> tuple[str, ...]:
+    """Agregado continente de uma transferência genérica (ICMS/IPVA ⇒ cota dos estados)."""
+    if any(t in termo for t in ("ICMS", "IPVA", "ESTADO")):
+        return _AGREGADO_ESTADOS
+    if "UNIAO" in termo or "FPM" in termo:
+        return _AGREGADO_UNIAO
+    return ()
+
+
+def _lado_rreo(
+    nodes: list[HierarchyNode],
+    medidas: dict[str, Medidas],
+    especificos: tuple[str, ...],
+    agregados: tuple[str, ...],
+) -> tuple[Decimal | None, list[str], str]:
+    """Lado RREO da conciliação: linha específica ou, na falta dela, o agregado que a contém.
+
+    O RREO Anexo 01 **não obriga** o ente a abrir FPM/FUNDEB em linha própria — Fortaleza,
+    por exemplo, publica só até a espécie ("Transferências da União e de suas Entidades").
+    Comparar contra o agregado não é equivalência: é **contenção** (a parte tem de caber no
+    todo), e o status devolvido diz qual das duas comparações foi feita.
+    """
+    valor, nos = _rreo_por_descricao(nodes, medidas, especificos)
+    if valor is not None:
+        return valor, nos, "linha_especifica"
+    if agregados:
+        valor, nos = _rreo_por_descricao(nodes, medidas, agregados)
+        if valor is not None:
+            return valor, nos, "agregado"
+    return None, [], "ausente"
 
 
 def _item_conciliacao(
-    transferencia: str, fonte: str, rreo: Decimal | None, externo: Decimal | None
+    transferencia: str,
+    fonte: str,
+    rreo: tuple[Decimal | None, list[str], str],
+    externo: Decimal | None,
+    *,
+    tabela_externa: str,
+    periodo_externo: str,
+    independente: bool = True,
 ) -> ConciliacaoItem:
+    rreo_valor, nos, base = rreo
     divergencia: Decimal | None = None
+    divergencia_rs: Decimal | None = None
+    participacao: Decimal | None = None
     if externo is None:
         status = "sem_dado_externo"
-    elif rreo is None:
+    elif rreo_valor is None:
         status = "sem_par_rreo"
+    elif base == "agregado":
+        # Contenção: a transferência é parte do agregado. Exceder o todo é erro de dado.
+        if rreo_valor != 0:
+            participacao = externo / rreo_valor * Decimal(100)
+        status = "contido" if externo <= rreo_valor else "excede_agregado"
     else:
-        if rreo != 0:
-            divergencia = (externo - rreo) / rreo * Decimal(100)
+        divergencia_rs = externo - rreo_valor
+        if rreo_valor != 0:
+            divergencia = divergencia_rs / rreo_valor * Decimal(100)
         elif externo != 0:
             divergencia = Decimal(100)
         status = (
@@ -566,8 +642,11 @@ def _item_conciliacao(
         )
     return ConciliacaoItem(
         transferencia=transferencia, fonte_externa=fonte,
-        rreo_acum=rreo, externo_acum=externo,
-        divergencia_pct=divergencia, status=status,
+        rreo_acum=rreo_valor, externo_acum=externo,
+        divergencia_pct=divergencia, divergencia_rs=divergencia_rs, status=status,
+        tabela_externa=tabela_externa, periodo_externo=periodo_externo,
+        nos_rreo=nos, independente=independente,
+        base_comparacao=base, participacao_no_agregado_pct=participacao,
     )
 
 
@@ -579,26 +658,37 @@ def build_conciliacao(
     ano, meses = _parse_periodo_bimestral(periodo)
     nodes, medidas = _carregar_arvore(session, cod_ibge, periodo, versao)
 
+    janela = _janela_externa(ano, meses)
     itens = [
         _item_conciliacao(
             "FPM", "tesouro_fpm",
-            _rreo_por_descricao(nodes, medidas, ("FPM", "FUNDO DE PARTICIPACAO DOS MUNICIPIOS")),
+            _lado_rreo(nodes, medidas, _TERMOS_FPM, _AGREGADO_UNIAO),
             repository.soma_fpm(session, cod_ibge=cod_ibge, ano=ano, meses=meses),
+            tabela_externa="silver.tesouro_fpm", periodo_externo=janela,
         ),
+        # FUNDEB não tem agregado que o contenha sem ambiguidade (a distribuição mistura
+        # cotas da União, do estado e do próprio município): sem linha própria, fica
+        # explicitamente "sem par no RREO" em vez de comparar contra o agregado errado.
         _item_conciliacao(
             "FUNDEB", "fnde_fundeb_repasse",
-            _rreo_por_descricao(nodes, medidas, ("FUNDEB",)),
+            _lado_rreo(nodes, medidas, ("FUNDEB",), ()),
             repository.soma_fundeb(session, cod_ibge=cod_ibge, ano=ano, meses=meses),
+            tabela_externa="silver.fnde_fundeb_repasse", periodo_externo=janela,
         ),
     ]
-    for tipo, soma in repository.somas_transferencia_generica(
+    for tipo, soma, fonte in repository.somas_transferencia_generica(
         session, cod_ibge=cod_ibge, ano=ano, meses=meses
     ):
+        termo = natureza.normalizar_texto(tipo)
         itens.append(
             _item_conciliacao(
-                tipo, "transferencia_generica",
-                _rreo_por_descricao(nodes, medidas, (natureza.normalizar_texto(tipo),)),
+                tipo, fonte or "transferencia_generica",
+                _lado_rreo(nodes, medidas, (termo,), _agregado_de(termo)),
                 soma,
+                tabela_externa="silver.transferencia_generica", periodo_externo=janela,
+                # Derivado do próprio RREO (ICMS/IPVA cota-parte): contraprova só de
+                # consistência interna, jamais fonte independente — ver Sprint 21.
+                independente=not (fonte or "").startswith("derivado_rreo"),
             )
         )
     return ConciliacaoOut(

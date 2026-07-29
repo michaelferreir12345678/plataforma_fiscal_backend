@@ -11,6 +11,7 @@ from app.modules.dashboard.schemas import (
     SemaforoItem,
 )
 from app.modules.indicators import repository as indicators_repo
+from app.modules.indicators import rotulos
 from app.modules.indicators.models import MartIndicador
 from app.modules.limits import repository as limits_repo
 from app.modules.limits.service import SEMAFORO_INDICADORES, _esfera_do_ente, _limite_dim
@@ -34,6 +35,15 @@ _ROTULO_INDICADOR = {
     "divida_consolidada_liquida": "Dívida Consolidada Líquida",
     "saude_minimo": "Saúde (mínimo)",
     "educacao_mde": "Educação (MDE)",
+}
+# O que é 100% em cada indicador — mínimos constitucionais não se medem sobre a RCL.
+_ROTULO_BASE = {
+    "rcl": "da RCL",
+    # Pessoal e dívida têm limite sobre a RCL **ajustada** (o próprio demonstrativo a
+    # publica). Chamar as duas de "da RCL" apagaria a diferença que faz o percentual.
+    "rcl_ajustada": "da RCL ajustada",
+    "impostos_transferencias": "dos impostos e transferências",
+    "fundeb": "das receitas do FUNDEB",
 }
 
 
@@ -66,15 +76,17 @@ def build_dashboard(session: Session, cod_ibge: str, periodo: str) -> DashboardR
                 valor_pct_rcl=mart.valor_pct_rcl if mart else None,
                 teto_pct=mart.teto_pct if mart else (limite.teto_pct if limite else None),
                 sentido=sentido,
+                denominador=mart.denominador if mart else "rcl",
             )
         )
         if faixa is not None and cor != "verde":
             pct = f"{mart.valor_pct_rcl:.1f}%" if mart and mart.valor_pct_rcl is not None else "—"
-            rotulo = _ROTULO_INDICADOR.get(indicador, indicador)
+            rotulo = _ROTULO_INDICADOR.get(indicador) or rotulos.rotulo(indicador)
+            base = _ROTULO_BASE.get(mart.denominador if mart else "rcl", "base declarada")
             destaques.append(
                 DestaqueItem(
                     indicador=indicador, faixa=faixa, cor=cor,
-                    mensagem=f"{rotulo} em faixa '{faixa}' ({pct} da RCL).",
+                    mensagem=f"{rotulo} em faixa '{faixa}' ({pct} {base}).",
                 )
             )
 

@@ -22,6 +22,7 @@ from app.modules.reports.models import ESCOPOS, FORMATOS, MODELOS, PERIODICIDADE
 from app.modules.reports.schemas import (
     AgendamentoCreate,
     AgendamentoOut,
+    AgendamentoPatch,
     DadoIncompletoOut,
     ModeloRelatorioOut,
     ModelosResponse,
@@ -265,6 +266,69 @@ def agendar(session: Session, principal: Principal, body: AgendamentoCreate) -> 
         criado_por=principal.usuario_id,
     )
     return AgendamentoOut.model_validate(row, from_attributes=True)
+
+
+def listar_agendamentos(session: Session, principal: Principal) -> list[AgendamentoOut]:
+    """Agendamentos da organização — a UI da Sprint 25E lista, edita e desativa."""
+    assert principal.org_id is not None
+    linhas = repository.list_agendamentos(session, org_id=principal.org_id)
+    return [AgendamentoOut.model_validate(row, from_attributes=True) for row in linhas]
+
+
+def atualizar_agendamento(
+    session: Session,
+    principal: Principal,
+    agendamento_id: uuid.UUID,
+    body: AgendamentoPatch,
+) -> AgendamentoOut:
+    """Edita a recorrência. **Desativar preserva o registro** — é regra de negócio com
+    histórico, não lixo: o gestor precisa saber que existiu um agendamento e por quanto
+    tempo ele rodou."""
+    assert principal.org_id is not None
+    row = repository.get_agendamento(
+        session, org_id=principal.org_id, agendamento_id=agendamento_id
+    )
+    if row is None:
+        raise AppError(
+            status=404, title="Agendamento não encontrado", detail=str(agendamento_id)
+        )
+    if body.periodicidade is not None:
+        if body.periodicidade not in PERIODICIDADES:
+            raise AppError(
+                status=422,
+                title="Periodicidade inválida",
+                detail=f"Use: {', '.join(PERIODICIDADES)}.",
+            )
+        row.periodicidade = body.periodicidade
+    if body.formato is not None:
+        if body.formato not in FORMATOS:
+            raise AppError(
+                status=422, title="Formato inválido", detail=f"Use: {', '.join(FORMATOS)}."
+            )
+        row.formato = body.formato
+    if body.periodo is not None:
+        row.periodo = body.periodo
+    if body.proxima_execucao is not None:
+        row.proxima_execucao = body.proxima_execucao
+    if body.ativo is not None:
+        row.ativo = body.ativo
+    row.atualizado_em = datetime.now(UTC)
+    session.flush()
+    session.refresh(row)
+    return AgendamentoOut.model_validate(row, from_attributes=True)
+
+
+def excluir_agendamento(
+    session: Session, principal: Principal, agendamento_id: uuid.UUID
+) -> None:
+    assert principal.org_id is not None
+    removidos = repository.delete_agendamento(
+        session, org_id=principal.org_id, agendamento_id=agendamento_id
+    )
+    if removidos == 0:
+        raise AppError(
+            status=404, title="Agendamento não encontrado", detail=str(agendamento_id)
+        )
 
 
 def to_out(row: Relatorio) -> RelatorioOut:

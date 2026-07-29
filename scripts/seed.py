@@ -8,6 +8,7 @@ Uso:  python -m scripts.seed
 from __future__ import annotations
 
 import sys
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -20,11 +21,12 @@ from app.modules.catalog import service as catalog_service  # noqa: E402
 from app.modules.ingestion import integracoes  # noqa: E402
 from app.modules.limits import service as limits_service  # noqa: E402
 from app.modules.tenancy import repository  # noqa: E402
-from app.modules.tenancy.models import CAPACIDADES  # noqa: E402
+from app.modules.tenancy.models import CAPACIDADES, Licenca  # noqa: E402
 
 ADMIN_MUNICIPIO_EMAIL = "admin@municipio.gov.br"
 ADMIN_ESTADO_EMAIL = "admin@sefaz.gov.br"
 GESTOR_ESTADO_EMAIL = "gestor@sefaz.gov.br"
+SUPERUSER_EMAIL = "operador@erario.com.br"
 SENHA_PADRAO = "senha1234"  # noqa: S105 — apenas dados de exemplo local
 
 
@@ -119,11 +121,46 @@ def run() -> None:
             s, membership_id=m_gestor.id, cods_ibge=["2304400"]
         )
 
-    print("[seed] criado: 1 município (prefeitura) + 1 estado (Sefaz)")
+        # --- Licenças (Sprint 19) ---
+        # Sem licença não há acesso. O seed licencia exatamente o que cada carteira
+        # contém — a prefeitura por ente; a Sefaz pelo território, que é como a
+        # expansão estadual da Sprint 4 sempre funcionou.
+        hoje = date.today()
+        for cod in ("2304400", "3550308"):
+            repository.add_licenca(
+                s,
+                Licenca(
+                    org_id=muni.id, tipo="ente", cod_ibge=cod,
+                    vigencia_inicio=hoje, status="ativa",
+                    observacao="Licença de exemplo (seed local).",
+                ),
+            )
+        repository.add_licenca(
+            s,
+            Licenca(
+                org_id=estado.id, tipo="uf", uf="23",
+                vigencia_inicio=hoje, status="ativa",
+                observacao="Território do Ceará — municípios e o ente estadual.",
+            ),
+        )
+
+        # --- Operador da plataforma (control plane) ---
+        # Não pertence a organização nenhuma: é exatamente o que a flag significa.
+        operador = repository.create_usuario(
+            s,
+            email=SUPERUSER_EMAIL,
+            nome="Operador da Plataforma",
+            senha_hash=hash_password(SENHA_PADRAO),
+            mfa_ativo=False,
+        )
+        operador.is_superuser = True
+
+    print("[seed] criado: 1 município (prefeitura) + 1 estado (Sefaz) + 1 operador")
     print(f"[seed] logins (senha '{SENHA_PADRAO}'):")
     print(f"        - {ADMIN_MUNICIPIO_EMAIL}  (admin município, carteira completa)")
     print(f"        - {ADMIN_ESTADO_EMAIL}     (admin estado, carteira completa)")
     print(f"        - {GESTOR_ESTADO_EMAIL}    (estado, escopo restrito a 2304400)")
+    print(f"        - {SUPERUSER_EMAIL}    (operador da plataforma, /platform)")
 
 
 def main() -> None:

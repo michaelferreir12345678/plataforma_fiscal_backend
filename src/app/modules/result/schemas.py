@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import uuid
+from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.modules.indicators.schemas import SerieAjuste
 from app.shared.envelope import DrillNodeRef
 from app.shared.source_ref import SourceRef
 
@@ -38,6 +41,10 @@ class SerieResultadoItem(BaseModel):
     periodo: str
     resultado_primario: Decimal | None = None
     resultado_nominal: Decimal | None = None
+    # Comparabilidade multi-exercício (Sprint 25): a preços do período consultado.
+    resultado_primario_real: Decimal | None = None
+    resultado_primario_per_capita: Decimal | None = None
+    populacao: int | None = None
 
 
 class ComparacaoResultado(BaseModel):
@@ -69,6 +76,7 @@ class ResultadoDetalhe(BaseModel):
     receita_componentes: list[ComponenteOut]  # drill: componentes primários (receita)
     despesa_componentes: list[ComponenteOut]  # drill: componentes primários (despesa)
     serie: list[SerieResultadoItem]
+    serie_ajuste: SerieAjuste | None = None  # deflator IPCA + população (§ comparabilidade)
     comparacao: ComparacaoResultado | None = None
     periodo_breadcrumb: list[DrillNodeRef]
     source_ref: SourceRef
@@ -122,8 +130,36 @@ class ReconciliacaoOut(BaseModel):
     source_ref: SourceRef
 
 
+class MetaCadastro(BaseModel):
+    """Meta da LDO declarada pela organização (quando o Anexo 6 não a publica)."""
+
+    id: uuid.UUID
+    exercicio: int
+    indicador: str  # primario | nominal
+    valor: Decimal
+    fonte_declarada: str
+    observacao: str | None = None
+    atualizado_em: datetime
+    atualizado_por: uuid.UUID | None = None
+
+
+class MetaFiscalUpsert(BaseModel):
+    """Cadastro/atualização da meta da LDO (exige capacidade de administrar)."""
+
+    exercicio: int = Field(ge=1990, le=2200)
+    indicador: Literal["primario", "nominal"]
+    valor: Decimal
+    fonte_declarada: str = Field(min_length=3, max_length=400)
+    observacao: str | None = Field(default=None, max_length=1000)
+
+
 class MetaOut(BaseModel):
-    """Realizado × meta + projeção de fechamento e esforço necessário."""
+    """Realizado × meta + projeção de fechamento e esforço necessário.
+
+    ``origem`` diz de onde veio a meta: ``a6`` (oficial, publicada pelo ente), ``manual``
+    (cadastro da organização — **restrito às telas do ente**, nunca em agregado ou
+    relatório institucional) ou ``ausente``.
+    """
 
     cod_ibge: str
     periodo: str
@@ -133,6 +169,9 @@ class MetaOut(BaseModel):
     fracao_exercicio: Decimal  # bimestre / 6
     projecao_primario: Decimal | None = None  # fechamento estimado (linear)
     esforco_necessario: Decimal | None = None  # meta − projeção
+    origem: str = "ausente"  # a6 | manual | ausente
+    restrita_ao_ente: bool = False  # True ⇒ meta manual, fora de agregados/relatórios
+    cadastros: list[MetaCadastro] = Field(default_factory=list)
     observacao: str
     source_ref: SourceRef
 

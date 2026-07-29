@@ -7,6 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.modules.indicators.schemas import SerieAjuste
 from app.shared.envelope import DrillNodeRef
 from app.shared.source_ref import SourceRef
 
@@ -140,6 +141,10 @@ class SerieCaixaItem(BaseModel):
     periodo: str
     disp_liquida_apos_total: Decimal | None = None
     rpnp_sem_lastro_total: Decimal | None = None
+    # Comparabilidade multi-exercício (Sprint 25): a preços do período e por habitante.
+    rpnp_sem_lastro_real: Decimal | None = None
+    rpnp_sem_lastro_per_capita: Decimal | None = None
+    populacao: int | None = None
 
 
 class ComparacaoCaixa(BaseModel):
@@ -164,6 +169,7 @@ class CaixaDetalhe(BaseModel):
     rap_por_orgao: list[RapOrgaoItem]
     art42_aplicavel: bool
     serie: list[SerieCaixaItem]
+    serie_ajuste: SerieAjuste | None = None  # deflator IPCA + população
     comparacao: ComparacaoCaixa | None = None
     periodo_breadcrumb: list[DrillNodeRef]
     source_ref: SourceRef  # RGF Anexo 5 (caixa)

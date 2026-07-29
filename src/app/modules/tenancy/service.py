@@ -38,6 +38,7 @@ from app.modules.tenancy.schemas import (
     UserCreate,
     UserOut,
 )
+from app.shared.scope import EnteNaoLicenciadoError, cobertura_licenca
 
 _COMPETENCIA_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
@@ -91,6 +92,7 @@ def build_me(usuario_id: uuid.UUID, org_ativa_id: uuid.UUID | None) -> MeRespons
             nome=usuario.nome,
             org_ativa=org_ativa,
             memberships=infos,
+            is_superuser=usuario.is_superuser,
         )
 
 
@@ -251,9 +253,20 @@ def update_papel_capacidades(
 
 
 # --- Carteira (plano de dados, org do principal) ---
+def _exigir_licenca(session: Session, org_id: uuid.UUID, cod_ibge: str) -> None:
+    """A carteira não pode conter o que a licença não cobre (Sprint 19).
+
+    Aceitar o cadastro e depois negar a leitura seria pior: o cliente veria o ente na
+    própria lista e levaria um 403 ao abri-lo, sem entender por quê.
+    """
+    if not cobertura_licenca(session, org_id).cobre(cod_ibge):
+        raise EnteNaoLicenciadoError(cod_ibge)
+
+
 def add_carteira_ente(
     session: Session, org_id: uuid.UUID, data: CarteiraEnteCreate
 ) -> CarteiraEnteOut:
+    _exigir_licenca(session, org_id, data.cod_ibge)
     ente = repository.add_carteira_ente(
         session, org_id=org_id, cod_ibge=data.cod_ibge, grupo=data.grupo, tag=data.tag
     )
@@ -273,9 +286,16 @@ def carteira_lote(
     existentes = {e.cod_ibge for e in repository.list_carteira(session, org_id)}
     adicionados: list[str] = []
     ignorados: list[str] = []
+    cobertura = cobertura_licenca(session, org_id)
+    nao_licenciados: list[str] = []
     for item in data.adicionar:
         if item.cod_ibge in existentes:
             ignorados.append(item.cod_ibge)
+            continue
+        # Em lote, um ente fora da licença não derruba a operação inteira: entra na
+        # lista de recusados, e o administrador vê o que passou e o que não passou.
+        if not cobertura.cobre(item.cod_ibge):
+            nao_licenciados.append(item.cod_ibge)
             continue
         repository.add_carteira_ente(
             session, org_id=org_id, cod_ibge=item.cod_ibge, grupo=item.grupo, tag=item.tag
@@ -300,6 +320,7 @@ def carteira_lote(
         adicionados=adicionados,
         removidos=removidos,
         ignorados=ignorados,
+        nao_licenciados=nao_licenciados,
         total_carteira=len(existentes),
     )
 
@@ -539,3 +560,85 @@ def auditoria(
         limit=limit,
         offset=offset,
     )
+
+
+def trocar_organizacao(
+    principal: Principal, org_id: uuid.UUID, *, senha: str
+) -> TokenResponse:
+    """Emite um novo token com outra organização **da qual o usuário já é membro**.
+
+    A troca reautentica: mudar de organização muda tudo o que a sessão enxerga, então
+    pedir a senha de novo é o mesmo crivo que se aplica a operações sensíveis — e impede
+    que um token esquecido num terminal aberto passeie entre clientes.
+
+    O que esta função **não** faz, de propósito: colocar o usuário numa organização de
+    que ele não participa. Vínculo é concessão, e quem concede é o operador da
+    plataforma (``POST /platform/orgs/{id}/...``, Sprint 19). Se um administrador de
+    tenant pudesse se vincular a outro tenant, o isolamento entre clientes deixaria de
+    existir — e nenhuma "comprovação extra" na tela conserta isso, porque a verificação
+    aconteceria do lado de quem quer entrar.
+    """
+    with admin_session() as session:
+        usuario = repository.get_usuario(session, principal.usuario_id)
+        if usuario is None or not verify_password(senha, usuario.senha_hash):
+            raise AppError(
+                status=401, title="Não autenticado", detail="Senha incorreta."
+            )
+        views = repository.membership_views_for_user(session, principal.usuario_id)
+        alvo = next((v for v in views if v.org_id == org_id), None)
+        if alvo is None:
+            raise AppError(
+                status=403,
+                title="Sem vínculo",
+                detail=(
+                    "Você não participa desta organização. O vínculo é concedido pelo "
+                    "operador da plataforma."
+                ),
+                type_="urn:plataforma-fiscal:error:sem-vinculo",
+            )
+        token = create_access_token(
+            usuario_id=principal.usuario_id,
+            org_id=alvo.org_id,
+            capacidades=sorted(alvo.capacidades),
+        )
+        repository.insert_audit_log(
+            session,
+            org_id=alvo.org_id,
+            usuario_id=principal.usuario_id,
+            acao="TROCAR_ORGANIZACAO",
+            recurso=f"organizacao:{alvo.org_id}:{alvo.org_nome}",
+        )
+    return TokenResponse(access_token=token)
+
+
+def alterar_senha(principal: Principal, *, senha_atual: str, senha_nova: str) -> None:
+    """Troca a própria senha. Exige a atual — sessão aberta não é prova de identidade."""
+    if len(senha_nova) < 8:
+        raise AppError(
+            status=422, title="Senha fraca", detail="Use ao menos 8 caracteres."
+        )
+    with admin_session() as session:
+        usuario = repository.get_usuario(session, principal.usuario_id)
+        if usuario is None or not verify_password(senha_atual, usuario.senha_hash):
+            raise AppError(status=401, title="Não autenticado", detail="Senha atual incorreta.")
+        usuario.senha_hash = hash_password(senha_nova)
+        repository.insert_audit_log(
+            session,
+            org_id=principal.org_id,
+            usuario_id=principal.usuario_id,
+            acao="ALTERAR_SENHA",
+            recurso=f"usuario:{principal.usuario_id}",
+        )
+
+
+def atualizar_perfil(principal: Principal, *, nome: str) -> MeResponse:
+    """Atualiza o próprio nome — o que o usuário pode mudar sozinho, sem crivo extra."""
+    limpo = nome.strip()
+    if not limpo:
+        raise AppError(status=422, title="Nome vazio", detail="Informe o nome.")
+    with admin_session() as session:
+        usuario = repository.get_usuario(session, principal.usuario_id)
+        if usuario is None:
+            raise AppError(status=404, title="Não encontrado", detail="Usuário inexistente.")
+        usuario.nome = limpo
+    return build_me(principal.usuario_id, principal.org_id)

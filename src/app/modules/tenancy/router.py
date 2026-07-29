@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
@@ -12,6 +12,7 @@ from app.core.deps import Principal, get_current_principal, get_db, require_capa
 from app.core.errors import AppError
 from app.modules.tenancy import service
 from app.modules.tenancy.schemas import (
+    AlterarSenhaInput,
     CarteiraEnteCreate,
     CarteiraEnteOut,
     MeResponse,
@@ -20,7 +21,9 @@ from app.modules.tenancy.schemas import (
     PapelCreate,
     PapelOut,
     PapelUpdate,
+    PerfilInput,
     TokenResponse,
+    TrocarOrgInput,
     UserCreate,
     UserOut,
 )
@@ -39,6 +42,37 @@ def login(form: OAuth2PasswordRequestForm = Depends()) -> TokenResponse:
 @router.get("/me", response_model=MeResponse, tags=["auth"])
 def me(principal: Principal = Depends(get_current_principal)) -> MeResponse:
     return service.build_me(principal.usuario_id, principal.org_id)
+
+
+@router.post("/me/organizacao", response_model=TokenResponse, tags=["auth"])
+def trocar_organizacao(
+    data: TrocarOrgInput, principal: Principal = Depends(get_current_principal)
+) -> TokenResponse:
+    """Troca a organização ativa entre os vínculos do próprio usuário (reautentica).
+
+    Não cria vínculo: entrar numa organização de que não se participa é concessão do
+    operador da plataforma, não decisão de quem quer entrar.
+    """
+    return service.trocar_organizacao(principal, data.org_id, senha=data.senha)
+
+
+@router.patch("/me", response_model=MeResponse, tags=["auth"])
+def atualizar_perfil(
+    data: PerfilInput, principal: Principal = Depends(get_current_principal)
+) -> MeResponse:
+    return service.atualizar_perfil(principal, nome=data.nome)
+
+
+@router.post("/me/senha", status_code=204, response_class=Response, tags=["auth"])
+def alterar_senha(
+    data: AlterarSenhaInput, principal: Principal = Depends(get_current_principal)
+) -> Response:
+    """Troca a própria senha. 204 sem corpo: não há o que devolver, e devolver o
+    usuário aqui só ampliaria a superfície de uma rota que lida com credencial."""
+    service.alterar_senha(
+        principal, senha_atual=data.senha_atual, senha_nova=data.senha_nova
+    )
+    return Response(status_code=204)
 
 
 # --- Organizações (plano de controle; requer 'administrar') ---

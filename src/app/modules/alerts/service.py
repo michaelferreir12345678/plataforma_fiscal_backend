@@ -7,6 +7,9 @@ depender de um worker externo. A avaliação é idempotente (dedup por chave).
 
 from __future__ import annotations
 
+import json
+import threading
+import time
 import uuid
 from datetime import UTC, datetime
 
@@ -25,9 +28,12 @@ from app.modules.alerts.schemas import (
     CarteiraEnteAlertas,
     Contadores,
     FilaAlertasResponse,
+    HistoricoAlertasResponse,
+    HistoricoItem,
 )
 from app.modules.catalog import repository as catalog_repo
 from app.modules.catalog import service as catalog_service
+from app.modules.tenancy import repository as tenancy_repo
 from app.shared.scope import assert_ente_in_scope, carteira_scope_ibges
 from app.shared.source_ref import SourceRef
 
@@ -85,6 +91,44 @@ def _org(principal: Principal) -> uuid.UUID:
     return principal.org_id
 
 
+#: Intervalo mínimo entre duas avaliações do mesmo (organização, ente).
+#:
+#: O motor da Sprint 15 avalia **na leitura**, e avaliar é escrever: cada
+#: ``upsert_alerta`` disputa as mesmas linhas de ``op.alerta``. Com um usuário isso é
+#: invisível; com cinquenta abrindo o cockpit ao mesmo tempo, cinquenta leitores viram
+#: cinquenta escritores concorrentes e a fila trava — foi o que o teste de carga da
+#: Sprint 28 mostrou (P95 estourando os 30 s em ``/alertas`` e ``/cockpit``, enquanto o
+#: resto do produto respondia abaixo de 500 ms).
+#:
+#: Trinta segundos preservam o que a avaliação on-read existe para dar — alerta de
+#: prazo que vira crítico com a passagem do tempo, sem esperar carga — e eliminam a
+#: tempestade de escrita: quem chega dentro da janela lê o que o primeiro já apurou.
+_TTL_AVALIACAO_S = 30.0
+
+#: Memória por processo. Não é cache de dado (a fila continua vindo do banco a cada
+#: chamada); é memória de **quando já se avaliou**. Por processo basta: com N réplicas
+#: o pior caso são N avaliações por janela em vez de uma, e não N por requisição.
+_ultima_avaliacao: dict[tuple[uuid.UUID, str], float] = {}
+_lock_avaliacao = threading.Lock()
+
+
+def _deve_avaliar(org_id: uuid.UUID, cod_ibge: str) -> bool:
+    agora = time.monotonic()
+    chave = (org_id, cod_ibge)
+    with _lock_avaliacao:
+        anterior = _ultima_avaliacao.get(chave)
+        if anterior is not None and agora - anterior < _TTL_AVALIACAO_S:
+            return False
+        _ultima_avaliacao[chave] = agora
+        return True
+
+
+def esquecer_avaliacoes() -> None:
+    """Descarta a memória de avaliação — usado em teste, onde o relógio não passa."""
+    with _lock_avaliacao:
+        _ultima_avaliacao.clear()
+
+
 def listar_fila(
     session: Session,
     principal: Principal,
@@ -98,7 +142,8 @@ def listar_fila(
         if cod_ibge is None:
             raise AppError(status=422, title="Ente ausente", detail="escopo=ente exige ?ente=.")
         assert_ente_in_scope(session, principal, cod_ibge)
-        engine.avaliar_ente(session, org_id, cod_ibge, incluir_preditivo=True)
+        if _deve_avaliar(org_id, cod_ibge):
+            engine.avaliar_ente(session, org_id, cod_ibge, incluir_preditivo=True)
         cods = [cod_ibge]
     else:
         cods = _avaliar_carteira(session, principal, org_id)
@@ -111,6 +156,72 @@ def listar_fila(
         gerado_em=datetime.now(UTC),
         contadores=_contadores(alertas),
         alertas=[_to_out(a) for a in alertas],
+    )
+
+
+def historico(
+    session: Session,
+    principal: Principal,
+    *,
+    escopo: str,
+    cod_ibge: str | None,
+    categoria: str | None = None,
+    limite: int = 100,
+) -> HistoricoAlertasResponse:
+    """O que já saiu da fila — com quem tratou, quando e em quanto tempo (Sprint 25E).
+
+    Diferente da fila, **não dispara avaliação**: histórico é registro do passado, e
+    reavaliar aqui poderia reabrir na tela um alerta que o gestor já fechou.
+    """
+    org_id = _org(principal)
+    if escopo == "ente":
+        if cod_ibge is None:
+            raise AppError(status=422, title="Ente ausente", detail="escopo=ente exige ?ente=.")
+        assert_ente_in_scope(session, principal, cod_ibge)
+        cods: list[str] | None = [cod_ibge]
+    else:
+        cods = sorted(carteira_scope_ibges(session, principal))
+    tratados = repository.list_historico(
+        session, org_id=org_id, cods_ibge=cods, categoria=categoria, limite=limite
+    )
+    emails = tenancy_repo.emails_por_usuario(
+        session, ids=[a.resolvido_por for a in tratados if a.resolvido_por]
+    )
+    itens: list[HistoricoItem] = []
+    prazos: list[int] = []
+    por_categoria: dict[str, int] = {}
+    for alerta in tratados:
+        dias = None
+        if alerta.resolvido_em is not None:
+            dias = max(0, (alerta.resolvido_em - alerta.criado_em).days)
+            prazos.append(dias)
+        por_categoria[alerta.categoria] = por_categoria.get(alerta.categoria, 0) + 1
+        itens.append(
+            HistoricoItem(
+                **_to_out(alerta).model_dump(),
+                resolvido_em=alerta.resolvido_em,
+                resolvido_por=emails.get(alerta.resolvido_por) if alerta.resolvido_por else None,
+                dias_ate_resolver=dias,
+            )
+        )
+    resolvidos = sum(1 for a in tratados if a.status == "resolvida")
+    observacao = None
+    if itens and not prazos:
+        observacao = (
+            "Alertas tratados antes da Sprint 25E não registram o instante da resolução: "
+            "o tempo de tratamento só existe a partir de agora."
+        )
+    return HistoricoAlertasResponse(
+        escopo=escopo,
+        cod_ibge=cod_ibge if escopo == "ente" else None,
+        gerado_em=datetime.now(UTC),
+        total=len(itens),
+        resolvidos=resolvidos,
+        descartados=len(itens) - resolvidos,
+        tempo_medio_dias=(sum(prazos) / len(prazos)) if prazos else None,
+        por_categoria=por_categoria,
+        itens=itens,
+        observacao=observacao,
     )
 
 
@@ -215,11 +326,31 @@ def atualizar_status(
         raise AppError(
             status=422, title="Status inválido", detail=f"Use um de {_STATUS_VALIDOS}."
         )
+    agora = datetime.now(UTC)
     afetados = repository.set_status(
-        session, org_id=org_id, alerta_id=alerta_id, status=status, agora=datetime.now(UTC)
+        session, org_id=org_id, alerta_id=alerta_id, status=status, agora=agora,
+        usuario_id=principal.usuario_id,
     )
     if afetados == 0:
         raise AppError(status=404, title="Alerta não encontrado", detail=str(alerta_id))
     alerta = repository.get_alerta(session, org_id=org_id, alerta_id=alerta_id)
     assert alerta is not None
+    # Tratar um alerta é decisão de gestão: fica na trilha de auditoria da organização.
+    tenancy_repo.insert_audit_log(
+        session,
+        org_id=org_id,
+        usuario_id=principal.usuario_id,
+        acao=f"alerta.{status}",
+        recurso=json.dumps(
+            {
+                "alerta_id": str(alerta_id),
+                "chave": alerta.chave,
+                "cod_ibge": alerta.cod_ibge,
+                "categoria": alerta.categoria,
+                "severidade": alerta.severidade,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+    )
     return _to_out(alerta)

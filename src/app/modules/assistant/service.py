@@ -402,6 +402,7 @@ def perguntar(
         periodo=body.periodo,
         as_of=body.as_of,
         top_k=settings.assistant_norma_top_k,
+        pagina=body.pagina,
     )
     codigos_visiveis = {f.codigo for f in ctx.fatos}
     return _run(

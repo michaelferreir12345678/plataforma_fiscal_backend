@@ -150,11 +150,29 @@ class QualidadeFonte(BaseModel):
     retificacoes: int = 0  # entregas além da 1ª para o período vigente
 
 
+class ChecagemAberta(BaseModel):
+    """Check de qualidade em falha/aviso que recai sobre os números desta tela."""
+
+    check_codigo: str
+    rotulo: str
+    status: str
+    fonte: str
+    periodo: str | None = None
+    diferenca: Decimal | None = None
+    tolerancia: Decimal | None = None
+    motivo: str | None = None
+
+
 class CockpitQualidade(BaseModel):
     fontes: list[QualidadeFonte] = Field(default_factory=list)
     defasagem_maxima: int | None = None
     confiavel: bool = True
     observacao: str | None = None
+    # Sprint 26: a camada de qualidade deixou de falar só de atualidade e passa a dizer
+    # se alguma **verificação** sobre estes números está aberta.
+    checks_abertos: list[ChecagemAberta] = Field(default_factory=list)
+    n_checks_falha: int = 0
+    n_checks_aviso: int = 0
 
 
 # --- Envelope --------------------------------------------------------------

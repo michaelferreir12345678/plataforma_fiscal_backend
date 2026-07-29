@@ -15,14 +15,17 @@ import re
 from datetime import datetime
 from decimal import Decimal
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
 from app.modules.catalog import service as catalog_service
 from app.modules.catalog.models import DimEnte
+from app.modules.indicators import serie_ajuste
 from app.modules.indicators import service as indicators_service
-from app.modules.indicators.schemas import IndicadorOut
+from app.modules.indicators.schemas import IndicadorOut, SerieAjuste
 from app.modules.ingestion import repository as ingestion_repo
+from app.modules.ingestion.models import SilverRgf
 from app.modules.personnel import pessoal, repository
 from app.modules.personnel.models import FatoPessoal
 from app.modules.personnel.pessoal import MEDIDAS, ROOT_CODIGO, ROOT_DESCRICAO, PoderInfo
@@ -98,6 +101,39 @@ def _rcl_12m(
         return None
 
 
+#: Linha em que o Anexo 01 publica o **denominador do limite**. O texto completo é
+#: "= RECEITA CORRENTE LÍQUIDA AJUSTADA PARA CÁLCULO DOS LIMITES DA DESPESA COM
+#: PESSOAL"; casamos pelo núcleo para sobreviver a variações de layout entre exercícios.
+_TRECHO_RCL_AJUSTADA = "RECEITA CORRENTE L"
+_TRECHO_LIMITES_PESSOAL = "LIMITES DA DESPESA COM PESSOAL"
+
+
+def _rcl_ajustada_publicada(
+    session: Session, cod_ibge: str, periodo: str, versao: str
+) -> Decimal | None:
+    """Denominador oficial do limite de pessoal, como o ente o publicou.
+
+    O teto do art. 20 da LRF incide sobre a **RCL ajustada**, não sobre a RCL cheia: a
+    EC 105/2019 manda deduzir as transferências recebidas por emenda individual. O
+    demonstrativo já traz a conta pronta — reconstruí-la aqui significaria reimplementar
+    uma regra que muda com a legislação e errar em silêncio quando ela mudar.
+    """
+    linha = session.execute(
+        select(SilverRgf.valor)
+        .where(
+            SilverRgf.cod_ibge == cod_ibge,
+            SilverRgf.periodo == periodo,
+            SilverRgf.versao_entrega == versao,
+            SilverRgf.anexo.like("RGF-Anexo 01%"),
+            SilverRgf.conta.ilike(f"%{_TRECHO_RCL_AJUSTADA}%"),
+            SilverRgf.conta.ilike(f"%{_TRECHO_LIMITES_PESSOAL}%"),
+            SilverRgf.valor.is_not(None),
+        )
+        .limit(1)
+    ).scalar()
+    return Decimal(linha) if linha is not None else None
+
+
 def _pct(parte: Decimal | None, todo: Decimal | None) -> Decimal | None:
     if parte is None or not todo:
         return None
@@ -156,6 +192,11 @@ def materializar_pessoal(
     """ETL do RGF Anexo 1 → dim_poder_orgao + fato_pessoal (idempotente, RPPS-sensível)."""
     por_poder = _ler_componentes(session, cod_ibge, periodo, versao)
     _ensure_dim(session, list(por_poder))
+    # O limite do art. 20 é sobre a RCL **ajustada** publicada no próprio anexo. Só onde
+    # o ente não a publicou é que a RCL cheia serve de aproximação — e nesse caso a linha
+    # guarda ``rcl_ajustada = NULL``, que é como se sabe depois qual base foi usada.
+    ajustada = _rcl_ajustada_publicada(session, cod_ibge, periodo, versao)
+    denominador = ajustada if ajustada else rcl
     for info, comp in por_poder.items():
         ap = pessoal.apurar(comp, rpps=rpps)
         repository.upsert_fato(
@@ -167,7 +208,8 @@ def materializar_pessoal(
                 "despesa_bruta": ap.despesa_bruta,
                 "exclusoes": ap.exclusoes,
                 "despesa_liquida": ap.despesa_liquida,
-                "pct_rcl": _pct(ap.despesa_liquida, rcl),
+                "rcl_ajustada": ajustada,
+                "pct_rcl": _pct(ap.despesa_liquida, denominador),
                 "versao_entrega": versao,
             },
         )
@@ -177,12 +219,32 @@ def materializar_pessoal(
 
 
 def _ensure_gold(
-    session: Session, cod_ibge: str, periodo: str, versao: str, *, rpps: bool, rcl: Decimal | None
+    session: Session,
+    cod_ibge: str,
+    periodo: str,
+    versao: str,
+    *,
+    rpps: bool,
+    rcl: Decimal | None,
+    forcar: bool = False,
 ) -> list[FatoPessoal]:
-    fatos = repository.list_fatos(
-        session, cod_ibge=cod_ibge, periodo=periodo, versao_entrega=versao
-    )
-    return fatos if fatos else materializar_pessoal(
+    """Fatos do período — materializando na primeira leitura, ou sempre que ``forcar``.
+
+    A guarda de "materializa uma vez" mantém a página rápida, mas ela também congela o
+    fato quando a **regra** muda (foi o que aconteceu quando o denominador do limite
+    passou a ser a RCL ajustada: o mart recalculava e o detalhe não, e as duas telas
+    passaram a discordar do mesmo limite).
+
+    Quem sabe que a regra mudou é o job de materialização — por isso ele força, e a
+    leitura não paga por isso.
+    """
+    if not forcar:
+        fatos = repository.list_fatos(
+            session, cod_ibge=cod_ibge, periodo=periodo, versao_entrega=versao
+        )
+        if fatos:
+            return fatos
+    return materializar_pessoal(
         session, cod_ibge, periodo, versao, rpps=rpps, rcl=rcl
     )
 
@@ -215,9 +277,18 @@ def _medidas_efetivas(
 
 
 def _carregar_arvore(
-    session: Session, cod_ibge: str, periodo: str, versao: str, *, rpps: bool, rcl: Decimal | None
+    session: Session,
+    cod_ibge: str,
+    periodo: str,
+    versao: str,
+    *,
+    rpps: bool,
+    rcl: Decimal | None,
+    forcar: bool = False,
 ) -> tuple[list[HierarchyNode], dict[str, Medidas]]:
-    fatos = _ensure_gold(session, cod_ibge, periodo, versao, rpps=rpps, rcl=rcl)
+    fatos = _ensure_gold(
+        session, cod_ibge, periodo, versao, rpps=rpps, rcl=rcl, forcar=forcar
+    )
     proprias: dict[str, Medidas] = {
         f.poder_codigo: {m: Decimal(v) for m in MEDIDAS if (v := getattr(f, m)) is not None}
         for f in fatos
@@ -285,6 +356,23 @@ def _faixa_executivo(
             periodo=rreo,
             versao_entrega=versao_rreo,
         )
+        ajustada = _rcl_ajustada_publicada(session, cod_ibge, periodo, versao_rgf)
+        if ajustada:
+            # Mesmo denominador do ``fato_pessoal``: se o mart redividisse pela RCL
+            # cheia, o semáforo mostraria uma faixa mais folgada que a página de
+            # detalhe — duas telas do mesmo produto discordando sobre o mesmo limite.
+            return indicators_service.classificar_sobre_base(
+                session, cod_ibge, rreo, "pessoal_executivo", liquida, ajustada,
+                denominador="rcl_ajustada", versao_entrega=versao_rreo,
+                poder="Executivo", as_of=as_of,
+                source_ref=SourceRef(
+                    relatorio="RGF/RREO",
+                    anexo="RGF Anexo 01 / RREO Anexo 03",
+                    periodo=f"{periodo} / {rreo}",
+                    versao_entrega=f"RGF:{versao_rgf};RREO:{versao_rreo}",
+                ),
+                source_components=(rgf_ref, rreo_ref),
+            )
         return indicators_service.classificar_limite(
             session, cod_ibge, rreo, "pessoal_executivo", liquida,
             poder="Executivo", as_of=as_of,
@@ -336,7 +424,10 @@ def _item_executivo(
 
 
 # --- série e comparação temporal ---
-def _serie(session: Session, cod_ibge: str) -> list[SeriePessoalItem]:
+def _serie(
+    session: Session, cod_ibge: str, base_periodo: str
+) -> tuple[list[SeriePessoalItem], SerieAjuste]:
+    """Série RGF multi-exercício + comparabilidade (folha a preços do período e por habitante)."""
     serie: list[SeriePessoalItem] = []
     for periodo in repository.distinct_periodos_fato(session, cod_ibge=cod_ibge):
         versao = ingestion_repo.resolve_versao(
@@ -356,7 +447,16 @@ def _serie(session: Session, cod_ibge: str) -> list[SeriePessoalItem]:
                 periodo=periodo, despesa_liquida=liquida, pct_rcl=pct or None
             )
         )
-    return serie
+    ajuste = serie_ajuste.calcular(
+        session, cod_ibge, [s.periodo for s in serie], base_periodo
+    )
+    por_periodo = serie_ajuste.indexar(ajuste)
+    for item in serie:
+        a = por_periodo.get(item.periodo)
+        item.despesa_liquida_real = serie_ajuste.real(item.despesa_liquida, a)
+        item.despesa_liquida_per_capita = serie_ajuste.per_capita(item.despesa_liquida, a)
+        item.populacao = a.populacao if a else None
+    return serie, ajuste
 
 
 def _comparacao(
@@ -382,24 +482,33 @@ def _comparacao(
 
 # --- endpoints ---
 def build_detalhe(
-    session: Session, cod_ibge: str, periodo: str, *, as_of: datetime | None = None
+    session: Session,
+    cod_ibge: str,
+    periodo: str,
+    *,
+    as_of: datetime | None = None,
+    forcar: bool = False,
 ) -> PessoalDetalhe:
-    """Cabeçalho + composição (por poder) + série + comparação (Padrão de Detalhe)."""
+    """Cabeçalho + composição (por poder) + série + comparação (Padrão de Detalhe).
+
+    ``forcar`` é usado pelo job de materialização, que reapura mesmo com fato existente.
+    """
     versao = _resolve_versao(session, cod_ibge, periodo, as_of)
     ente = _ente(session, cod_ibge)
     rcl = _rcl_12m(session, cod_ibge, periodo, as_of)
     nodes, medidas = _carregar_arvore(
-        session, cod_ibge, periodo, versao, rpps=ente.rpps, rcl=rcl
+        session, cod_ibge, periodo, versao, rpps=ente.rpps, rcl=rcl, forcar=forcar
     )
     # Composição = poderes (filhos do consolidado); o drill inicia no nó ENTE.
     consolidado = build_drill_envelope(
         nodes, ROOT_CODIGO, period=periodo, node_measures=_measures_map(medidas)
     )
-    serie = _serie(session, cod_ibge)
+    serie, ajuste = _serie(session, cod_ibge, periodo)
     totais = _totais(medidas)
     return PessoalDetalhe(
         cod_ibge=cod_ibge,
         periodo=periodo,
+        periodo_rreo=_rreo_periodo(periodo),
         versao_entrega=versao,
         esfera=ente.esfera,
         rpps=ente.rpps,
@@ -408,6 +517,7 @@ def build_detalhe(
         executivo=_item_executivo(session, cod_ibge, periodo, medidas, as_of),
         composicao=consolidado.children,
         serie=serie,
+        serie_ajuste=ajuste,
         comparacao=_comparacao(serie, periodo, totais.despesa_liquida),
         periodo_breadcrumb=catalog_service.periodo_breadcrumb(session, periodo),
         source_ref=_source_ref(periodo, versao),

@@ -11,7 +11,7 @@ from fastapi import Depends, Request
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
-from app.core.db import SessionLocal, apply_context
+from app.core.db import SessionLocal, apply_context, garantir_mapeamentos
 from app.core.errors import AppError
 from app.core.security import decode_access_token
 from app.modules.tenancy import repository
@@ -28,6 +28,9 @@ class Principal:
     papel: str | None
     capacidades: frozenset[str]
     escopo_ibges: frozenset[str] | None  # None = carteira inteira
+    #: Operador da plataforma (Sprint 19). Habilita ``/platform`` e **nada mais**: não
+    #: concede capacidade RBAC nem amplia escopo de tenant em rota alguma.
+    is_superuser: bool = False
 
     def has_cap(self, cap: str) -> bool:
         return cap in self.capacidades
@@ -35,6 +38,7 @@ class Principal:
 
 def get_db() -> Iterator[Session]:
     """Sessão por requisição. Começa em *default-deny* (sem org, is_admin=off)."""
+    garantir_mapeamentos()
     session = SessionLocal()
     try:
         apply_context(session)  # RLS nega tudo até o principal fixar a org
@@ -83,15 +87,48 @@ def get_current_principal(
             escopo_ibges = view.escopo_ibges
             papel = view.papel_nome
 
+    # A flag vem do banco a cada requisição, nunca do token: revogar um superuser não
+    # pode depender de o JWT dele expirar.
+    usuario = repository.get_usuario(session, usuario_id)
     principal = Principal(
         usuario_id=usuario_id,
         org_id=org_id,
         papel=papel,
         capacidades=capacidades,
         escopo_ibges=escopo_ibges,
+        is_superuser=bool(usuario is not None and usuario.is_superuser),
     )
     request.state.principal = principal
     return principal
+
+
+def require_superuser(principal: Principal = Depends(get_current_principal)) -> Principal:
+    """Porta do control plane (Sprint 19).
+
+    Deliberadamente **não** aceita a capacidade ``administrar``: ela é o topo do
+    RBAC *dentro* de uma organização, e o cliente que administra a própria conta não
+    pode licenciar a si mesmo mais entes. São dois planos, e é essa separação que dá
+    sentido ao licenciamento.
+    """
+    if not principal.is_superuser:
+        raise AppError(
+            status=403,
+            title="Sem permissão",
+            detail="Recurso exclusivo do operador da plataforma.",
+            type_="urn:plataforma-fiscal:error:superuser-required",
+        )
+    return principal
+
+
+def superuser_session(session: Session = Depends(get_db)) -> Session:
+    """Sessão do control plane: RLS em modo admin, restrita às rotas ``/platform``.
+
+    O bypass vive aqui, ao lado da dependência que exige ``is_superuser``, e não é
+    exportado para rota de tenant nenhuma. Provisionar organização e ler uso agregado
+    exigem enxergar entre orgs — que é exatamente o que a RLS proíbe no plano do tenant.
+    """
+    apply_context(session, is_admin=True)
+    return session
 
 
 def require_capability(capacidade: str) -> Callable[[Principal], Principal]:

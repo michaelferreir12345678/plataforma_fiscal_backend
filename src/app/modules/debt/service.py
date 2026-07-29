@@ -29,13 +29,17 @@ from app.modules.debt.schemas import (
     DividaDetalhe,
     MemoriaDivida,
     PosicaoSimulada,
+    PvlItem,
+    PvlOut,
     SerieDividaItem,
     SimulacaoResponse,
     SimularOperacaoRequest,
     VencimentoItem,
 )
 from app.modules.indicators import divida as calculos
+from app.modules.indicators import serie_ajuste
 from app.modules.indicators.limites import LimiteLegal, classificar_faixa
+from app.modules.indicators.schemas import SerieAjuste
 from app.modules.ingestion import repository as ingestion_repo
 from app.modules.ingestion.models import SadipemOpContratada, SilverRgf
 from app.shared.envelope import DrillEnvelope, Measures
@@ -44,6 +48,7 @@ from app.shared.source_ref import SourceRef
 
 _REL_RGF = "RGF"
 _REL_CAPAG = "CAPAG"
+_REL_CAPAG_ESTADUAL = "CAPAG-EST"
 _REL_SADIPEM_OP = "SADIPEM-OP"
 _REL_SADIPEM_CRONO = "SADIPEM-CRONOGRAMA"
 _ANEXO_DDCL = "Anexo 02 — DDCL"
@@ -71,10 +76,14 @@ def _source_rgf(periodo: str, versao: str, anexo: str = _ANEXO_DDCL) -> SourceRe
     )
 
 
-def _source_capag(ano_ref: int, versao: str) -> SourceRef:
+def _source_capag(ano_ref: int, versao: str, cod_ibge: str) -> SourceRef:
+    """Fonte real da nota. O anexo muda com o escopo: "Prévia da CAPAG" é a aba da planilha
+    dos municípios; a dos estados é um CSV com a classificação por UF. Repetir o nome da aba
+    municipal num ente estadual apontaria a auditoria para um documento que não tem a linha."""
+    municipal = len(cod_ibge) == 7
     return SourceRef(
-        relatorio=_REL_CAPAG,
-        anexo="Prévia da CAPAG",
+        relatorio=_REL_CAPAG if municipal else _REL_CAPAG_ESTADUAL,
+        anexo="Prévia da CAPAG" if municipal else "Classificação da CAPAG (estados)",
         periodo=str(ano_ref),
         versao_entrega=versao,
     )
@@ -299,6 +308,17 @@ def obter_dcl(
         return None
 
 
+def _relatorio_capag(cod_ibge: str) -> str:
+    """Município e estado têm publicações CAPAG distintas — e entregas distintas.
+
+    O Tesouro publica dois conjuntos separados; na ``dim_entrega`` eles chegam como duas
+    entregas nacionais, e usar o mesmo rótulo faria uma superar a outra. Resolver a versão
+    pelo rótulo errado devolve o checksum do arquivo dos municípios para um ente estadual,
+    e a CAPAG do Governo do Estado some da tela sem erro nenhum.
+    """
+    return _REL_CAPAG if len(cod_ibge) == 7 else _REL_CAPAG_ESTADUAL
+
+
 def _ensure_capag(
     session: Session,
     cod_ibge: str,
@@ -309,7 +329,7 @@ def _ensure_capag(
     periodo = str(ano_ref)
     versao = _resolve_global(
         session,
-        relatorio=_REL_CAPAG,
+        relatorio=_relatorio_capag(cod_ibge),
         periodo=periodo,
         as_of=as_of,
     )
@@ -366,7 +386,7 @@ def _capag_hero(fato: FatoCapag, *, as_of: datetime | None) -> CapagHero:
         ind_liquidez=fato.ind_liquidez,
         metodologia_versao=fato.metodologia_versao,
         as_of=as_of,
-        source_ref=_source_capag(fato.ano_ref, fato.versao_entrega),
+        source_ref=_source_capag(fato.ano_ref, fato.versao_entrega, fato.cod_ibge),
     )
 
 
@@ -561,9 +581,11 @@ def _credor_tree(
 def _serie(
     session: Session,
     cod_ibge: str,
+    base_periodo: str,
     *,
     as_of: datetime | None,
-) -> list[SerieDividaItem]:
+) -> tuple[list[SerieDividaItem], SerieAjuste]:
+    """Série RGF multi-exercício + comparabilidade (DCL a preços do período e per capita)."""
     serie: list[SerieDividaItem] = []
     for periodo in repository.distinct_periodos_ddcl(session, cod_ibge=cod_ibge):
         versao = ingestion_repo.resolve_versao(
@@ -596,7 +618,16 @@ def _serie(
                 source_ref=_source_rgf(periodo, versao),
             )
         )
-    return serie
+    ajuste = serie_ajuste.calcular(
+        session, cod_ibge, [s.periodo for s in serie], base_periodo
+    )
+    por_periodo = serie_ajuste.indexar(ajuste)
+    for item in serie:
+        a = por_periodo.get(item.periodo)
+        item.dcl_real = serie_ajuste.real(item.dcl, a)
+        item.dcl_per_capita = serie_ajuste.per_capita(item.dcl, a)
+        item.populacao = a.populacao if a else None
+    return serie, ajuste
 
 
 def _comparacao(
@@ -638,13 +669,13 @@ def build_detalhe(
     capag_as_of = _effective_as_of(
         session,
         cod_ibge="BR",
-        relatorio=_REL_CAPAG,
+        relatorio=_relatorio_capag(cod_ibge),
         periodo=str(capag.ano_ref),
         versao=capag.versao_entrega,
         requested=as_of,
     )
     envelope = _origem_envelope(session, fato, "DIVIDA")
-    serie = _serie(session, cod_ibge, as_of=as_of)
+    serie, ajuste = _serie(session, cod_ibge, periodo, as_of=as_of)
     assert ente.esfera is not None
     return DividaDetalhe(
         cod_ibge=cod_ibge,
@@ -656,6 +687,7 @@ def build_detalhe(
         capag=_capag_hero(capag, as_of=capag_as_of),
         composicao=envelope.children,
         serie=serie,
+        serie_ajuste=ajuste,
         comparacao=_comparacao(serie, periodo, fato.dcl),
         periodo_breadcrumb=catalog_service.periodo_breadcrumb(session, periodo),
         source_ref=_source_rgf(periodo, versao),
@@ -813,12 +845,12 @@ def build_capag(
     effective_as_of = _effective_as_of(
         session,
         cod_ibge="BR",
-        relatorio=_REL_CAPAG,
+        relatorio=_relatorio_capag(cod_ibge),
         periodo=str(fato.ano_ref),
         versao=fato.versao_entrega,
         requested=as_of,
     )
-    source = _source_capag(fato.ano_ref, fato.versao_entrega)
+    source = _source_capag(fato.ano_ref, fato.versao_entrega, fato.cod_ibge)
     return CapagResponse(
         cod_ibge=cod_ibge,
         periodo=periodo,
@@ -1184,4 +1216,44 @@ def simular_operacao(
                 versao_entrega="Sprint 8",
             ),
         ],
+    )
+
+
+def build_pvl(session: Session, cod_ibge: str) -> PvlOut:
+    """PVL/CDP do ente (SADIPEM) — pedidos de verificação de limites e suas decisões.
+
+    O silver desta fonte pode estar vazio (nunca ingerido para o ente): nesse caso a
+    resposta é explícita quanto à lacuna, em vez de sugerir "nenhum pedido existente".
+    """
+    linhas = repository.read_pvl(session, cod_ibge=cod_ibge)
+    itens = [
+        PvlItem(
+            id_pvl=linha.id_pvl,
+            tipo_operacao=linha.tipo_operacao,
+            valor=linha.valor,
+            status=linha.status,
+            decisao=linha.decisao,
+            data_analise=linha.data_analise,
+        )
+        for linha in linhas
+    ]
+    total = sum((i.valor or Decimal(0) for i in itens), Decimal(0)) if itens else None
+    versao = linhas[0].versao_entrega if linhas else None
+    observacao = (
+        None
+        if itens
+        else (
+            "Sem PVL/CDP em silver.sadipem_pvl para este ente: a fonte SADIPEM ainda não "
+            "foi ingerida para ele. Ausência de ingestão não significa ausência de pedidos."
+        )
+    )
+    return PvlOut(
+        cod_ibge=cod_ibge,
+        itens=itens,
+        total_valor=total,
+        versao_entrega=versao,
+        observacao=observacao,
+        source_ref=SourceRef(
+            relatorio="SADIPEM", anexo="PVL/CDP", periodo=None, versao_entrega=versao
+        ),
     )

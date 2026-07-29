@@ -1,0 +1,83 @@
+"""Modelos da Sprint 26: resultado dos checks e arestas de linhagem."""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+from decimal import Decimal
+
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.core.db import Base
+
+
+class DataQualityCheck(Base):
+    """gold.data_quality_check — uma verificação executada sobre um recorte de dado.
+
+    Guarda os **dois lados** da comparação e a tolerância aplicada, não só o veredito:
+    um gestor que discorda do check precisa poder refazer a conta. A chave única é
+    ``(check, fonte, ente, período)`` — reexecutar atualiza o estado corrente em vez de
+    empilhar histórico, porque o que aciona alerta é o estado, não a série.
+    """
+
+    __tablename__ = "data_quality_check"
+    __table_args__ = (
+        CheckConstraint("status IN ('ok', 'aviso', 'falha')", name="ck_data_quality_check_status"),
+        UniqueConstraint(
+            "check_codigo", "fonte", "cod_ibge", "periodo", name="uq_data_quality_check_chave"
+        ),
+        {"schema": "gold"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    fonte: Mapped[str] = mapped_column(Text, nullable=False)
+    cod_ibge: Mapped[str | None] = mapped_column(String(7), nullable=True)
+    periodo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    check_codigo: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(8), nullable=False)
+    esquerda: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
+    direita: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
+    diferenca: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
+    tolerancia: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
+    detalhe: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    executado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class LineageEdge(Base):
+    """gold.lineage_edge — uma aresta do caminho fonte→bronze→silver→gold→endpoint→página.
+
+    Mantido por **código** (seed idempotente), não por cadastro manual: o grafo tem de
+    ser derivado do que o sistema realmente faz, senão vira documentação desatualizada
+    com aparência de verdade.
+    """
+
+    __tablename__ = "lineage_edge"
+    __table_args__ = (
+        CheckConstraint(
+            "tipo IN ('fonte_bronze', 'bronze_silver', 'silver_gold', 'gold_endpoint', "
+            "'endpoint_pagina')",
+            name="ck_lineage_edge_tipo",
+        ),
+        UniqueConstraint("origem", "destino", "tipo", name="uq_lineage_edge_chave"),
+        {"schema": "gold"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    origem: Mapped[str] = mapped_column(Text, nullable=False)
+    destino: Mapped[str] = mapped_column(Text, nullable=False)
+    tipo: Mapped[str] = mapped_column(String(24), nullable=False)
+    detalhe: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

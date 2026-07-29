@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.deps import Principal, get_db, require_capability
 from app.modules.accounting import service
 from app.modules.accounting.schemas import (
+    BalancoComparacaoOut,
     BalancosIndex,
     ConciliacaoOut,
     MatrizMensalOut,
@@ -68,6 +69,20 @@ def saldos_conta_msc(
     """Matriz mensal (12 meses) dos saldos de uma conta PCASP ao longo do exercício."""
     assert_ente_in_scope(session, principal, cod_ibge)
     return service.build_matriz(session, cod_ibge, codigo, ano, as_of=as_of)
+
+
+@router.get("/entes/{cod_ibge}/balancos/comparacao", response_model=BalancoComparacaoOut)
+def comparacao_balancos(
+    cod_ibge: str,
+    tipo: str = Query("patrimonial", description="Balanço a comparar entre exercícios."),
+    anos: int = Query(4, ge=2, le=10, description="Quantos exercícios comparar."),
+    as_of: datetime | None = _AS_OF_Q,
+    principal: Principal = Depends(require_capability("ver")),
+    session: Session = Depends(get_db),
+) -> BalancoComparacaoOut:
+    """Mesmo balanço, conta a conta, ao longo dos exercícios — com a variação do período."""
+    assert_ente_in_scope(session, principal, cod_ibge)
+    return service.build_balanco_comparacao(session, cod_ibge, tipo, anos=anos, as_of=as_of)
 
 
 @router.get("/entes/{cod_ibge}/balancos", response_model=None)

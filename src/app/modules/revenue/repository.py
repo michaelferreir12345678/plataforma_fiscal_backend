@@ -152,12 +152,17 @@ def soma_fundeb(
 
 def somas_transferencia_generica(
     session: Session, *, cod_ibge: str, ano: int, meses: list[int]
-) -> list[tuple[str, Decimal]]:
-    """Somas por ``tipo`` de ``silver.transferencia_generica`` nos meses do período."""
+) -> list[tuple[str, Decimal, str | None]]:
+    """Somas por ``tipo`` de ``silver.transferencia_generica`` nos meses do período.
+
+    Retorna também a ``fonte`` da linha: séries **derivadas do próprio RREO** (ICMS/IPVA
+    cota-parte, Sprint 21) não são contraprova independente e a conciliação precisa dizê-lo.
+    """
     rows = session.execute(
         select(
             TransferenciaGenerica.tipo,
             func.sum(func.coalesce(TransferenciaGenerica.valor, 0)),
+            func.min(TransferenciaGenerica.fonte),
         )
         .where(
             TransferenciaGenerica.cod_ibge == cod_ibge,
@@ -167,4 +172,4 @@ def somas_transferencia_generica(
         .group_by(TransferenciaGenerica.tipo)
         .order_by(TransferenciaGenerica.tipo)
     ).all()
-    return [(str(t), Decimal(v or 0)) for t, v in rows]
+    return [(str(t), Decimal(v or 0), str(f) if f is not None else None) for t, v, f in rows]

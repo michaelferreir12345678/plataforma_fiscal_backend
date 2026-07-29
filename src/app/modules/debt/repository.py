@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from datetime import date
 from typing import Any
 
-from sqlalchemy import delete, insert, select
+from sqlalchemy import delete, func, insert, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -21,6 +21,7 @@ from app.modules.debt.models import (
 from app.modules.ingestion.models import (
     SadipemCronogramaPgto,
     SadipemOpContratada,
+    SadipemPvl,
     SilverRgf,
     TesouroCapag,
 )
@@ -243,5 +244,25 @@ def list_vencimentos(
                 FatoVencimento.versao_entrega == versao_entrega,
             )
             .order_by(FatoVencimento.ano, FatoVencimento.mes, FatoVencimento.id_operacao)
+        )
+    )
+
+
+def read_pvl(session: Session, *, cod_ibge: str) -> list[SadipemPvl]:
+    """Pedidos de verificação de limites (PVL/CDP) do ente, na versão vigente de cada um.
+
+    Fonte nacional: a versão corrente resolve-se pelo ``max(versao_entrega)`` do próprio
+    silver (a ``dim_entrega`` do SADIPEM é por lote 'BR' — ver Sprint 21).
+    """
+    ultima = session.scalar(
+        select(func.max(SadipemPvl.versao_entrega)).where(SadipemPvl.cod_ibge == cod_ibge)
+    )
+    if ultima is None:
+        return []
+    return list(
+        session.scalars(
+            select(SadipemPvl)
+            .where(SadipemPvl.cod_ibge == cod_ibge, SadipemPvl.versao_entrega == ultima)
+            .order_by(SadipemPvl.data_analise.desc().nullslast(), SadipemPvl.id_pvl)
         )
     )

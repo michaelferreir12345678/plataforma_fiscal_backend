@@ -276,6 +276,26 @@ def list_indicadores_ente_periodo(
     )
 
 
+def list_marts_ente_periodo(
+    session: Session,
+    *,
+    cod_ibge: str,
+    periodo: str,
+) -> list[MartIndicador]:
+    """Todas as versões dos indicadores do ente/período em uma única consulta."""
+
+    return list(
+        session.scalars(
+            select(MartIndicador)
+            .where(
+                MartIndicador.cod_ibge == cod_ibge,
+                MartIndicador.periodo == periodo,
+            )
+            .order_by(MartIndicador.indicador, MartIndicador.versao_entrega)
+        )
+    )
+
+
 def list_periodos_indicadores_ente(
     session: Session, *, cod_ibge: str
 ) -> list[tuple[str, str]]:
@@ -359,6 +379,35 @@ def get_sentido_limite(session: Session, *, indicador: str, esfera: str) -> str 
     )
 
 
+def get_sentidos_limites(
+    session: Session,
+    *,
+    indicadores: Iterable[str],
+    esfera: str,
+) -> dict[str, str]:
+    """Primeiro sentido legal por indicador, seguindo a ordem de poder existente."""
+
+    requested = list(dict.fromkeys(indicadores))
+    if not requested:
+        return {}
+    rows = session.execute(
+        select(
+            DimLimiteLegal.indicador,
+            DimLimiteLegal.sentido,
+            DimLimiteLegal.poder,
+        )
+        .where(
+            DimLimiteLegal.indicador.in_(requested),
+            DimLimiteLegal.esfera == esfera,
+        )
+        .order_by(DimLimiteLegal.indicador, DimLimiteLegal.poder)
+    )
+    result: dict[str, str] = {}
+    for indicador, sentido, _poder in rows:
+        result.setdefault(str(indicador), str(sentido))
+    return result
+
+
 def upsert_mart_benchmark(session: Session, valores: dict[str, Any]) -> None:
     stmt = pg_insert(MartBenchmark).values(**valores)
     # O hash identifica integralmente um snapshot. Uma vez materializado, ele e
@@ -395,3 +444,52 @@ def snapshot_rows(
             .order_by(MartBenchmark.posicao, MartBenchmark.cod_ibge)
         )
     )
+
+
+def latest_snapshot_identity(
+    session: Session,
+    *,
+    coorte: str,
+    indicador: str,
+    periodo: str,
+    cod_ibge_ancora: str,
+) -> tuple[str, int] | None:
+    """Hash e cardinalidade do snapshot materializado mais recente.
+
+    Só considera snapshots que contêm o ente âncora. A leitura permite que os
+    endpoints grandes reutilizem por poucos segundos a foto imutável já
+    materializada, sem recalcular percentis e linhagem a cada paginação.
+    """
+
+    try:
+        coorte_id = uuid.UUID(coorte)
+    except ValueError:
+        coorte_id = None
+    coorte_clause = (
+        or_(DimCoorte.id == coorte_id, DimCoorte.codigo == coorte)
+        if coorte_id is not None
+        else DimCoorte.codigo == coorte
+    )
+    anchor_count = func.count().filter(MartBenchmark.cod_ibge == cod_ibge_ancora)
+    row = session.execute(
+        select(
+            MartBenchmark.snapshot_hash,
+            func.count(MartBenchmark.id),
+        )
+        .join(DimCoorte, DimCoorte.id == MartBenchmark.coorte_id)
+        .where(
+            coorte_clause,
+            MartBenchmark.indicador == indicador,
+            MartBenchmark.periodo == periodo,
+        )
+        .group_by(MartBenchmark.snapshot_hash)
+        .having(anchor_count > 0)
+        .order_by(
+            func.max(MartBenchmark.calculado_em).desc(),
+            MartBenchmark.snapshot_hash.desc(),
+        )
+        .limit(1)
+    ).first()
+    if row is None:
+        return None
+    return str(row[0]), int(row[1])

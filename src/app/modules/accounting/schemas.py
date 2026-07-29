@@ -119,6 +119,53 @@ class ConciliacaoOut(BaseModel):
     source_refs: list[SourceRef] = Field(default_factory=list)
 
 
+class CoberturaPatrimonio(BaseModel):
+    """O que existe (e o que não existe) de patrimônio para este ente — Sprint 25D.
+
+    Substitui o seletor de entes-demo da tela: em vez de trocar silenciosamente o ente
+    por um que tem dado, a página mostra o ente do contexto e diz exatamente o que falta
+    ingerir. Ausência aparece como ausência.
+    """
+
+    tem_dca: bool
+    tem_msc: bool
+    anos_dca: list[int] = Field(default_factory=list)
+    meses_msc: list[str] = Field(default_factory=list)
+    fontes_ausentes: list[str] = Field(default_factory=list)
+    mensagem: str
+
+
+class ComparacaoLinha(BaseModel):
+    """Uma conta do balanço lida em vários exercícios."""
+
+    cod_conta: str
+    descricao: str | None = None
+    nivel: int | None = None
+    valores: dict[str, Decimal | None] = Field(default_factory=dict)  # ano -> valor
+    variacao_abs: Decimal | None = None  # último − primeiro exercício com valor
+    variacao_pct: Decimal | None = None
+    anos_com_valor: list[int] = Field(default_factory=list)
+
+
+class BalancoComparacaoOut(BaseModel):
+    """Comparação anual de um balanço da DCA (Sprint 25D).
+
+    Um balanço isolado diz a posição; a série diz a direção. Exercícios sem a conta
+    ficam nulos — nunca zerados —, e a variação só é calculada quando existem os dois
+    extremos.
+    """
+
+    cod_ibge: str
+    tipo: str
+    anexo: str | None = None
+    anos: list[int] = Field(default_factory=list)
+    anos_sem_balanco: list[int] = Field(default_factory=list)
+    observacao: str | None = None
+    linhas: list[ComparacaoLinha] = Field(default_factory=list)
+    memoria: dict[str, Any] = Field(default_factory=dict)
+    source_refs: list[SourceRef] = Field(default_factory=list)
+
+
 class PatrimonioDetalhe(BaseModel):
     """Cabeçalho do Padrão de Detalhe: posição patrimonial + estado das fontes."""
 
@@ -140,4 +187,5 @@ class PatrimonioDetalhe(BaseModel):
     anos_disponiveis: list[int] = Field(default_factory=list)
     conciliado: bool | None = None
     n_divergencias: int | None = None
+    cobertura: CoberturaPatrimonio | None = None
     source_ref: SourceRef | None = None

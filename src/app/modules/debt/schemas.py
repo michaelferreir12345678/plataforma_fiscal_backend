@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.modules.indicators.schemas import SerieAjuste
 from app.shared.envelope import DrillChild, DrillNodeRef
 from app.shared.source_ref import SourceRef
 
@@ -47,6 +48,10 @@ class SerieDividaItem(BaseModel):
     dcl: Decimal
     pct_rcl: Decimal | None = None
     dc_bruta: Decimal
+    # Comparabilidade multi-exercício (Sprint 25): a preços do período e por habitante.
+    dcl_real: Decimal | None = None
+    dcl_per_capita: Decimal | None = None
+    populacao: int | None = None
     source_ref: SourceRef
 
 
@@ -67,6 +72,7 @@ class DividaDetalhe(BaseModel):
     capag: CapagHero
     composicao: list[DrillChild]
     serie: list[SerieDividaItem]
+    serie_ajuste: SerieAjuste | None = None  # deflator IPCA + população
     comparacao: ComparacaoDivida | None = None
     periodo_breadcrumb: list[DrillNodeRef]
     source_ref: SourceRef
@@ -182,3 +188,29 @@ class SimulacaoResponse(BaseModel):
     persistido: Literal[False] = False
     memoria: dict[str, Any]
     source_refs: list[SourceRef]
+
+
+class PvlItem(BaseModel):
+    """Pedido de verificação de limites (PVL/CDP) apresentado ao Tesouro."""
+
+    id_pvl: str | None = None
+    tipo_operacao: str | None = None
+    valor: Decimal | None = None
+    status: str | None = None
+    decisao: str | None = None
+    data_analise: date | None = None
+
+
+class PvlOut(BaseModel):
+    """PVL/CDP do ente — pedidos em tramitação e decisões do Tesouro.
+
+    Quando a silver não tem dado para o ente, ``itens`` vem vazio e ``observacao``
+    diz por quê: ausência de ingestão não é ausência de pedidos.
+    """
+
+    cod_ibge: str
+    itens: list[PvlItem]
+    total_valor: Decimal | None = None
+    versao_entrega: str | None = None
+    observacao: str | None = None
+    source_ref: SourceRef
