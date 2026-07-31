@@ -48,7 +48,12 @@ class CriticoItem(BaseModel):
     sentido: str  # teto | piso
     valor_pct: Decimal | None = None
     valor_rs: Decimal | None = None
-    limite_pct: Decimal
+    #: ``None`` = indicador sem limite legal (gerencial), não limite igual a zero.
+    limite_pct: Decimal | None = None
+    #: Base do valor: ``rcl``/``rcl_ajustada``/``impostos_transferencias``/``fundeb`` são
+    #: percentuais; ``populacao`` é R$ por habitante. Sem isto a tela mostrava "None%"
+    #: onde o número existia — só não era percentual.
+    denominador: str = "rcl"
     faixa: str | None = None
     cor: str
     distancia_pp: Decimal | None = None  # folga até o teto (ou acima do piso), em p.p.

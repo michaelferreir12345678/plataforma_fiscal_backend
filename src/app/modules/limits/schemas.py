@@ -17,7 +17,10 @@ class LimiteItem(BaseModel):
     valor_rs: Decimal | None = None
     valor_pct_rcl: Decimal | None = None
     faixa: str | None = None
-    teto_pct: Decimal
+    #: ``None`` quando o indicador **não tem limite legal** (os gerenciais: investimento
+    #: sobre a RCL, resultado primário, RCL por habitante). Antes vinha ``0``, e "limite
+    #: 0%" numa tela de conformidade lê-se como "o teto é zero" — o oposto de "não há teto".
+    teto_pct: Decimal | None = None
     alerta_pct: Decimal | None = None
     prudencial_pct: Decimal | None = None
     distancia_teto: Decimal | None = None  # teto − valor (teto) / valor − piso (piso)
@@ -57,7 +60,10 @@ class LimiteDetail(BaseModel):
     faixa: str | None = None
     valor_rs: Decimal | None = None
     valor_pct_rcl: Decimal | None = None
-    teto_pct: Decimal
+    #: ``None`` quando o indicador **não tem limite legal** (os gerenciais: investimento
+    #: sobre a RCL, resultado primário, RCL por habitante). Antes vinha ``0``, e "limite
+    #: 0%" numa tela de conformidade lê-se como "o teto é zero" — o oposto de "não há teto".
+    teto_pct: Decimal | None = None
     memoria: dict | None = None
     providencias: list[ProvidenciaOut]
     serie_historica: list[SerieItem]
@@ -78,5 +84,8 @@ class SimularResponse(BaseModel):
     valor_pct_simulado: Decimal
     faixa_atual: str | None = None
     faixa_simulada: str
-    teto_pct: Decimal
+    #: ``None`` quando o indicador **não tem limite legal** (os gerenciais: investimento
+    #: sobre a RCL, resultado primário, RCL por habitante). Antes vinha ``0``, e "limite
+    #: 0%" numa tela de conformidade lê-se como "o teto é zero" — o oposto de "não há teto".
+    teto_pct: Decimal | None = None
     persistido: bool = False

@@ -85,9 +85,11 @@ def _limite_dim(session: Session, indicador: str, esfera: str) -> LimiteLegal | 
 
 
 def _distancias(
-    sentido: str, valor_pct: Decimal | None, teto: Decimal, alerta: Decimal | None
+    sentido: str, valor_pct: Decimal | None, teto: Decimal | None, alerta: Decimal | None
 ) -> tuple[Decimal | None, Decimal | None]:
-    if valor_pct is None:
+    # Sem teto não existe distância até o teto. Devolver 0 diria "está exatamente no
+    # limite" para um indicador que não tem limite nenhum.
+    if valor_pct is None or teto is None:
         return None, None
     if sentido == "piso":
         return valor_pct - teto, None  # folga acima do piso
@@ -117,7 +119,9 @@ def build_limites(session: Session, cod_ibge: str, periodo: str) -> LimitesRespo
             sentido = limite.sentido if limite else "teto"
             teto = mart.teto_pct
             if teto is None:
-                teto = limite.teto_pct if limite else Decimal(0)
+                # Sem limite na dimensão, o indicador é gerencial: fica sem teto, não com
+                # teto zero. A distinção decide se a tela mostra faixa ou "sem limite".
+                teto = limite.teto_pct if limite else None
             alerta = limite.alerta_pct if limite else None
             dist_teto, dist_alerta = _distancias(sentido, mart.valor_pct_rcl, teto, alerta)
             itens.append(

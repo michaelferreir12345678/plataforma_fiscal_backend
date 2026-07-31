@@ -111,6 +111,7 @@ def _criticos(limites: Any) -> list[CriticoItem]:
                 faixa=it.faixa,
                 cor=cor,
                 distancia_pp=it.distancia_teto,
+                denominador=getattr(it, "denominador", "rcl"),
                 source_ref=limites.source_ref,
             )
         )
