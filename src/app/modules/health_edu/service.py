@@ -40,6 +40,7 @@ from app.modules.health_edu.schemas import (
 from app.modules.indicators import service as indicators_service
 from app.modules.ingestion import repository as ingestion_repo
 from app.modules.ingestion.models import DimEntrega, SilverRreo
+from app.shared.ausencia import ausencia_de_entrega
 from app.shared.hierarchy import HierarchyNode, build_drill_envelope
 from app.shared.source_ref import SourceRef
 
@@ -119,8 +120,11 @@ def _contexto(
         as_of=as_of,
     )
     if versao is None:
-        raise AppError(
-            status=404,
+        raise ausencia_de_entrega(
+            session,
+            cod_ibge=cod_ibge,
+            relatorio="RREO",
+            periodo=periodo,
             title="RREO ausente",
             detail=f"Sem RREO vigente para {cod_ibge} em {periodo}.",
         )

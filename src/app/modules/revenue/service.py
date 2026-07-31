@@ -37,6 +37,7 @@ from app.modules.revenue.schemas import (
     SerieReceitaItem,
     TransferenciaTop,
 )
+from app.shared.ausencia import ausencia_de_entrega
 from app.shared.envelope import DrillEnvelope, Measures
 from app.shared.hierarchy import HierarchyNode, build_drill_envelope, make_path
 from app.shared.source_ref import SourceRef
@@ -72,8 +73,12 @@ def _resolve_versao(
         session, cod_ibge=cod_ibge, periodo=periodo, as_of=as_of
     )
     if versao is None:
-        raise AppError(
-            status=404, title="RREO ausente",
+        raise ausencia_de_entrega(
+            session,
+            cod_ibge=cod_ibge,
+            relatorio="RREO",
+            periodo=periodo,
+            title="RREO ausente",
             detail=f"Sem RREO vigente para {cod_ibge} em {periodo}.",
         )
     return versao

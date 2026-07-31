@@ -23,11 +23,16 @@ class AppError(Exception):
         title: str,
         detail: str | None = None,
         type_: str = "about:blank",
+        extras: dict[str, Any] | None = None,
     ) -> None:
         self.status = status
         self.title = title
         self.detail = detail
         self.type = type_
+        #: Campos de extensão do Problem Details (RFC 7807, §3.2). Servem para a tela
+        #: **agir** sobre o erro sem interpretar o texto da mensagem: um "vá para o último
+        #: período com dado" precisa do período, não de uma frase que o mencione.
+        self.extras = extras or {}
         super().__init__(detail or title)
 
 
@@ -43,10 +48,19 @@ class ScopeForbiddenError(AppError):
         )
 
 
-def _problem(status: int, title: str, detail: str | None, type_: str) -> JSONResponse:
+def _problem(
+    status: int,
+    title: str,
+    detail: str | None,
+    type_: str,
+    extras: dict[str, Any] | None = None,
+) -> JSONResponse:
     body: dict[str, Any] = {"type": type_, "title": title, "status": status}
     if detail:
         body["detail"] = detail
+    if extras:
+        # Extensões nunca sobrescrevem os campos padrão do Problem Details.
+        body.update({k: v for k, v in extras.items() if k not in body})
     return JSONResponse(status_code=status, content=body, media_type=PROBLEM_CONTENT_TYPE)
 
 
@@ -55,7 +69,7 @@ def register_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(AppError)
     async def _app_error(_: Request, exc: AppError) -> JSONResponse:
-        return _problem(exc.status, exc.title, exc.detail, exc.type)
+        return _problem(exc.status, exc.title, exc.detail, exc.type, exc.extras)
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_error(_: Request, exc: StarletteHTTPException) -> JSONResponse:

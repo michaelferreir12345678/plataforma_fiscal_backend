@@ -39,6 +39,7 @@ from app.modules.personnel.schemas import (
     PorPoderOut,
     SeriePessoalItem,
 )
+from app.shared.ausencia import ausencia_de_entrega
 from app.shared.envelope import DrillEnvelope, Measures
 from app.shared.hierarchy import HierarchyNode, build_drill_envelope
 from app.shared.source_ref import SourceRef
@@ -71,8 +72,12 @@ def _resolve_versao(session: Session, cod_ibge: str, periodo: str, as_of: dateti
         session, cod_ibge=cod_ibge, relatorio=_RELATORIO, periodo=periodo, as_of=as_of
     )
     if versao is None:
-        raise AppError(
-            status=404, title="RGF ausente",
+        raise ausencia_de_entrega(
+            session,
+            cod_ibge=cod_ibge,
+            relatorio=_RELATORIO,
+            periodo=periodo,
+            title="RGF ausente",
             detail=f"Sem RGF vigente para {cod_ibge} em {periodo}.",
         )
     return versao

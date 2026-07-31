@@ -42,7 +42,8 @@ from app.modules.indicators import serie_ajuste
 from app.modules.indicators.limites import LimiteLegal, classificar_faixa
 from app.modules.indicators.schemas import SerieAjuste
 from app.modules.ingestion import repository as ingestion_repo
-from app.modules.ingestion.models import SadipemOpContratada, SilverRgf
+from app.modules.ingestion.models import DimEntrega, SadipemOpContratada, SilverRgf
+from app.shared.ausencia import ausencia_de_entrega, rotulo_humano
 from app.shared.envelope import DrillEnvelope, Measures
 from app.shared.hierarchy import HierarchyNode, build_drill_envelope
 from app.shared.source_ref import SourceRef
@@ -109,8 +110,11 @@ def _resolve_rgf(session: Session, cod_ibge: str, periodo: str, as_of: datetime 
         as_of=as_of,
     )
     if versao is None:
-        raise AppError(
-            status=404,
+        raise ausencia_de_entrega(
+            session,
+            cod_ibge=cod_ibge,
+            relatorio=_REL_RGF,
+            periodo=periodo,
             title="RGF DDCL ausente",
             detail=f"Sem RGF vigente para {cod_ibge} em {periodo}.",
         )
@@ -323,11 +327,30 @@ def _capag_ausente(session: Session, cod_ibge: str, ano_ref: int) -> AppError:
             select(FatoCapag.ano_ref).where(FatoCapag.cod_ibge == cod_ibge).distinct()
         )
     )
-    if disponiveis:
-        ultimo = disponiveis[-1]
+    extras: dict[str, Any] = {}
+    # Anteriores ao pedido: o exercício pedido é, por definição, o que não resolveu — e um
+    # posterior seria ainda mais recente que o que a tela já não conseguiu abrir.
+    anteriores = [ano for ano in disponiveis if ano < ano_ref]
+    if anteriores:
+        ultimo = anteriores[-1]
         onde = (
             f"A mais recente disponível é a de {ultimo} "
             f"(apurada sobre o exercício de {ultimo - 1})."
+        )
+        extras["ano_disponivel"] = ultimo
+        # O período **navegável** da tela, não só o ano: a página de dívida trabalha em
+        # quadrimestre do RGF, e mandar o gestor "para 2025" não é um lugar onde ele possa
+        # clicar. Aqui devolvemos o último RGF vigente daquele exercício.
+        periodo_sugerido = _ultimo_rgf_do_ano(session, cod_ibge, ultimo)
+        if periodo_sugerido is not None:
+            # Sem RGF naquele exercício não há para onde navegar; emitir o rótulo mesmo
+            # assim daria à tela um botão que promete um destino que não existe.
+            extras["periodo_sugerido"] = periodo_sugerido
+            extras["rotulo_sugerido"] = f"Ir para {rotulo_humano(periodo_sugerido)}"
+    elif disponiveis:
+        onde = (
+            f"As publicações carregadas para este ente vão de {disponiveis[0]} a "
+            f"{disponiveis[-1]}, e nenhuma antecede {ano_ref}."
         )
     else:
         onde = "Não há nenhuma publicação da CAPAG carregada para este ente."
@@ -341,6 +364,22 @@ def _capag_ausente(session: Session, cod_ibge: str, ano_ref: int) -> AppError:
             f"Enquanto a nova não sai, a nota vigente continua sendo a última publicada."
         ),
         type_="urn:plataforma-fiscal:error:capag-nao-publicada",
+        extras=extras,
+    )
+
+
+def _ultimo_rgf_do_ano(session: Session, cod_ibge: str, ano: int) -> str | None:
+    """Último período RGF vigente do exercício — o destino do "ir para o último período"."""
+    return session.scalar(
+        select(DimEntrega.periodo)
+        .where(
+            DimEntrega.cod_ibge == cod_ibge,
+            DimEntrega.relatorio == _REL_RGF,
+            DimEntrega.periodo.like(f"{ano}-%"),
+            DimEntrega.vigente.is_(True),
+        )
+        .order_by(DimEntrega.periodo.desc())
+        .limit(1)
     )
 
 

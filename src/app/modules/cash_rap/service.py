@@ -41,6 +41,7 @@ from app.modules.catalog.models import DimEnte
 from app.modules.indicators import serie_ajuste
 from app.modules.indicators.schemas import SerieAjuste
 from app.modules.ingestion import repository as ingestion_repo
+from app.shared.ausencia import ausencia_de_entrega
 from app.shared.envelope import DrillEnvelope, Measures
 from app.shared.hierarchy import HierarchyNode, build_drill_envelope
 from app.shared.source_ref import SourceRef
@@ -103,8 +104,12 @@ def _resolve_versao_rgf(
         session, cod_ibge=cod_ibge, relatorio=_RELATORIO_RGF, periodo=periodo, as_of=as_of
     )
     if versao is None:
-        raise AppError(
-            status=404, title="RGF ausente",
+        raise ausencia_de_entrega(
+            session,
+            cod_ibge=cod_ibge,
+            relatorio=_RELATORIO_RGF,
+            periodo=periodo,
+            title="RGF ausente",
             detail=f"Sem RGF (Anexo 5) vigente para {cod_ibge} em {periodo}.",
         )
     return versao
@@ -628,8 +633,12 @@ def disponibilidades_por_fonte(
     if versao is None:
         if soft:
             return []
-        raise AppError(
-            status=404, title="RGF ausente",
+        raise ausencia_de_entrega(
+            session,
+            cod_ibge=cod_ibge,
+            relatorio=_RELATORIO_RGF,
+            periodo=periodo_rgf,
+            title="RGF ausente",
             detail=f"Sem RGF (Anexo 5) vigente para {cod_ibge} em {periodo_rgf}.",
         )
     try:

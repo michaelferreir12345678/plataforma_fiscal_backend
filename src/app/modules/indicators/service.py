@@ -22,6 +22,7 @@ from app.modules.indicators.models import FatoRcl
 from app.modules.indicators.rcl import RclLinha
 from app.modules.indicators.rcl import calcular_rcl as _calcular_rcl_puro
 from app.modules.indicators.schemas import ComponenteOut, IndicadorOut, RclResponse
+from app.shared.ausencia import ausencia_de_entrega
 from app.shared.source_ref import SourceRef, composite_version_key
 
 _ANEXO_RCL = "Anexo 03"
@@ -39,8 +40,12 @@ def calcular_rcl(
         session, cod_ibge=cod_ibge, periodo=periodo, as_of=as_of
     )
     if versao is None:
-        raise AppError(
-            status=404, title="RREO ausente",
+        raise ausencia_de_entrega(
+            session,
+            cod_ibge=cod_ibge,
+            relatorio="RREO",
+            periodo=periodo,
+            title="RREO ausente",
             detail=f"Sem RREO vigente para {cod_ibge} em {periodo}.",
         )
     linhas = [
@@ -94,8 +99,12 @@ def obter_fato_rcl(
         session, cod_ibge=cod_ibge, periodo=periodo, as_of=as_of
     )
     if versao is None:
-        raise AppError(
-            status=404, title="RREO ausente",
+        raise ausencia_de_entrega(
+            session,
+            cod_ibge=cod_ibge,
+            relatorio="RREO",
+            periodo=periodo,
+            title="RREO ausente",
             detail=f"Sem RREO vigente para {cod_ibge} em {periodo}.",
         )
     return _ensure_fato_rcl(session, cod_ibge, periodo, versao, as_of)
@@ -109,8 +118,12 @@ def build_rcl_response(
         session, cod_ibge=cod_ibge, periodo=periodo, as_of=as_of
     )
     if versao is None:
-        raise AppError(
-            status=404, title="RREO ausente",
+        raise ausencia_de_entrega(
+            session,
+            cod_ibge=cod_ibge,
+            relatorio="RREO",
+            periodo=periodo,
+            title="RREO ausente",
             detail=f"Sem RREO vigente para {cod_ibge} em {periodo}.",
         )
     fato = _ensure_fato_rcl(session, cod_ibge, periodo, versao, as_of)

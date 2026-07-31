@@ -23,6 +23,7 @@ from app.modules.limits.schemas import (
     SimularRequest,
     SimularResponse,
 )
+from app.shared.ausencia import ausencia_de_entrega
 from app.shared.envelope import DrillNodeRef
 from app.shared.source_ref import SourceRef
 
@@ -186,7 +187,14 @@ def build_limite_detail(
         session, cod_ibge=cod_ibge, periodo=periodo, as_of=as_of
     )
     if versao is None:
-        raise AppError(status=404, title="Sem RREO", detail="Sem RREO vigente para o período.")
+        raise ausencia_de_entrega(
+            session,
+            cod_ibge=cod_ibge,
+            relatorio="RREO",
+            periodo=periodo,
+            title="Sem RREO",
+            detail=f"Sem RREO vigente para {cod_ibge} em {periodo}.",
+        )
     mart = indicators_repo.get_mart_indicador(
         session, cod_ibge=cod_ibge, periodo=periodo, indicador=indicador, versao_entrega=versao
     )

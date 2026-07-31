@@ -44,6 +44,7 @@ from app.modules.result.schemas import (
 )
 from app.modules.tenancy import repository as tenancy_repo
 from app.shared import periodo as periodo_util
+from app.shared.ausencia import ausencia_de_entrega
 from app.shared.source_ref import SourceRef
 
 _ANEXO = "Anexo 06"
@@ -69,8 +70,12 @@ def _resolve_versao(
         session, cod_ibge=cod_ibge, periodo=periodo, as_of=as_of
     )
     if versao is None:
-        raise AppError(
-            status=404, title="RREO ausente",
+        raise ausencia_de_entrega(
+            session,
+            cod_ibge=cod_ibge,
+            relatorio="RREO",
+            periodo=periodo,
+            title="RREO ausente",
             detail=f"Sem RREO vigente para {cod_ibge} em {periodo}.",
         )
     return versao
