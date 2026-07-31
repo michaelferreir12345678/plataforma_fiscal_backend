@@ -30,9 +30,26 @@ BCB_BASE_URL = "https://api.bcb.gov.br/"
 IBGE_BASE_URL = "https://servicodados.ibge.gov.br/api/"
 SIOPS_BASE_URL = settings.siops_base_url.rstrip("/") + "/"
 SIOPE_BASE_URL = settings.siope_base_url.rstrip("/") + "/"
-TESOURO_TRANSFERENCIAS_BASE_URL = (
-    settings.tesouro_transferencias_base_url.rstrip("/") + "/"
-)
+TESOURO_TRANSFERENCIAS_BASE_URL = settings.tesouro_transferencias_base_url.rstrip("/") + "/"
+
+
+class _RespostaTransitoria(httpx.HTTPStatusError):
+    """5xx ou 429: vale repetir. Continua sendo ``HTTPStatusError`` para quem trata acima."""
+
+
+def recurso_ausente(exc: BaseException) -> bool:
+    """O erro é a fonte dizendo "não tenho isso", e não um defeito nosso?
+
+    Só **404**, e só quando o pedido foi por um recurso específico (ente/ano/período). Um
+    5xx é indisponibilidade, um 401/403 é credencial, um 400 é pedido malformado — nenhum
+    deles autoriza concluir que o dado não existe. Classificar erro como ausência é pior
+    que falhar: transforma defeito em "sem dado" e ninguém investiga.
+    """
+    return (
+        isinstance(exc, httpx.HTTPStatusError)
+        and not isinstance(exc, _RespostaTransitoria)
+        and exc.response.status_code == 404
+    )
 
 
 class RecordsClient(Protocol):
@@ -91,7 +108,7 @@ class _BaseHttpClient:
         self._limiter = _RateLimiter(max_per_second)
 
     @retry(
-        retry=retry_if_exception_type((httpx.TransportError, httpx.HTTPStatusError)),
+        retry=retry_if_exception_type((httpx.TransportError, _RespostaTransitoria)),
         wait=wait_exponential(multiplier=0.5, min=0.5, max=30),
         stop=stop_after_attempt(5),
         reraise=True,
@@ -99,7 +116,16 @@ class _BaseHttpClient:
     def _get_json(self, path: str, params: dict[str, Any] | None) -> Any:
         self._limiter.wait()
         resp = self._client.get(path, params=params)
-        resp.raise_for_status()  # 5xx é transitório (retry); 4xx é definitivo (reraise)
+        # O comentário sempre disse "5xx é transitório, 4xx é definitivo", mas a política
+        # de retry pegava **todo** HTTPStatusError: um 404 custava cinco requisições com
+        # espera exponencial antes de falhar. Agora a distinção é real.
+        if resp.status_code >= 500 or resp.status_code == 429:
+            raise _RespostaTransitoria(
+                f"{resp.status_code} em {resp.request.url}",
+                request=resp.request,
+                response=resp,
+            )
+        resp.raise_for_status()
         return resp.json()
 
     def close(self) -> None:
@@ -229,9 +255,7 @@ class SiopeClient(ODataRecordsClient):
 
 
 class TesouroTransferenciasClient(JsonEnvelopeRecordsClient):
-    def __init__(
-        self, base_url: str = TESOURO_TRANSFERENCIAS_BASE_URL, **kwargs: Any
-    ) -> None:
+    def __init__(self, base_url: str = TESOURO_TRANSFERENCIAS_BASE_URL, **kwargs: Any) -> None:
         super().__init__(base_url, **kwargs)
 
 
@@ -397,9 +421,10 @@ class MunicipalRreoPdfClient:
 
 
 # Fontes cujo cliente é baseado em download de arquivo (planilhas).
-FILE_FONTES = frozenset(
-    {"tesouro_fpm", "transferencia_generica", "tesouro_capag"}
-)
+# FPM e transferências genéricas saíram daqui: passaram a usar a API oficial de
+# Transferências Constitucionais, a mesma do FUNDEB. Eram planilhas sem URL configurada,
+# e falhavam em toda execução.
+FILE_FONTES = frozenset({"tesouro_capag"})
 
 
 class RealClientResolver:
@@ -425,7 +450,7 @@ class RealClientResolver:
             return self._cached("siops", SiopsClient)
         if fonte == "siope_educacao":
             return self._cached("siope", SiopeClient)
-        if fonte == "fnde_fundeb_repasse":
+        if fonte in {"fnde_fundeb_repasse", "tesouro_fpm", "transferencia_generica"}:
             return self._cached("tesouro_transferencias", TesouroTransferenciasClient)
         if fonte in FILE_FONTES:
             return self._cached("file", HttpFileClient)

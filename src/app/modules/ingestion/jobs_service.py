@@ -576,11 +576,17 @@ def fontes_do_leque(session: Session) -> tuple[list[str], list[str]]:
 
     Fonte com integração desligada **não** entra: o toggle existe justamente para
     pausar um conector, e "atualizar tudo" não pode ser um atalho que o contorna.
+
+    Fonte que exige configuração ausente também fica fora. Ela falharia em toda execução,
+    sempre pelo mesmo motivo — e falha previsível não é informação: ensina o operador a
+    ignorar o painel de erros, e aí o erro que importa passa despercebido.
     """
     disparar: list[str] = []
     ignoradas: list[str] = []
-    for fonte in FONTE_META:
-        if integracoes.integracao_ativa(session, fonte):
+    for fonte, meta in FONTE_META.items():
+        if getattr(meta, "requer_configuracao", None):
+            ignoradas.append(fonte)
+        elif integracoes.integracao_ativa(session, fonte):
             disparar.append(fonte)
         else:
             ignoradas.append(fonte)
@@ -604,11 +610,11 @@ def criar_leque(
     resultados: list[IngestJobCreateResult] = []
     for fonte in fontes:
         meta = FONTE_META.get(fonte)
-        nacional = bool(meta and meta.escopo == "nacional")
+        sem_entes = bool(meta and not meta.consulta_por_ente)
         pedido = create.model_copy(
             update={
                 "fonte": fonte,
-                "entes": [] if nacional else list(create.entes),
+                "entes": [] if sem_entes else list(create.entes),
                 # A confirmação já foi dada para o leque inteiro; repeti-la por fonte
                 # transformaria um clique em dezessete.
                 "confirmar": True,
@@ -625,9 +631,9 @@ def estimar_leque(
     total = 0
     for fonte in fontes:
         meta = FONTE_META.get(fonte)
-        nacional = bool(meta and meta.escopo == "nacional")
+        sem_entes = bool(meta and not meta.consulta_por_ente)
         pedido = create.model_copy(
-            update={"fonte": fonte, "entes": [] if nacional else list(create.entes)}
+            update={"fonte": fonte, "entes": [] if sem_entes else list(create.entes)}
         )
         total += estimar(pedido)
     return total

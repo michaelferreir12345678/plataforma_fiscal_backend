@@ -12,6 +12,7 @@ recurso nao e ingerido aqui para evitar dupla contagem acidental.
 from __future__ import annotations
 
 import calendar
+import logging
 from datetime import date
 from typing import Any
 
@@ -21,6 +22,7 @@ from app.modules.ingestion import repository
 from app.modules.ingestion.connectors._parsing import first, num
 from app.modules.ingestion.models import FONTE_SIOPE, SiopeEducacao
 from app.shared.ingestion.base import BaseConnector, IngestionJob, capture_versao
+from app.shared.ingestion.client import recurso_ausente
 
 UF_POR_PREFIXO_IBGE = {
     "11": "RO",
@@ -68,6 +70,9 @@ def _uf(cod_ibge: str) -> str:
         return UF_POR_PREFIXO_IBGE[cod_ibge[:2]]
     except KeyError as exc:
         raise ValueError(f"Prefixo IBGE desconhecido para o SIOPE: {cod_ibge!r}") from exc
+
+
+logger = logging.getLogger(__name__)
 
 
 class SiopeConnector(BaseConnector):
@@ -126,7 +131,16 @@ class SiopeConnector(BaseConnector):
                 "$select": _SELECT,
                 "$format": "json",
             }
-            for item in self.client.get_records(path, params):
+            try:
+                itens = self.client.get_records(path, params)
+            except Exception as exc:
+                # 404 = o SIOPE não publicou este ente/período (bimestre em curso). É
+                # ausência, não falha; qualquer outro erro continua propagando.
+                if not recurso_ausente(exc):
+                    raise
+                logger.info("SIOPE sem publicação para %s (%s)", cod_ibge, path)
+                continue
+            for item in itens:
                 records.append({**item, "_cod_ibge": cod_ibge})
         return records
 

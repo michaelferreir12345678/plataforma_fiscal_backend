@@ -559,6 +559,13 @@ def _all_units(job: IngestJob) -> list[tuple[str, str]]:
         chaves = [str(ano) for ano in anos] or ["global"]
     if job.fonte == "bcb":
         return [("BR", "global")]
+    from app.modules.ingestion.connectors.registry import FONTE_META
+
+    meta = FONTE_META.get(job.fonte)
+    if meta is not None and meta.entrega_agregada:
+        # Uma entrega por período cobre todos os entes: dividir por ente faria todas as
+        # unidades disputarem a mesma chave de bronze, e só a primeira sobreviveria.
+        return [("BR", chave) for chave in chaves]
     return [(ente, chave) for ente in job.entes for chave in chaves]
 
 

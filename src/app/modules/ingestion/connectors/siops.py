@@ -8,6 +8,7 @@ O SIOPS e somente enriquecimento: a base do minimo de ASPS continua no RREO Anex
 from __future__ import annotations
 
 import calendar
+import logging
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -18,6 +19,7 @@ from app.modules.ingestion import repository
 from app.modules.ingestion.connectors._parsing import first, num
 from app.modules.ingestion.models import FONTE_SIOPS, SiopsSaude
 from app.shared.ingestion.base import BaseConnector, IngestionJob, capture_versao
+from app.shared.ingestion.client import recurso_ausente
 
 # Codigos aceitos pelo ultimo segmento da API SIOPS para cada bimestre civil.
 PERIODO_API_POR_BIMESTRE = {1: 12, 2: 14, 3: 1, 4: 18, 5: 20, 6: 2}
@@ -39,6 +41,9 @@ def _valor_siops(value: Any) -> Decimal | None:
     if "," in text:
         text = text.replace(".", "").replace(",", ".")
     return num(text)
+
+
+logger = logging.getLogger(__name__)
 
 
 class SiopsConnector(BaseConnector):
@@ -89,7 +94,17 @@ class SiopsConnector(BaseConnector):
                     f"Codigo IBGE SIOPS invalido: {cod_ibge!r}; "
                     "use UF com 2 ou municipio com 7 digitos"
                 )
-            for item in self.client.get_records(path, {}):
+            try:
+                itens = self.client.get_records(path, {})
+            except Exception as exc:
+                # 404 aqui é o SIOPS dizendo que **aquele** ente/período não foi publicado
+                # — típico do bimestre em curso. Ausência não é falha: a unidade fica sem
+                # linha e o job segue. Qualquer outro erro continua sendo erro.
+                if not recurso_ausente(exc):
+                    raise
+                logger.info("SIOPS sem publicação para %s (%s)", cod_ibge, path)
+                continue
+            for item in itens:
                 records.append({**item, "_cod_ibge": cod_ibge})
         return records
 

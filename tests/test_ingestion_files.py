@@ -32,7 +32,8 @@ from tests.conftest import auth_header, login
 TEST_FPM_YEAR = 2097
 TEST_CAPAG_YEAR = 2098
 TEST_SIOPS_YEAR = 2099
-TEST_FPM_CODS = ("9900001", "9900002")
+# Prefixo 23 (CE): a API do Tesouro filtra por UF, e "99" não é UF.
+TEST_FPM_CODS = ("2399001", "2399002")
 TEST_CAPAG_COD = "9900003"
 TEST_SIOPS_COD = "9900004"
 TEST_JOBS = (
@@ -191,21 +192,30 @@ def _count_bronze(fonte: str, periodo: str, versao: str) -> int:
         )
 
 
-def test_fpm_explode_por_ente_checksum_e_idempotente(client, make_org, fake_file) -> None:
-    fake_file.content = make_xlsx(
-        ["cod_ibge", "valor_bruto", "deducoes", "valor_liquido"],
-        [
-            [TEST_FPM_CODS[0], "1000.50", "100.00", "900.50"],
-            [TEST_FPM_CODS[1], "2000", "0", "2000"],
-        ],
-    )
-    token = _admin_token(client, make_org)
-    body = {"fonte": "tesouro_fpm", "anos": [TEST_FPM_YEAR], "periodos": [3]}
+def test_fpm_explode_por_ente_e_e_idempotente(client, make_org, fake_file) -> None:
+    """FPM pela **API de Transferências Constitucionais**, não mais por planilha.
+
+    O conector era de arquivo e a URL nunca foi configurada: falhava em toda execução com
+    "fonte de arquivo sem URL utilizável". A mesma API que o FUNDEB já consumia serve os
+    dezoito tipos do catálogo — muda só o código em ``p_transferencia``.
+
+    O que este teste garante continua sendo o mesmo: explode por ente e não duplica.
+    """
+    fake_file.records = [
+        {"CO_IBGE": int(TEST_FPM_CODS[0]), "TRANSFERENCIA": "FPM", "VALOR": 900.50},
+        {"CO_IBGE": int(TEST_FPM_CODS[1]), "TRANSFERENCIA": "FPM", "VALOR": 2000},
+    ]
+    token = _admin_token(client, make_org, *TEST_FPM_CODS)
+    body = {
+        "fonte": "tesouro_fpm",
+        "anos": [TEST_FPM_YEAR],
+        "periodos": [3],
+        "entes": list(TEST_FPM_CODS),
+    }
 
     res = _run(client, token, body)
     assert res["silver_rows"] == 2
     versao = res["versoes_vigentes"][0]
-    assert len(versao) == 16 and all(c in "0123456789abcdef" for c in versao)  # checksum
 
     with SessionLocal() as s:
         linhas = list(
@@ -219,8 +229,11 @@ def test_fpm_explode_por_ente_checksum_e_idempotente(client, make_org, fake_file
         )
     assert {r.cod_ibge for r in linhas} == set(TEST_FPM_CODS)
     assert float(next(r.valor_liquido for r in linhas if r.cod_ibge == TEST_FPM_CODS[0])) == 900.50
+    # A API entrega o consolidado do mês: decêndio e bruto/deduções ficam nulos em vez de
+    # zero — dizer "não sabemos" é diferente de dizer "não houve".
+    assert all(r.decendio is None and r.valor_bruto is None for r in linhas)
 
-    # Mesmo arquivo (mesmo checksum) ⇒ não duplica.
+    # Mesma resposta (mesmo payload ⇒ mesma versão) ⇒ não duplica nem reprocessa.
     res2 = _run(client, token, body)
     assert res2["pulados"] == 1
     assert (
