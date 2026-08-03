@@ -168,7 +168,50 @@ class CronogramaResponse(BaseModel):
     #: Totais do corte da fonte: estoque × contratado. Somados dão ``total_valor``.
     total_dc: Decimal = Decimal(0)
     total_oc: Decimal = Decimal(0)
+    #: **O que vence além do horizonte publicado.** A fonte fecha a série com uma linha
+    #: "Restante a pagar"; ela não é um ano e não entra em ``itens``, mas entra no
+    #: compromisso. Ignorá-la subestimava o serviço da dívida em 16,6% (Fortaleza).
+    restante_amortizacao: Decimal = Decimal(0)
+    restante_encargos: Decimal = Decimal(0)
+    #: Último ano explícito da série — é o "após" que rotula o residual.
+    horizonte_ate: int | None = None
+    #: ``total_valor`` + residual: o compromisso remanescente inteiro.
+    total_com_residual: Decimal = Decimal(0)
     source_ref: SourceRef
+
+
+class CdpSituacao(BaseModel):
+    """Situação do processo no Cadastro da Dívida Pública (base nacional, casada por processo)."""
+
+    num_pvl: str | None = None
+    num_processo: str | None = None
+    data_ref: date | None = None
+    situacao: str | None = None
+    motivo: str | None = None
+
+
+class OperacaoDetalhe(BaseModel):
+    """Uma operação de crédito **inteira**: do pedido à situação cadastral e ao cronograma.
+
+    É o fundo do drill da página de dívida. A tabela lista; aqui está tudo o que a fonte
+    publica sobre aquele processo, reunindo três endpoints do SADIPEM que até então viviam
+    separados — inclusive o CDP, que a plataforma ingeria e nenhuma tela consumia.
+    """
+
+    cod_ibge: str
+    pleito: PvlItem
+    #: Situação cadastral do mesmo processo. Vazio quando o CDP não traz aquele processo.
+    cdp: list[CdpSituacao] = Field(default_factory=list)
+    #: Cronograma daquele pleito, ano a ano. Vazio se a operação não foi contratada.
+    cronograma: list[VencimentoItem] = Field(default_factory=list)
+    total_amortizacao: Decimal = Decimal(0)
+    total_encargos: Decimal = Decimal(0)
+    restante_amortizacao: Decimal = Decimal(0)
+    restante_encargos: Decimal = Decimal(0)
+    horizonte_ate: int | None = None
+    #: Por que uma seção está vazia — ausência explicada em vez de espaço em branco.
+    observacoes: dict[str, str] = Field(default_factory=dict)
+    source_refs: list[SourceRef] = Field(default_factory=list)
 
 
 class SimularOperacaoRequest(BaseModel):

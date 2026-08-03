@@ -16,6 +16,7 @@ from app.modules.debt.schemas import (
     DividaArvoreOut,
     DividaDetalhe,
     MemoriaDivida,
+    OperacaoDetalhe,
     PvlOut,
     SimulacaoResponse,
     SimularOperacaoRequest,
@@ -119,6 +120,23 @@ def simular_operacao(
         req,
         as_of=as_of,
     )
+
+
+@router.get("/entes/{cod_ibge}/divida/operacao/{id_pleito}", response_model=OperacaoDetalhe)
+def operacao_divida(
+    cod_ibge: str,
+    id_pleito: str,
+    principal: Principal = Depends(require_capability("ver")),
+    session: Session = Depends(get_db),
+) -> OperacaoDetalhe:
+    """Fundo do drill: uma operação de crédito inteira, do pedido ao cronograma.
+
+    Reúne PVL, situação no CDP (casada por processo — a base do CDP é nacional) e o
+    cronograma daquele pleito. O escopo do ente é validado na borda: um identificador de
+    pleito de outro município não abre a ficha.
+    """
+    assert_ente_in_scope(session, principal, cod_ibge)
+    return service.build_operacao(session, cod_ibge, id_pleito)
 
 
 @router.get("/entes/{cod_ibge}/divida/pvl", response_model=PvlOut)

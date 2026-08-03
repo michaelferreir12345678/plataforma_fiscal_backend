@@ -19,6 +19,7 @@ from app.modules.debt.models import (
     FatoVencimento,
 )
 from app.modules.ingestion.models import (
+    SadipemCdp,
     SadipemCronogramaPgto,
     SadipemOpContratada,
     SadipemPvl,
@@ -199,15 +200,42 @@ def read_operacoes(
 def read_cronograma(
     session: Session, *, cod_ibge: str, valid_time: date, versao_entrega: str
 ) -> list[SadipemCronogramaPgto]:
+    """Série **anual** do cronograma. O residual sai por ``read_residual_cronograma``.
+
+    Separar na leitura evita o erro mais provável de todos: a linha "Restante a pagar"
+    entrar na série e ser desenhada como se fosse um ano.
+    """
     return list(
         session.scalars(
             select(SadipemCronogramaPgto).where(
                 SadipemCronogramaPgto.cod_ibge == cod_ibge,
                 SadipemCronogramaPgto.valid_time == valid_time,
                 SadipemCronogramaPgto.versao_entrega == versao_entrega,
+                SadipemCronogramaPgto.residual.is_(False),
             )
         )
     )
+
+
+def read_residual_cronograma(
+    session: Session,
+    *,
+    cod_ibge: str,
+    versao_entrega: str,
+    valid_time: date | None = None,
+    id_operacao: str | None = None,
+) -> SadipemCronogramaPgto | None:
+    """A linha "Restante a pagar": o que vence além do horizonte publicado."""
+    stmt = select(SadipemCronogramaPgto).where(
+        SadipemCronogramaPgto.cod_ibge == cod_ibge,
+        SadipemCronogramaPgto.versao_entrega == versao_entrega,
+        SadipemCronogramaPgto.residual.is_(True),
+    )
+    if valid_time is not None:
+        stmt = stmt.where(SadipemCronogramaPgto.valid_time == valid_time)
+    if id_operacao is not None:
+        stmt = stmt.where(SadipemCronogramaPgto.id_operacao == id_operacao)
+    return session.scalars(stmt.limit(1)).first()
 
 
 def replace_vencimentos(
@@ -244,6 +272,89 @@ def list_vencimentos(
                 FatoVencimento.versao_entrega == versao_entrega,
             )
             .order_by(FatoVencimento.ano, FatoVencimento.id_operacao)
+        )
+    )
+
+
+def read_pvl_por_pleito(
+    session: Session, *, cod_ibge: str, id_pleito: str
+) -> SadipemPvl | None:
+    """Um pleito específico do ente, na versão vigente. ``None`` se não é dele.
+
+    O filtro por ``cod_ibge`` não é conveniência: sem ele, um identificador de pleito de
+    outro município abriria a ficha completa de uma operação fora do escopo do usuário.
+    """
+    ultima = session.scalar(
+        select(func.max(SadipemPvl.versao_entrega)).where(SadipemPvl.cod_ibge == cod_ibge)
+    )
+    if ultima is None:
+        return None
+    return session.scalar(
+        select(SadipemPvl).where(
+            SadipemPvl.cod_ibge == cod_ibge,
+            SadipemPvl.versao_entrega == ultima,
+            SadipemPvl.id_pvl == id_pleito,
+        )
+    )
+
+
+def read_cdp_do_processo(
+    session: Session, *, num_pvl: str | None, id_pleito: str
+) -> list[SadipemCdp]:
+    """Situação cadastral **deste pleito** na base nacional do CDP.
+
+    O CDP não é por ente — ``res-cdp`` devolve o país inteiro (ver
+    ``docs/sadipem_granularidade.md``) —, então a ponte é o processo. Mas casar por
+    ``num_pvl`` é largo demais: um mesmo número de PVL cobre mais de um pleito (o
+    PVL02.000653/2026-16 cobre os pleitos 73695 e 73438), e a ficha mostraria a situação
+    do irmão como se fosse desta operação — duas linhas idênticas na tela, que se leem
+    como defeito de renderização.
+
+    ``id_pleito`` é a chave exata. ``num_pvl`` fica só como recurso para publicações
+    antigas, que não traziam o identificador.
+    """
+    ultima = session.scalar(select(func.max(SadipemCdp.versao_entrega)))
+    if ultima is None:
+        return []
+    exato = list(
+        session.scalars(
+            select(SadipemCdp)
+            .where(SadipemCdp.versao_entrega == ultima, SadipemCdp.id_pleito == id_pleito)
+            .order_by(SadipemCdp.data_ref.desc().nullslast())
+        )
+    )
+    if exato or not num_pvl:
+        return exato
+    return list(
+        session.scalars(
+            select(SadipemCdp)
+            .where(SadipemCdp.versao_entrega == ultima, SadipemCdp.num_pvl == num_pvl)
+            .order_by(SadipemCdp.data_ref.desc().nullslast())
+        )
+    )
+
+
+def read_cronograma_do_pleito(
+    session: Session, *, cod_ibge: str, id_pleito: str
+) -> list[SadipemCronogramaPgto]:
+    """Cronograma daquele pleito, na versão vigente, ano a ano."""
+    ultima = session.scalar(
+        select(func.max(SadipemCronogramaPgto.versao_entrega)).where(
+            SadipemCronogramaPgto.cod_ibge == cod_ibge
+        )
+    )
+    if ultima is None:
+        return []
+    return list(
+        session.scalars(
+            select(SadipemCronogramaPgto)
+            .where(
+                SadipemCronogramaPgto.cod_ibge == cod_ibge,
+                SadipemCronogramaPgto.versao_entrega == ultima,
+                SadipemCronogramaPgto.id_operacao == id_pleito,
+                SadipemCronogramaPgto.residual.is_(False),
+            )
+            .order_by(SadipemCronogramaPgto.ano)
         )
     )
 

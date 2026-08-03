@@ -277,6 +277,11 @@ class SadipemCronogramaPgto(Base):
     oc_encargos: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
     #: A fonte marca as linhas que envolvem moeda estrangeira e as de liberação.
     moeda_estrangeira: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    #: Linha-resumo "Restante a pagar": o que vence **além** do horizonte publicado.
+    #: Fica com ``ano`` nulo de propósito — não é um vencimento anual, e forçá-la num ano
+    #: fictício inventaria dado. Era descartada em silêncio, e o total exibido ficava
+    #: menor que o compromisso real (16,6% menor, no caso de Fortaleza).
+    residual: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     valid_time: Mapped[date | None] = mapped_column(Date, nullable=True)
     versao_entrega: Mapped[str] = mapped_column(Text, nullable=False)
 

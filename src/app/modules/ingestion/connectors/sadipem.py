@@ -242,14 +242,19 @@ class SadipemCronogramaConnector(SadipemConnectorBase):
         rows: list[dict[str, Any]] = []
         for it in payload:
             ano_raw = first(it, "ano")
-            # A API oficial acrescenta uma linha-resumo ``Restante a pagar``. Ela
-            # não é um vencimento anual e não pode ser atribuída a um ano fictício.
+            # A API acrescenta uma linha-resumo ``Restante a pagar`` com tudo o que vence
+            # além do horizonte listado. Ela não é um vencimento anual e não pode ser
+            # atribuída a um ano fictício — mas descartá-la fazia o total exibido ficar
+            # menor que o compromisso real (R$ 848 mi a menos em Fortaleza, 16,6%).
+            # Entra com ``ano`` nulo e ``residual``, fora da série e dentro da conta.
             try:
-                ano = int(ano_raw or job.ano)
+                ano: int | None = int(ano_raw or job.ano)
+                residual = False
             except (TypeError, ValueError):
-                continue
+                ano, residual = None, True
             rows.append(
                 {
+                    "residual": residual,
                     "id_operacao": str(_id_pleito(it) or ""),
                     "cod_ibge": job.cod_ibge,
                     "num_pvl": first(it, "num_pvl"),

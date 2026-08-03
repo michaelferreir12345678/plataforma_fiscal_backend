@@ -22,6 +22,7 @@ from app.modules.debt.schemas import (
     CapagHero,
     CapagMemoria,
     CapagResponse,
+    CdpSituacao,
     ComparacaoDivida,
     ComponenteMemoria,
     CronogramaResponse,
@@ -29,6 +30,7 @@ from app.modules.debt.schemas import (
     DividaArvoreOut,
     DividaDetalhe,
     MemoriaDivida,
+    OperacaoDetalhe,
     PosicaoSimulada,
     PvlItem,
     PvlOut,
@@ -51,6 +53,8 @@ from app.shared.source_ref import SourceRef
 _REL_RGF = "RGF"
 _REL_CAPAG = "CAPAG"
 _REL_CAPAG_ESTADUAL = "CAPAG-EST"
+_REL_SADIPEM_PVL = "SADIPEM-PVL"
+_REL_SADIPEM_CDP = "SADIPEM-CDP"
 _REL_SADIPEM_OP = "SADIPEM-OP"
 _REL_SADIPEM_CRONO = "SADIPEM-CRONOGRAMA"
 _ANEXO_DDCL = "Anexo 02 — DDCL"
@@ -92,7 +96,11 @@ def _source_capag(ano_ref: int, versao: str, cod_ibge: str) -> SourceRef:
 
 
 def _source_sadipem(relatorio: str, periodo: str, versao: str) -> SourceRef:
-    anexo = "Operações contratadas" if relatorio == _REL_SADIPEM_OP else "Cronograma de pagamentos"
+    anexo = {
+        _REL_SADIPEM_OP: "Operações contratadas",
+        _REL_SADIPEM_PVL: "Pedidos de verificação de limites",
+        _REL_SADIPEM_CDP: "Cadastro da Dívida Pública (base nacional)",
+    }.get(relatorio, "Cronograma de pagamentos")
     return SourceRef(
         relatorio=relatorio,
         anexo=anexo,
@@ -1060,6 +1068,140 @@ def _fotografia_unica(fatos: list[Any]) -> list[Any]:
     return max(por_operacao.items(), key=_chave)[1]
 
 
+def build_operacao(session: Session, cod_ibge: str, id_pleito: str) -> OperacaoDetalhe:
+    """Uma operação de crédito inteira: pedido, situação cadastral e cronograma.
+
+    Reúne três endpoints do SADIPEM que viviam separados. O CDP entra aqui pela primeira
+    vez — a plataforma o ingeria e nenhuma tela o consumia —, casado **por processo**, que
+    é o único vínculo possível: a base do CDP é nacional e não tem código de ente.
+
+    Cada seção vazia diz por quê. Um cronograma ausente pode significar "a operação não foi
+    contratada" ou "o Tesouro não publicou"; espaço em branco não distingue os dois, e o
+    gestor conclui o que for pior.
+    """
+    pleito = repository.read_pvl_por_pleito(session, cod_ibge=cod_ibge, id_pleito=id_pleito)
+    if pleito is None:
+        raise AppError(
+            status=404,
+            title="Operação não encontrada",
+            detail=(
+                f"Não há pleito {id_pleito} para {cod_ibge} no SADIPEM. Ele pode pertencer "
+                f"a outro ente ou ter saído da publicação vigente."
+            ),
+        )
+
+    observacoes: dict[str, str] = {}
+    sources = [
+        _source_sadipem(
+            _REL_SADIPEM_PVL, str(_ano_de(pleito.valid_time)), pleito.versao_entrega
+        )
+    ]
+
+    cdp_rows = repository.read_cdp_do_processo(
+        session, num_pvl=pleito.num_pvl, id_pleito=id_pleito
+    )
+    if not cdp_rows:
+        observacoes["cdp"] = (
+            "O Cadastro da Dívida Pública não traz este processo. O CDP é uma base "
+            "nacional publicada pelo Tesouro; a ausência aqui é da fonte, não da carga."
+        )
+    else:
+        sources.append(_source_sadipem(_REL_SADIPEM_CDP, "BR", cdp_rows[0].versao_entrega))
+
+    crono_rows = repository.read_cronograma_do_pleito(
+        session, cod_ibge=cod_ibge, id_pleito=id_pleito
+    )
+    if not crono_rows:
+        observacoes["cronograma"] = (
+            "Sem cronograma publicado para este pleito. O SADIPEM só publica cronograma de "
+            "operação contratada — um pedido em tramitação ainda não tem vencimentos."
+        )
+    else:
+        # O que a fonte devolve aqui **não** são as parcelas desta operação: é o
+        # cronograma consolidado do ente inteiro, como estava na análise deste pleito.
+        # Apresentá-lo colado ao valor da operação faria o gestor comparar R$ 6,6 bi de
+        # serviço com R$ 450 mi de pedido e concluir que a conta não fecha.
+        observacoes["cronograma_escopo"] = (
+            "Este cronograma é do **ente inteiro**, na fotografia tirada quando este "
+            "pleito foi analisado — não são as parcelas desta operação. O SADIPEM não "
+            "publica cronograma por operação: cada análise devolve o serviço consolidado "
+            "da dívida do ente naquele momento."
+        )
+        sources.append(
+            _source_sadipem(
+                _REL_SADIPEM_CRONO,
+                str(_ano_de(crono_rows[0].valid_time)),
+                crono_rows[0].versao_entrega,
+            )
+        )
+
+    residual = (
+        repository.read_residual_cronograma(
+            session,
+            cod_ibge=cod_ibge,
+            versao_entrega=crono_rows[0].versao_entrega,
+            id_operacao=id_pleito,
+        )
+        if crono_rows
+        else None
+    )
+    resto_amort = Decimal(residual.principal or 0) if residual else _ZERO
+    resto_enc = Decimal(residual.encargos or 0) if residual else _ZERO
+    itens = [
+        VencimentoItem(
+            ano=row.ano or 0,
+            principal=Decimal(row.principal or 0),
+            encargos=Decimal(row.encargos or 0),
+            valor=Decimal(row.principal or 0) + Decimal(row.encargos or 0),
+            dc_amortizacao=row.dc_amortizacao,
+            dc_encargos=row.dc_encargos,
+            oc_amortizacao=row.oc_amortizacao,
+            oc_encargos=row.oc_encargos,
+            operacoes=1,
+        )
+        for row in crono_rows
+    ]
+    return OperacaoDetalhe(
+        cod_ibge=cod_ibge,
+        pleito=PvlItem(
+            id_pvl=pleito.id_pvl,
+            num_pvl=pleito.num_pvl,
+            num_processo=pleito.num_processo,
+            tipo_operacao=pleito.tipo_operacao,
+            finalidade=pleito.finalidade,
+            credor=pleito.credor,
+            tipo_credor=pleito.tipo_credor,
+            moeda=pleito.moeda,
+            valor=pleito.valor,
+            status=pleito.status,
+            data_protocolo=pleito.data_protocolo,
+            data_analise=pleito.data_analise,
+        ),
+        cdp=[
+            CdpSituacao(
+                num_pvl=row.num_pvl,
+                num_processo=row.num_processo,
+                data_ref=row.data_ref,
+                situacao=row.situacao,
+                motivo=row.motivo,
+            )
+            for row in cdp_rows
+        ],
+        cronograma=itens,
+        total_amortizacao=sum((i.principal for i in itens), _ZERO),
+        total_encargos=sum((i.encargos for i in itens), _ZERO),
+        restante_amortizacao=resto_amort,
+        restante_encargos=resto_enc,
+        horizonte_ate=itens[-1].ano if itens else None,
+        observacoes=observacoes,
+        source_refs=sources,
+    )
+
+
+def _ano_de(valor: date | None) -> int:
+    return valor.year if valor is not None else date.today().year
+
+
 def build_cronograma(
     session: Session,
     cod_ibge: str,
@@ -1141,6 +1283,15 @@ def build_cronograma(
         )
         for ano, grupo in sorted(grupos.items())
     ]
+    residual = repository.read_residual_cronograma(
+        session,
+        cod_ibge=cod_ibge,
+        versao_entrega=versao,
+        valid_time=date(_ano(periodo_ref), 12, 31),
+    )
+    resto_amort = Decimal(residual.principal or 0) if residual else _ZERO
+    resto_enc = Decimal(residual.encargos or 0) if residual else _ZERO
+    total_valor = sum((item.valor for item in itens), _ZERO)
     source = _source_sadipem(_REL_SADIPEM_CRONO, periodo_ref, versao)
     return CronogramaResponse(
         cod_ibge=cod_ibge,
@@ -1158,6 +1309,10 @@ def build_cronograma(
             ((item.oc_amortizacao or _ZERO) + (item.oc_encargos or _ZERO) for item in itens),
             _ZERO,
         ),
+        restante_amortizacao=resto_amort,
+        restante_encargos=resto_enc,
+        horizonte_ate=itens[-1].ano if itens else None,
+        total_com_residual=total_valor + resto_amort + resto_enc,
         total_valor=sum((item.valor for item in itens), _ZERO),
         source_ref=source,
     )
