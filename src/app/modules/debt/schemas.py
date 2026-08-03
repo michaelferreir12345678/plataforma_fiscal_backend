@@ -136,11 +136,23 @@ class CapagResponse(BaseModel):
 
 
 class VencimentoItem(BaseModel):
+    """Serviço da dívida de um ano, no corte que a fonte publica.
+
+    Não há ``juros``: o SADIPEM publica amortização e encargos, sem separá-los. O campo
+    existia e vinha sempre zerado, o que a tela mostrava como "juros: R$ 0,00" — que se lê
+    como "não há juros", e não como "a fonte não separa".
+    """
+
     ano: int
     principal: Decimal
-    juros: Decimal
+    #: Inclui os juros — a fonte não os discrimina.
     encargos: Decimal
     valor: Decimal
+    #: Dívida consolidada (estoque) × operações contratadas (o que foi assumido de novo).
+    dc_amortizacao: Decimal | None = None
+    dc_encargos: Decimal | None = None
+    oc_amortizacao: Decimal | None = None
+    oc_encargos: Decimal | None = None
     operacoes: int
 
 
@@ -151,9 +163,11 @@ class CronogramaResponse(BaseModel):
     versao_entrega: str
     itens: list[VencimentoItem]
     total_principal: Decimal
-    total_juros: Decimal
     total_encargos: Decimal
     total_valor: Decimal
+    #: Totais do corte da fonte: estoque × contratado. Somados dão ``total_valor``.
+    total_dc: Decimal = Decimal(0)
+    total_oc: Decimal = Decimal(0)
     source_ref: SourceRef
 
 
@@ -194,10 +208,18 @@ class PvlItem(BaseModel):
     """Pedido de verificação de limites (PVL/CDP) apresentado ao Tesouro."""
 
     id_pvl: str | None = None
+    #: Identificadores do processo no Tesouro — sem eles a operação não é rastreável.
+    num_pvl: str | None = None
+    num_processo: str | None = None
     tipo_operacao: str | None = None
+    #: Para que serve o dinheiro e quem empresta — o corte analítico de crédito.
+    finalidade: str | None = None
+    credor: str | None = None
+    tipo_credor: str | None = None
+    moeda: str | None = None
     valor: Decimal | None = None
     status: str | None = None
-    decisao: str | None = None
+    data_protocolo: date | None = None
     data_analise: date | None = None
 
 

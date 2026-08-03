@@ -40,6 +40,22 @@ def _id_pleito(item: dict[str, Any]) -> Any:
     return first(item, "id_pleito", "id_pvl", "id_operacao", "id")
 
 
+def _bandeira(valor: Any) -> bool | None:
+    """Indicador da API (``"1  "``, ``"0"``, vazio) → booleano; desconhecido vira ``None``.
+
+    A fonte devolve o indicador com espaços à direita, então comparar com ``"1"`` cru
+    falharia em silêncio e marcaria tudo como falso.
+    """
+    if valor is None:
+        return None
+    texto = str(valor).strip()
+    if texto in {"1", "S", "SIM", "true", "True"}:
+        return True
+    if texto in {"0", "N", "NAO", "NÃO", "false", "False"}:
+        return False
+    return None
+
+
 def _operacao_contratada(item: dict[str, Any]) -> bool:
     """Reconhece somente PVL contratado, tolerando a grafia publicada pela API.
 
@@ -88,12 +104,19 @@ class SadipemConnectorBase(BaseConnector):
                 )
         return jobs
 
+    #: Código sob o qual as linhas são gravadas quando a fonte **não** segmenta por ente
+    #: (o CDP devolve a base nacional). ``None`` = usa o ente do job.
+    cod_ibge_entrega: str | None = None
+
     def _replace(self, session: Session, job: IngestionJob, versao: str, rows: list[dict]) -> int:
         # A mesma captura pode materializar mais de um ano de referência. Sem
         # ``valid_time`` na chave, processar o ano seguinte apagava silenciosamente
         # a fotografia do ano anterior.
         keys = {
-            "cod_ibge": job.cod_ibge,
+            # A chave do apagamento tem de ser a mesma sob a qual as linhas entram: numa
+            # fonte nacional, deletar por ente não alcançaria as linhas 'BR' e cada
+            # execução empilharia uma cópia da base inteira.
+            "cod_ibge": self.cod_ibge_entrega or job.cod_ibge,
             "valid_time": job.valid_time,
             "versao_entrega": versao,
         }
@@ -113,10 +136,19 @@ class SadipemPvlConnector(SadipemConnectorBase):
             {
                 "id_pvl": str(_id_pleito(it) or ""),
                 "cod_ibge": job.cod_ibge,
+                "num_pvl": first(it, "num_pvl"),
+                "num_processo": first(it, "num_processo"),
                 "tipo_operacao": first(it, "tipo_operacao", "tipo"),
+                "finalidade": first(it, "finalidade"),
+                "credor": first(it, "credor", "no_credor"),
+                "tipo_credor": first(it, "tipo_credor"),
+                "moeda": first(it, "moeda", "no_moeda"),
                 "valor": num(first(it, "valor", "vl_operacao")),
+                # ``status`` é o campo que a API publica; havia também um mapeamento para
+                # ``decisao``/``resultado``, que a fonte nunca devolveu — 606 de 606 linhas
+                # nulas. Coluna estruturalmente vazia não é dado ausente, é campo morto.
                 "status": first(it, "status", "situacao"),
-                "decisao": first(it, "decisao", "resultado"),
+                "data_protocolo": parse_date(first(it, "data_protocolo")),
                 "data_analise": parse_date(first(it, "data_analise", "data_status")),
                 "valid_time": job.valid_time,
                 "versao_entrega": versao_entrega,
@@ -144,9 +176,14 @@ class SadipemOpContratadaConnector(SadipemConnectorBase):
             {
                 "id_operacao": str(_id_pleito(it) or ""),
                 "cod_ibge": job.cod_ibge,
+                "num_pvl": first(it, "num_pvl"),
+                "num_processo": first(it, "num_processo"),
                 "tipo_operacao": first(it, "tipo_operacao", "tipo"),
+                "finalidade": first(it, "finalidade"),
                 "credor": first(it, "credor", "no_credor"),
+                "tipo_credor": first(it, "tipo_credor"),
                 "moeda": first(it, "moeda", "no_moeda"),
+                "status": first(it, "status", "situacao"),
                 "valor_contratado": num(first(it, "valor_contratado", "valor")),
                 # O /pvl não publica data contratual dedicada; ``data_status`` é
                 # preservada como melhor marco temporal disponível no dataset oficial.
@@ -213,44 +250,75 @@ class SadipemCronogramaConnector(SadipemConnectorBase):
                 continue
             rows.append(
                 {
-                "id_operacao": str(_id_pleito(it) or ""),
-                "cod_ibge": job.cod_ibge,
-                "ano": ano,
-                "mes": int(first(it, "mes") or 0) or None,
-                "principal": num(
-                    first(
-                        it,
-                        "principal",
-                        "vl_principal",
-                        # A documentação e versões do payload divergem na
-                        # grafia; ambas representam a amortização total.
-                        "total_amorizacao",
-                        "total_amortizacao",
-                    )
-                ),
-                "juros": num(first(it, "juros", "vl_juros", "total_juros")),
-                "encargos": num(first(it, "encargos", "vl_encargos", "total_encargos")),
-                "valid_time": job.valid_time,
-                "versao_entrega": versao_entrega,
+                    "id_operacao": str(_id_pleito(it) or ""),
+                    "cod_ibge": job.cod_ibge,
+                    "num_pvl": first(it, "num_pvl"),
+                    "num_processo": first(it, "num_processo"),
+                    "ano": ano,
+                    # Não há ``mes``: o cronograma do SADIPEM é anual. O mapeamento
+                    # anterior procurava o campo e gravava nulo em 100% das linhas,
+                    # prometendo uma granularidade que a fonte não publica.
+                    "principal": num(
+                        first(
+                            it,
+                            "principal",
+                            "vl_principal",
+                            # A documentação e versões do payload divergem na
+                            # grafia; ambas representam a amortização total.
+                            "total_amorizacao",
+                            "total_amortizacao",
+                        )
+                    ),
+                    # ``encargos`` é o total publicado e **inclui** os juros: o SADIPEM
+                    # não os separa. O mapeamento anterior tentava um campo ``juros``
+                    # inexistente e gravava nulo sempre — separar aqui seria inventar.
+                    "encargos": num(first(it, "encargos", "vl_encargos", "total_encargos")),
+                    # O corte que a fonte oferece e que estava sendo descartado.
+                    "dc_amortizacao": num(first(it, "divida_consolidada_amortizacao")),
+                    "dc_encargos": num(first(it, "divida_consolidada_encargos")),
+                    "oc_amortizacao": num(first(it, "operacoes_contratadas_amortizacao")),
+                    "oc_encargos": num(first(it, "operacoes_contratadas_encargos")),
+                    "moeda_estrangeira": _bandeira(first(it, "indicador_div_moeda_estrang")),
+                    "valid_time": job.valid_time,
+                    "versao_entrega": versao_entrega,
                 }
             )
         return self._replace(session, job, versao_entrega, rows)
 
 
 class SadipemCdpConnector(SadipemConnectorBase):
+    """Cadastro da Dívida Pública — **base nacional**, apesar de aceitar ``id_ente``.
+
+    ``res-cdp`` ignora o filtro: pedir Fortaleza, pedir São Paulo ou não pedir nada
+    devolve exatamente os mesmos registros. Gravar sob o código do ente consultado fazia
+    a base do país inteiro passar por dados daquele ente — 117 mil linhas nacionais
+    rotuladas como sendo do Ceará. O vínculo com o ente é feito pelo processo
+    (``num_pvl``/``id_pleito``), que casa com ``silver.sadipem_pvl``.
+    """
+
     fonte = FONTE_SADIPEM_CDP
     relatorio = "SADIPEM-CDP"
     path = "res-cdp"
     silver_model = SadipemCdp
+    #: A entrega é uma só para todo o país (como FPM e CAPAG).
+    cod_ibge_entrega = "BR"
 
     def to_silver(
         self, session: Session, job: IngestionJob, payload: Any, versao_entrega: str
     ) -> int:
         rows = [
             {
-                "cod_ibge": job.cod_ibge,
+                "cod_ibge": "BR",
+                "num_pvl": first(it, "num_pvl"),
+                "num_processo": first(it, "num_processo"),
+                "id_pleito": (
+                    str(pleito) if (pleito := _id_pleito(it)) is not None else None
+                ),
                 "data_ref": parse_date(first(it, "data_ref", "data_base", "data")),
-                "situacao": first(it, "situacao", "situacao_ente", "status"),
+                # ``situacao_ente`` (Regular/Irregular) e ``status`` (o estágio do
+                # processo) são coisas diferentes; o mapeamento antigo caía em ``status``
+                # para os dois e fazia a situação cadastral repetir o estágio.
+                "situacao": first(it, "situacao", "situacao_ente"),
                 "motivo": first(it, "motivo", "descricao", "status"),
                 "valid_time": job.valid_time,
                 "versao_entrega": versao_entrega,

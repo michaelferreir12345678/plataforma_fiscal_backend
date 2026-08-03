@@ -150,20 +150,29 @@ def test_sadipem_pvl_versao_por_data_de_captura(client, make_org, fake_client, c
     ente = _ente()
     cleanup.append(ente)
     fake_client.records["tt/pvl"] = [
+        # O payload espelha o que a API do SADIPEM devolve de fato: há ``status``, não
+        # ``decisao`` — este último era mapeado e vinha nulo em 606 de 606 linhas reais.
         {
             "id_pvl": "1",
+            "num_pvl": "PVL02.000883/2023-32",
+            "num_processo": "17944.101691/2023-13",
             "tipo_operacao": "Interna",
+            "finalidade": "Amortização de dívida",
+            "credor": "Banco do Brasil S/A",
+            "tipo_credor": "Instituição Financeira Nacional",
             "valor": "1000000.00",
             "status": "Deferido",
-            "decisao": "Favorável",
+            "data_protocolo": "2023-04-27",
             "data_analise": "2024-05-10",
         },
         {
             "id_pvl": "2",
             "tipo_operacao": "Externa",
+            "finalidade": "Infraestrutura",
+            "credor": "Banco Interamericano de Desenvolvimento",
+            "tipo_credor": "Instituição Financeira Internacional",
             "valor": "2000000.00",
             "status": "Em análise",
-            "decisao": "",
             "data_analise": "31/05/2024",
         },
     ]
@@ -317,14 +326,18 @@ def test_sadipem_cronograma_busca_somente_pleitos_contratados_e_aceita_grafias(
                 "total_amortizacao": 800_000,
                 "total_encargos": 150_000,
             },
-            # Layout legado continua aceito.
+            # Layout legado (``principal``/``encargos``) continua aceito, agora com o
+            # corte que a API real publica: dívida consolidada × operações contratadas.
             {
                 "id_operacao": "203",
                 "ano": 2028,
-                "mes": 6,
                 "principal": 700_000,
-                "juros": 100_000,
                 "encargos": 50_000,
+                "divida_consolidada_amortizacao": 650_000,
+                "divida_consolidada_encargos": 45_000,
+                "operacoes_contratadas_amortizacao": 50_000,
+                "operacoes_contratadas_encargos": 5_000,
+                "indicador_div_moeda_estrang": "1  ",
             },
         ],
     )
@@ -355,10 +368,12 @@ def test_sadipem_cronograma_busca_somente_pleitos_contratados_e_aceita_grafias(
         ("203", 2028),
     ]
     assert float(rows[0].principal or 0) == 1_000_000.25
-    assert rows[0].juros is None
     assert float(rows[0].encargos or 0) == 200_000.5
     assert float(rows[1].principal or 0) == 800_000.0
-    assert float(rows[2].juros or 0) == 100_000.0
+    # O corte que estava sendo descartado, e a bandeira com o espaço que a API manda.
+    assert float(rows[2].dc_amortizacao or 0) == 650_000.0
+    assert float(rows[2].oc_amortizacao or 0) == 50_000.0
+    assert rows[2].moeda_estrangeira is True
     assert [(path, params.get("id_pleito")) for path, params in fake_client.calls] == [
         ("pvl", None),
         ("opc-cronograma-pagamentos", 201),

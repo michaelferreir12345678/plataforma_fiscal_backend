@@ -343,7 +343,8 @@ def test_pvl_declara_lacuna_de_ingestao(client, make_org, limpar) -> None:
     with SessionLocal() as s:
         s.add(SadipemPvl(
             cod_ibge=cod, id_pvl="PVL-1", tipo_operacao="Operação de crédito interna",
-            valor=Decimal("1000"), status="Deferido", decisao="Autorizado",
+            valor=Decimal("1000"), status="Deferido", finalidade="Infraestrutura",
+            credor="Caixa Econômica Federal", num_pvl="PVL02.000001/2024-11",
             data_analise=date(2024, 5, 10), versao_entrega="2024-06-01",
         ))
         s.commit()

@@ -92,7 +92,15 @@ class FatoCapag(Base):
 
 
 class FatoVencimento(Base):
-    """gold.fato_vencimento — principal + juros + encargos por operação/ano."""
+    """gold.fato_vencimento — serviço da dívida por operação/ano, no corte da fonte.
+
+    O SADIPEM publica **por ano** (não por mês) e separa **dívida consolidada** (o estoque
+    que já existia) de **operações contratadas** (o que foi assumido de novo). Antes o
+    fato guardava ``mes`` e ``juros``, que a fonte nunca publicou — ficavam zerados em
+    100% das linhas e apareciam na tela como "juros: R$ 0,00", que se lê como "não há
+    juros" e não como "a fonte não separa". A chave perde o ``mes`` pelo mesmo motivo:
+    fixá-lo em zero fazia parte da chave carregar uma dimensão inexistente.
+    """
 
     __tablename__ = "fato_vencimento"
     __table_args__ = (
@@ -101,7 +109,6 @@ class FatoVencimento(Base):
             "periodo_ref",
             "id_operacao",
             "ano",
-            "mes",
             "versao_entrega",
             name="uq_fato_vencimento_chave",
         ),
@@ -116,9 +123,13 @@ class FatoVencimento(Base):
         Text, ForeignKey("gold.dim_credor.codigo"), nullable=True
     )
     ano: Mapped[int] = mapped_column(Integer, nullable=False)
-    mes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: Totais do ano. ``encargos`` **inclui** os juros — o SADIPEM não os separa.
     principal: Mapped[Decimal] = mapped_column(Numeric, nullable=False, default=Decimal(0))
-    juros: Mapped[Decimal] = mapped_column(Numeric, nullable=False, default=Decimal(0))
     encargos: Mapped[Decimal] = mapped_column(Numeric, nullable=False, default=Decimal(0))
+    #: O corte que responde "quanto do serviço vem do que acabei de contratar".
+    dc_amortizacao: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
+    dc_encargos: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
+    oc_amortizacao: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
+    oc_encargos: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
     valor: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     versao_entrega: Mapped[str] = mapped_column(Text, nullable=False)

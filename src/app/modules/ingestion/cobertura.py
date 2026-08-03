@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import String, cast, delete, func, select
+from sqlalchemy import Integer, String, cast, delete, extract, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -33,6 +33,10 @@ from app.modules.ingestion.models import (
     IbgePopulacao,
     MartCoberturaFonte,
     RawPayload,
+    SadipemCdp,
+    SadipemCronogramaPgto,
+    SadipemOpContratada,
+    SadipemPvl,
     SilverDca,
     SilverMsc,
     SilverRgf,
@@ -149,6 +153,16 @@ def _siope_periodo() -> Any:
     return func.concat(cast(SiopeEducacao.ano, String), "-B", cast(SiopeEducacao.bimestre, String))
 
 
+def _ano_de(coluna: Any) -> Any:
+    """Ano do ``valid_time`` como texto — o "período" de uma fotografia do SADIPEM.
+
+    O SADIPEM não publica período fiscal: cada captura é um retrato da base naquela data.
+    O ano do ``valid_time`` é o que a ``dim_entrega`` registra como período, e a cobertura
+    precisa usar a mesma convenção para casar entrega e contagem.
+    """
+    return cast(extract("year", coluna), Integer).cast(String)
+
+
 # Fontes cuja cobertura por ente vem de contar linhas silver diretamente (não via
 # dim_entrega, que para essas fontes registra a entrega nacional 'BR').
 _SILVER_POR_ENTE: dict[str, _SilverConta] = {
@@ -166,7 +180,14 @@ _SILVER_POR_ENTE: dict[str, _SilverConta] = {
     ),
 }
 
-# Contagem silver para as fontes por-ente registradas em dim_entrega (SICONFI + IBGE).
+# Contagem silver para as fontes por-ente registradas em dim_entrega (SICONFI + IBGE +
+# SADIPEM). Nenhuma fonte do SADIPEM constava aqui nem em ``_SILVER_POR_ENTE``: as quatro
+# ingeriam normalmente e a Central de Dados mostrava "0 registros" para todas, porque a
+# tabela lê a cobertura materializada. Ausência no mapa é indistinguível de ausência de
+# dado para quem olha a tela — e sugere falha de ingestão onde não há.
+#
+# O SADIPEM é uma fotografia, não um período fiscal: o "período" da entrega é o ano da
+# captura, e é ele que a cobertura conta.
 _SILVER_ENTREGA_MODEL: dict[str, tuple[Any, Any]] = {
     "siconfi_rreo": (SilverRreo, SilverRreo.periodo),
     "siconfi_rgf": (SilverRgf, SilverRgf.periodo),
@@ -174,6 +195,12 @@ _SILVER_ENTREGA_MODEL: dict[str, tuple[Any, Any]] = {
     "siconfi_msc": (SilverMsc, SilverMsc.periodo),
     "ibge_populacao": (IbgePopulacao, cast(IbgePopulacao.ano_ref, String)),
     "ibge_pib": (IbgePib, cast(IbgePib.ano_ref, String)),
+    "sadipem_pvl": (SadipemPvl, _ano_de(SadipemPvl.valid_time)),
+    "sadipem_op_contratada": (SadipemOpContratada, _ano_de(SadipemOpContratada.valid_time)),
+    "sadipem_cronograma_pgto": (
+        SadipemCronogramaPgto,
+        _ano_de(SadipemCronogramaPgto.valid_time),
+    ),
 }
 
 
@@ -370,6 +397,39 @@ def refresh_cobertura(session: Session, *, hoje: date | None = None) -> int:
                 "ano": ano,
                 "n_registros": int(n or 0),
                 "versao_entrega_vigente": bcb_vigente,
+                "ingerido_em": None,
+                "defasagem_periodos": 0,
+                "atualizado_em": agora,
+            },
+        )
+
+    # O CDP é a única fonte cuja entrega **e** cujo conteúdo são nacionais: o endpoint
+    # ignora o filtro por ente e devolve a base do país. Contabilizar por ente daria a
+    # entender que cada município tem a sua fatia; a cobertura registra 'BR', como a
+    # ingestão.
+    cdp_vigente = session.scalar(
+        select(DimEntrega.versao_entrega)
+        .where(DimEntrega.relatorio == "SADIPEM-CDP", DimEntrega.vigente.is_(True))
+        .order_by(DimEntrega.homologada_em.desc())
+        .limit(1)
+    )
+    for ano_cdp, n_cdp in session.execute(
+        select(
+            extract("year", SadipemCdp.valid_time).cast(Integer),
+            func.count(),
+        ).group_by(extract("year", SadipemCdp.valid_time))
+    ).all():
+        if ano_cdp is None:
+            continue
+        valores_cobertura.append(
+            {
+                "fonte": "sadipem_cdp",
+                "cod_ibge": "BR",
+                "periodo": str(int(ano_cdp)),
+                "uf": None,
+                "ano": int(ano_cdp),
+                "n_registros": int(n_cdp or 0),
+                "versao_entrega_vigente": cdp_vigente,
                 "ingerido_em": None,
                 "defasagem_periodos": 0,
                 "atualizado_em": agora,

@@ -229,36 +229,43 @@ def _seed(case: DebtCase) -> None:
         )
         session.add_all(
             [
+                # Duas "operações" no mesmo cronograma são duas **fotografias do mesmo
+                # estoque consolidado**, tiradas em análises diferentes — não parcelas
+                # que se somem. No dado real de Fortaleza as duas traziam 99,9 mi e
+                # 99,6 mi para o mesmo ano: o mesmo estoque, não R$ 199 mi de dívida.
+                # A fotografia mais completa (mais anos) é a que vale.
                 SadipemCronogramaPgto(
-                    id_operacao="op-interna",
+                    id_operacao="op-completa",
                     cod_ibge=case.cod_ibge,
                     ano=ANO + 1,
-                    mes=1,
                     principal=Decimal("100"),
-                    juros=Decimal("10"),
-                    encargos=Decimal("5"),
+                    encargos=Decimal("15"),
+                    dc_amortizacao=Decimal("90"),
+                    dc_encargos=Decimal("13"),
+                    oc_amortizacao=Decimal("10"),
+                    oc_encargos=Decimal("2"),
                     valid_time=date(ANO, 12, 31),
                     versao_entrega=case.crono_v1,
                 ),
                 SadipemCronogramaPgto(
-                    id_operacao="op-externa",
+                    id_operacao="op-parcial",
                     cod_ibge=case.cod_ibge,
                     ano=ANO + 1,
-                    mes=6,
                     principal=Decimal("200"),
-                    juros=Decimal("20"),
                     encargos=Decimal("10"),
                     valid_time=date(ANO, 12, 31),
                     versao_entrega=case.crono_v1,
                 ),
                 SadipemCronogramaPgto(
-                    id_operacao="op-interna",
+                    id_operacao="op-completa",
                     cod_ibge=case.cod_ibge,
                     ano=ANO + 2,
-                    mes=None,
                     principal=Decimal("90"),
-                    juros=Decimal("9"),
                     encargos=Decimal("1"),
+                    dc_amortizacao=Decimal("80"),
+                    dc_encargos=Decimal("1"),
+                    oc_amortizacao=Decimal("10"),
+                    oc_encargos=Decimal("0"),
                     valid_time=date(ANO, 12, 31),
                     versao_entrega=case.crono_v1,
                 ),
@@ -468,7 +475,7 @@ def test_detalhe_separa_dcl_liquida_de_capag_bruta_e_resolve_capag_br(
     assert capag["source_ref"]["versao_entrega"] == debt_case.capag_v1
 
 
-def test_cronograma_soma_principal_juros_encargos_por_ano(
+def test_cronograma_nao_soma_fotografias_e_separa_estoque_de_contratado(
     client, make_org, debt_case: DebtCase
 ) -> None:
     token = _token(client, make_org, debt_case.cod_ibge)
@@ -486,15 +493,23 @@ def test_cronograma_soma_principal_juros_encargos_por_ano(
     assert body["source_ref"]["relatorio"] == "SADIPEM-CRONOGRAMA"
     assert [item["ano"] for item in body["itens"]] == [ANO + 1, ANO + 2]
     primeiro = body["itens"][0]
-    assert float(primeiro["principal"]) == 300.0
-    assert float(primeiro["juros"]) == 30.0
+    # A entrega traz duas fotografias do mesmo estoque; vale a mais completa (2 anos),
+    # e a parcial é descartada. Somar as duas daria 300 de amortização no primeiro ano —
+    # o ente apareceria devendo o triplo do que deve, sem nada na tela denunciar.
+    assert float(primeiro["principal"]) == 100.0
     assert float(primeiro["encargos"]) == 15.0
-    assert float(primeiro["valor"]) == 345.0
-    assert primeiro["operacoes"] == 2
-    assert float(body["total_principal"]) == 390.0
-    assert float(body["total_juros"]) == 39.0
+    assert float(primeiro["valor"]) == 115.0
+    assert primeiro["operacoes"] == 1
+    assert "juros" not in primeiro, "a fonte não separa juros; o campo não pode reaparecer"
+    # O corte da fonte: estoque (dívida consolidada) × o que foi contratado depois.
+    assert float(primeiro["dc_amortizacao"]) == 90.0
+    assert float(primeiro["oc_amortizacao"]) == 10.0
+    assert float(body["total_principal"]) == 190.0
     assert float(body["total_encargos"]) == 16.0
-    assert float(body["total_valor"]) == 445.0
+    assert float(body["total_valor"]) == 206.0
+    assert float(body["total_dc"]) == 184.0
+    assert float(body["total_oc"]) == 22.0
+    assert float(body["total_dc"]) + float(body["total_oc"]) == float(body["total_valor"])
 
     with SessionLocal() as session:
         fatos = list(
@@ -502,8 +517,10 @@ def test_cronograma_soma_principal_juros_encargos_por_ano(
                 select(FatoVencimento).where(FatoVencimento.cod_ibge == debt_case.cod_ibge)
             )
         )
+    # A gold guarda as três linhas (a deduplicação é de leitura, não de materialização:
+    # descartar na origem impediria auditar o que a fonte publicou).
     assert len(fatos) == 3
-    assert all(fato.valor == fato.principal + fato.juros + fato.encargos for fato in fatos)
+    assert all(fato.valor == fato.principal + fato.encargos for fato in fatos)
 
 
 def test_arvore_reconcilia_origem_e_credor(client, make_org, debt_case: DebtCase) -> None:

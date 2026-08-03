@@ -1004,7 +1004,6 @@ def _materializar_vencimentos(
             continue
         id_operacao = str(item.id_operacao or "não-informada")
         principal = Decimal(item.principal or 0)
-        juros = Decimal(item.juros or 0)
         encargos = Decimal(item.encargos or 0)
         rows.append(
             {
@@ -1013,11 +1012,16 @@ def _materializar_vencimentos(
                 "id_operacao": id_operacao,
                 "credor_codigo": por_id.get(id_operacao),
                 "ano": item.ano,
-                "mes": item.mes or 0,
                 "principal": principal,
-                "juros": juros,
                 "encargos": encargos,
-                "valor": principal + juros + encargos,
+                "dc_amortizacao": item.dc_amortizacao,
+                "dc_encargos": item.dc_encargos,
+                "oc_amortizacao": item.oc_amortizacao,
+                "oc_encargos": item.oc_encargos,
+                # O total do ano é amortização + encargos. Antes somava-se também um
+                # ``juros`` que a fonte nunca publicou e que era sempre zero — inofensivo
+                # na conta, enganoso na tela.
+                "valor": principal + encargos,
                 "versao_entrega": versao,
             }
         )
@@ -1028,6 +1032,32 @@ def _materializar_vencimentos(
         versao_entrega=versao,
         rows=rows,
     )
+
+
+def _fotografia_unica(fatos: list[Any]) -> list[Any]:
+    """Reduz o cronograma a **uma** fotografia, quando a entrega trouxe mais de uma.
+
+    O ``/opc-cronograma-pagamentos`` do SADIPEM não devolve a parcela de uma operação:
+    devolve o cronograma consolidado do ente **como estava** na análise daquele pleito.
+    Duas análises do mesmo ente produzem duas fotografias parecidas do mesmo estoque — e
+    somá-las dobra a dívida.
+
+    Critério: fica a operação com o maior número de anos cobertos e, no empate, a de maior
+    identificador (a análise mais recente). Preferir a de maior valor seria escolher
+    justamente a que mais infla; preferir a mais recente sozinha descartaria a fotografia
+    completa quando a última análise cobre menos anos.
+    """
+    por_operacao: dict[str, list[Any]] = defaultdict(list)
+    for fato in fatos:
+        por_operacao[str(fato.id_operacao)].append(fato)
+    if len(por_operacao) <= 1:
+        return fatos
+
+    def _chave(item: tuple[str, list[Any]]) -> tuple[int, str]:
+        operacao, linhas = item
+        return (len({linha.ano for linha in linhas}), operacao)
+
+    return max(por_operacao.items(), key=_chave)[1]
 
 
 def build_cronograma(
@@ -1070,28 +1100,43 @@ def build_cronograma(
             title="Cronograma vazio",
             detail=f"SADIPEM não publicou vencimentos para {cod_ibge}/{periodo_ref}.",
         )
+    # Cada PVL carrega uma fotografia do cronograma **consolidado do ente**, não a parcela
+    # daquela operação. Somar duas fotografias multiplicaria a mesma dívida: o ente
+    # apareceria devendo o dobro sem que nada na tela denunciasse. A ingestão já retém
+    # apenas a fotografia contratada mais recente, mas depender disso deixa a correção do
+    # número a cargo de outra camada — uma entrega antiga com oito operações produzia
+    # exatamente esse erro, e só não chegou à tela porque uma retificação a superou.
+    fatos = _fotografia_unica(fatos)
     grupos: dict[int, dict[str, Any]] = {}
     for fato in fatos:
         grupo = grupos.setdefault(
             fato.ano,
             {
                 "principal": _ZERO,
-                "juros": _ZERO,
                 "encargos": _ZERO,
                 "valor": _ZERO,
+                "dc_amortizacao": _ZERO,
+                "dc_encargos": _ZERO,
+                "oc_amortizacao": _ZERO,
+                "oc_encargos": _ZERO,
                 "operacoes": set(),
             },
         )
-        for campo in ("principal", "juros", "encargos", "valor"):
+        for campo in ("principal", "encargos", "valor"):
             grupo[campo] += Decimal(getattr(fato, campo))
+        for campo in ("dc_amortizacao", "dc_encargos", "oc_amortizacao", "oc_encargos"):
+            grupo[campo] += Decimal(getattr(fato, campo) or 0)
         grupo["operacoes"].add(fato.id_operacao)
     itens = [
         VencimentoItem(
             ano=ano,
             principal=grupo["principal"],
-            juros=grupo["juros"],
             encargos=grupo["encargos"],
             valor=grupo["valor"],
+            dc_amortizacao=grupo["dc_amortizacao"],
+            dc_encargos=grupo["dc_encargos"],
+            oc_amortizacao=grupo["oc_amortizacao"],
+            oc_encargos=grupo["oc_encargos"],
             operacoes=len(grupo["operacoes"]),
         )
         for ano, grupo in sorted(grupos.items())
@@ -1104,8 +1149,15 @@ def build_cronograma(
         versao_entrega=versao,
         itens=itens,
         total_principal=sum((item.principal for item in itens), _ZERO),
-        total_juros=sum((item.juros for item in itens), _ZERO),
         total_encargos=sum((item.encargos for item in itens), _ZERO),
+        total_dc=sum(
+            ((item.dc_amortizacao or _ZERO) + (item.dc_encargos or _ZERO) for item in itens),
+            _ZERO,
+        ),
+        total_oc=sum(
+            ((item.oc_amortizacao or _ZERO) + (item.oc_encargos or _ZERO) for item in itens),
+            _ZERO,
+        ),
         total_valor=sum((item.valor for item in itens), _ZERO),
         source_ref=source,
     )
@@ -1319,10 +1371,16 @@ def build_pvl(session: Session, cod_ibge: str) -> PvlOut:
     itens = [
         PvlItem(
             id_pvl=linha.id_pvl,
+            num_pvl=linha.num_pvl,
+            num_processo=linha.num_processo,
             tipo_operacao=linha.tipo_operacao,
+            finalidade=linha.finalidade,
+            credor=linha.credor,
+            tipo_credor=linha.tipo_credor,
+            moeda=linha.moeda,
             valor=linha.valor,
             status=linha.status,
-            decisao=linha.decisao,
+            data_protocolo=linha.data_protocolo,
             data_analise=linha.data_analise,
         )
         for linha in linhas

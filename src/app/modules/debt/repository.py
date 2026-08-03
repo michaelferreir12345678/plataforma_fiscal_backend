@@ -243,7 +243,7 @@ def list_vencimentos(
                 FatoVencimento.periodo_ref == periodo_ref,
                 FatoVencimento.versao_entrega == versao_entrega,
             )
-            .order_by(FatoVencimento.ano, FatoVencimento.mes, FatoVencimento.id_operacao)
+            .order_by(FatoVencimento.ano, FatoVencimento.id_operacao)
         )
     )
 

@@ -185,7 +185,14 @@ class SilverExtrato(Base):
 
 
 class SadipemPvl(Base):
-    """silver.sadipem_pvl — pedidos de verificação de limites (dívida/operações)."""
+    """silver.sadipem_pvl — pedidos de verificação de limites (dívida/operações).
+
+    Guarda o que a API do SADIPEM publica, e não um resumo dela. O identificador do
+    processo (``num_pvl``/``num_processo``) é o que liga a linha ao documento no Tesouro:
+    sem ele, uma operação de crédito na tela não é rastreável até o pedido que a originou.
+    ``finalidade`` e ``credor`` são o corte analítico de operações de crédito — para que
+    serve o dinheiro e quem empresta.
+    """
 
     __tablename__ = "sadipem_pvl"
     __table_args__ = {"schema": "silver"}
@@ -193,10 +200,18 @@ class SadipemPvl(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     id_pvl: Mapped[str | None] = mapped_column(Text, nullable=True)
     cod_ibge: Mapped[str] = mapped_column(String(7), nullable=False)
+    #: Identificadores do processo no Tesouro — a âncora da rastreabilidade documental.
+    num_pvl: Mapped[str | None] = mapped_column(Text, nullable=True)
+    num_processo: Mapped[str | None] = mapped_column(Text, nullable=True)
     tipo_operacao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    finalidade: Mapped[str | None] = mapped_column(Text, nullable=True)
+    credor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tipo_credor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    moeda: Mapped[str | None] = mapped_column(Text, nullable=True)
     valor: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
     status: Mapped[str | None] = mapped_column(Text, nullable=True)
-    decisao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Protocolo × status: quanto tempo o pleito levou entre entrar e ser decidido.
+    data_protocolo: Mapped[date | None] = mapped_column(Date, nullable=True)
     data_analise: Mapped[date | None] = mapped_column(Date, nullable=True)
     valid_time: Mapped[date | None] = mapped_column(Date, nullable=True)
     versao_entrega: Mapped[str] = mapped_column(Text, nullable=False)
@@ -211,9 +226,16 @@ class SadipemOpContratada(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     id_operacao: Mapped[str | None] = mapped_column(Text, nullable=True)
     cod_ibge: Mapped[str] = mapped_column(String(7), nullable=False)
+    num_pvl: Mapped[str | None] = mapped_column(Text, nullable=True)
+    num_processo: Mapped[str | None] = mapped_column(Text, nullable=True)
     tipo_operacao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    finalidade: Mapped[str | None] = mapped_column(Text, nullable=True)
     credor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tipo_credor: Mapped[str | None] = mapped_column(Text, nullable=True)
     moeda: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: O estágio no Tesouro. Uma operação "contratada" pode estar em fases distintas, e
+    #: tratá-las como uma coisa só apaga a diferença entre pedido aprovado e dívida viva.
+    status: Mapped[str | None] = mapped_column(Text, nullable=True)
     valor_contratado: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
     data_contratacao: Mapped[date | None] = mapped_column(Date, nullable=True)
     valid_time: Mapped[date | None] = mapped_column(Date, nullable=True)
@@ -221,7 +243,19 @@ class SadipemOpContratada(Base):
 
 
 class SadipemCronogramaPgto(Base):
-    """silver.sadipem_cronograma_pgto — cronograma de pagamento (serviço da dívida)."""
+    """silver.sadipem_cronograma_pgto — cronograma de pagamento (serviço da dívida).
+
+    **A granularidade é anual e o corte é dívida consolidada × operações contratadas.**
+    Essa é a forma da fonte, e a tabela passa a espelhá-la: havia uma coluna ``mes`` que
+    nunca foi preenchida (a API não publica mês) e uma coluna ``juros`` idem — o SADIPEM
+    publica amortização e encargos, sem separar juros. Coluna que nunca se preenche não é
+    ausência de dado, é promessa de granularidade que a fonte não tem.
+
+    O corte DC×OC é o que interessa a quem analisa crédito: a dívida consolidada é o
+    estoque já existente; as operações contratadas são o que foi assumido de novo. Somados
+    num total só, deixam de responder "quanto do serviço da dívida vem do que acabei de
+    contratar".
+    """
 
     __tablename__ = "sadipem_cronograma_pgto"
     __table_args__ = {"schema": "silver"}
@@ -229,23 +263,47 @@ class SadipemCronogramaPgto(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     id_operacao: Mapped[str | None] = mapped_column(Text, nullable=True)
     cod_ibge: Mapped[str] = mapped_column(String(7), nullable=False)
+    num_pvl: Mapped[str | None] = mapped_column(Text, nullable=True)
+    num_processo: Mapped[str | None] = mapped_column(Text, nullable=True)
     ano: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    mes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: Totais publicados (``total_amortizacao``/``total_encargos``). ``encargos`` inclui
+    #: os juros: a fonte não os separa, e inventar a separação seria criar número nosso.
     principal: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
-    juros: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
     encargos: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
+    #: O corte da fonte: estoque (dívida consolidada) × novo (operações contratadas).
+    dc_amortizacao: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
+    dc_encargos: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
+    oc_amortizacao: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
+    oc_encargos: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
+    #: A fonte marca as linhas que envolvem moeda estrangeira e as de liberação.
+    moeda_estrangeira: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     valid_time: Mapped[date | None] = mapped_column(Date, nullable=True)
     versao_entrega: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class SadipemCdp(Base):
-    """silver.sadipem_cdp — situação no Cadastro da Dívida Pública."""
+    """silver.sadipem_cdp — Cadastro da Dívida Pública. **Base nacional, não por ente.**
+
+    O endpoint ``res-cdp`` ignora ``id_ente``: pedir Fortaleza, São Paulo ou não pedir
+    nada devolve exatamente os mesmos registros — a base inteira do país. Gravar isso sob
+    o código do ente consultado fazia a base nacional passar por dados daquele ente, e
+    qualquer tela que a lesse mostraria o Brasil como se fosse a prefeitura.
+
+    Por isso ``cod_ibge`` aqui é sempre ``BR``, como nas demais fontes de entrega nacional
+    (FPM, CAPAG). O vínculo com o ente existe pelo processo: ``num_pvl``/``id_pleito``
+    casam com ``silver.sadipem_pvl``, que **é** por ente.
+    """
 
     __tablename__ = "sadipem_cdp"
     __table_args__ = {"schema": "silver"}
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    #: Sempre ``BR``: a fonte não segmenta por ente (ver docstring).
     cod_ibge: Mapped[str] = mapped_column(String(7), nullable=False)
+    #: A ponte para o ente: casa com ``sadipem_pvl.num_pvl`` / ``id_pvl``.
+    num_pvl: Mapped[str | None] = mapped_column(Text, nullable=True)
+    num_processo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    id_pleito: Mapped[str | None] = mapped_column(Text, nullable=True)
     data_ref: Mapped[date | None] = mapped_column(Date, nullable=True)
     situacao: Mapped[str | None] = mapped_column(Text, nullable=True)
     motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
