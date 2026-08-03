@@ -15,8 +15,10 @@ from sqlalchemy.orm import Session
 from app.core.errors import AppError
 from app.modules.ingestion import cobertura as cobertura_mod
 from app.modules.ingestion import integracoes, repository
+from app.modules.ingestion.connectors import procedencia
 from app.modules.ingestion.connectors.registry import (
     CONNECTOR_REGISTRY,
+    FONTE_META,
     FONTE_RELATORIO,
 )
 from app.modules.ingestion.connectors.siconfi import valid_time_from_periodo
@@ -36,9 +38,12 @@ from app.modules.ingestion.schemas import (
     CoberturaResponse,
     CoberturaResumo,
     DataResponse,
+    EndpointOut,
     EntregaStatus,
     FonteCatalogo,
     IntegracaoOut,
+    ParametroOut,
+    ProcedenciaOut,
     RunRequest,
     RunResult,
 )
@@ -416,6 +421,63 @@ def refresh_cobertura(session: Session) -> int:
     return cobertura_mod.refresh_cobertura(session)
 
 
+def _acesso_da_fonte(fonte: str) -> str | None:
+    """Tipo de acesso da fonte, quando declarado. Fonte sem procedência não inventa rótulo."""
+    p = procedencia.PROCEDENCIA.get(fonte)
+    return p.acesso if p is not None else None
+
+
+def obter_procedencia(fonte: str) -> ProcedenciaOut:
+    """Origem completa de uma fonte: endereços, parâmetros explicados e exemplos reais.
+
+    É material de auditoria: quem desconfia de um número tem de conseguir chegar à mesma
+    consulta que a plataforma fez. Por isso a resposta traz a URL de exemplo já com valores
+    reais — clicável — e não apenas o modelo com marcadores.
+    """
+    dados = procedencia.PROCEDENCIA.get(fonte)
+    meta = FONTE_META.get(fonte)
+    if dados is None or meta is None:
+        raise AppError(
+            status=404,
+            title="Fonte desconhecida",
+            detail=f"Não há fonte {fonte!r} no catálogo de ingestão.",
+        )
+    return ProcedenciaOut(
+        fonte=fonte,
+        descricao=meta.descricao,
+        orgao=meta.orgao,
+        familia=meta.familia,
+        cadencia=meta.cadencia,
+        acesso=dados.acesso,
+        acesso_rotulo=procedencia.ACESSO_ROTULO[dados.acesso],
+        portal=dados.portal,
+        documentacao=dados.documentacao,
+        licenca=dados.licenca,
+        autenticacao=dados.autenticacao,
+        como_funciona=dados.como_funciona,
+        endpoints=[
+            EndpointOut(
+                metodo=e.metodo,
+                url=e.url,
+                formato=e.formato,
+                o_que_traz=e.o_que_traz,
+                parametros=[
+                    ParametroOut(
+                        nome=x.nome, exemplo=x.exemplo, significado=x.significado
+                    )
+                    for x in e.parametros
+                ],
+                exemplo=e.exemplo,
+                observacao=e.observacao,
+            )
+            for e in dados.endpoints
+        ],
+        paginas_impactadas=list(meta.paginas_impactadas),
+        dependencias=list(meta.dependencias),
+        requer_configuracao=meta.requer_configuracao,
+    )
+
+
 def listar_fontes(session: Session) -> list[FonteCatalogo]:
     """Catálogo persistido + observabilidade (execução, defasagem e cobertura)."""
     # Materialize-on-read garante que um deploy com fonte nova atualize o catálogo
@@ -450,6 +512,7 @@ def listar_fontes(session: Session) -> list[FonteCatalogo]:
                 defasagem_periodos=c.get("defasagem"),
                 entes_cobertos=c.get("entes", 0),
                 registros_cobertos=c.get("registros", 0),
+                tipo_acesso=_acesso_da_fonte(meta.fonte),
             )
         )
     return itens

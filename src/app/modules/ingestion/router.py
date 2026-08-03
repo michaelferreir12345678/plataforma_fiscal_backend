@@ -26,6 +26,7 @@ from app.modules.ingestion.schemas import (
     FonteCatalogo,
     IntegracaoOut,
     IntegracaoPatch,
+    ProcedenciaOut,
     RunRequest,
 )
 from app.shared.ingestion.client import ClientResolver, RealClientResolver
@@ -138,6 +139,23 @@ def ingestion_fontes(
 ) -> list[FonteCatalogo]:
     """Catálogo das fontes + última execução/OK, período recente e defasagem (spec 1B)."""
     return service.listar_fontes(session)
+
+
+@router.get("/fontes/{fonte}/procedencia", response_model=ProcedenciaOut)
+def ingestion_fonte_procedencia(
+    fonte: str,
+    _: Principal = Depends(require_capability("administrar")),
+) -> ProcedenciaOut:
+    """De onde exatamente vem o dado desta fonte: endereços, parâmetros e exemplos reais.
+
+    Rastreabilidade de origem — a contraparte, no plano da ingestão, do ``source_ref`` que
+    acompanha cada número (§6.3). O ``source_ref`` diz de qual entrega o valor saiu; isto
+    diz de qual endereço a entrega saiu, e com quais parâmetros.
+
+    Não toca no banco: a procedência é declaração de código, conferida contra os conectores
+    na suíte de testes.
+    """
+    return service.obter_procedencia(fonte)
 
 
 @router.get("/cobertura", response_model=CoberturaResponse)

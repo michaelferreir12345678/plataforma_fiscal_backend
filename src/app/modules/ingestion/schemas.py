@@ -121,6 +121,56 @@ class FonteCatalogo(BaseModel):
         default=0,
         description="Soma de n_registros da cobertura materializada para a fonte.",
     )
+    tipo_acesso: str | None = Field(
+        default=None,
+        description="Como se chega ao dado (api_rest, api_odata, catalogo_ckan, arquivo, "
+        "raspagem_pdf). Na listagem é só o rótulo; a origem completa vem em /procedencia.",
+    )
+
+
+class ParametroOut(BaseModel):
+    """Um parâmetro da chamada, explicado — nome cru não permite auditar."""
+
+    nome: str
+    exemplo: str
+    significado: str
+
+
+class EndpointOut(BaseModel):
+    """Uma chamada concreta que a ingestão faz à fonte."""
+
+    metodo: str
+    url: str
+    formato: str
+    o_que_traz: str
+    parametros: list[ParametroOut] = Field(default_factory=list)
+    exemplo: str | None = Field(
+        default=None,
+        description="URL real e clicável que devolve o mesmo dado ingerido — a prova "
+        "oferecida ao usuário, para conferir sem depender da nossa palavra.",
+    )
+    observacao: str | None = None
+
+
+class ProcedenciaOut(BaseModel):
+    """Origem completa de uma fonte: de onde o dado sai antes de virar número na tela."""
+
+    fonte: str
+    descricao: str | None = None
+    orgao: str | None = None
+    familia: str
+    cadencia: str
+    acesso: str
+    acesso_rotulo: str
+    portal: str
+    documentacao: str | None = None
+    licenca: str
+    autenticacao: str
+    como_funciona: str
+    endpoints: list[EndpointOut] = Field(default_factory=list)
+    paginas_impactadas: list[str] = Field(default_factory=list)
+    dependencias: list[str] = Field(default_factory=list)
+    requer_configuracao: str | None = None
 
 
 class CoberturaItem(BaseModel):
