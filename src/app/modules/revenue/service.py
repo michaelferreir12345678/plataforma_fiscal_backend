@@ -40,6 +40,7 @@ from app.modules.revenue.schemas import (
 from app.shared.ausencia import ausencia_de_entrega
 from app.shared.envelope import DrillEnvelope, Measures
 from app.shared.hierarchy import HierarchyNode, build_drill_envelope, make_path
+from app.shared.linha_bruta import LinhaBrutaResponse, LinhaRelatorio
 from app.shared.source_ref import SourceRef
 
 _ANEXO = "Anexo 01"
@@ -82,6 +83,72 @@ def _resolve_versao(
             detail=f"Sem RREO vigente para {cod_ibge} em {periodo}.",
         )
     return versao
+
+
+def build_linha_bruta(
+    session: Session, cod_ibge: str, periodo: str, origem_codigo: str,
+    *, as_of: datetime | None = None,
+) -> LinhaBrutaResponse:
+    """Fundo do drill da receita: as linhas do RREO Anexo 01 que produziram este nó.
+
+    O vínculo é direto e não precisa ser reconstruído: ``origem_codigo`` **é** o
+    ``cod_conta`` do SICONFI, o mesmo identificador estável que a entrega publica. A
+    conferência abaixo prova isso a cada chamada, em vez de confiar na premissa.
+    """
+    versao = _resolve_versao(session, cod_ibge, periodo, as_of)
+    fatos = _ensure_gold(session, cod_ibge, periodo, versao)
+    fato = next((f for f in fatos if f.origem_codigo == origem_codigo), None)
+    no = repository.get_origem(session, codigo=origem_codigo)
+    if fato is None:
+        raise AppError(
+            status=404,
+            title="Origem sem dado",
+            detail=(
+                f"A origem '{origem_codigo}' não tem linha no RREO de {cod_ibge} em "
+                f"{periodo}. Ela pode existir em outro período ou ter outro nome nesta entrega."
+            ),
+        )
+    linhas = [
+        LinhaRelatorio(
+            anexo=r.anexo, conta=r.conta, cod_conta=r.cod_conta, coluna=r.coluna,
+            valor=r.valor, linha_seq=r.linha_seq, medida=natureza.classificar_coluna(r.coluna),
+        )
+        for r in sorted(
+            (
+                r
+                for r in repository.read_anexo01(
+                    session, cod_ibge=cod_ibge, periodo=periodo, versao_entrega=versao
+                )
+                if r.cod_conta == origem_codigo
+            ),
+            key=lambda r: r.linha_seq or 0,
+        )
+    ]
+    # Contraprova: cada medida do mart tem de ser exatamente a soma das colunas que a
+    # alimentaram. Divergência aqui significa mart e entrega descolados — e é melhor o
+    # gestor ver os dois números do que só o agregado.
+    conferencia: dict[str, Decimal] = {}
+    for linha in linhas:
+        if linha.medida is not None:
+            conferencia[linha.medida] = conferencia.get(linha.medida, Decimal(0)) + (
+                linha.valor or Decimal(0)
+            )
+    return LinhaBrutaResponse(
+        cod_ibge=cod_ibge,
+        periodo=periodo,
+        codigo=origem_codigo,
+        descricao=no.descricao if no else (linhas[0].conta if linhas else None),
+        medidas={m: getattr(fato, m, None) for m in natureza.MEDIDAS},
+        linhas=linhas,
+        conferencia=conferencia,
+        observacao=(
+            None
+            if linhas
+            else "O nó existe no mart mas a entrega vigente não traz linhas com este "
+            "identificador — indício de retificação que mudou a nomenclatura."
+        ),
+        source_ref=_source_ref(periodo, versao),
+    )
 
 
 # --- materialização silver → gold ---

@@ -17,6 +17,7 @@ from app.modules.revenue.schemas import (
     ReceitaDetalhe,
 )
 from app.shared.envelope import DrillEnvelope
+from app.shared.linha_bruta import LinhaBrutaResponse
 from app.shared.scope import assert_ente_in_scope
 
 router = APIRouter(tags=["revenue"])
@@ -36,6 +37,24 @@ def detalhe_receita(
     """Cabeçalho + composição (raiz) + série + comparação com o exercício anterior."""
     assert_ente_in_scope(session, principal, cod_ibge)
     return service.build_detalhe(session, cod_ibge, periodo, as_of=as_of)
+
+
+@router.get("/entes/{cod_ibge}/receita/linha/{origem_codigo}", response_model=LinhaBrutaResponse)
+def linha_bruta_receita(
+    cod_ibge: str,
+    origem_codigo: str,
+    periodo: str = _PERIODO_Q,
+    as_of: datetime | None = _AS_OF_Q,
+    principal: Principal = Depends(require_capability("ver")),
+    session: Session = Depends(get_db),
+) -> LinhaBrutaResponse:
+    """Fundo do drill: as linhas do RREO Anexo 01 que produziram este nó de receita.
+
+    Último degrau navegável. Abaixo dele só existe o JSON bruto no bronze — e a página de
+    procedência mostra o endereço exato de onde ele veio.
+    """
+    assert_ente_in_scope(session, principal, cod_ibge)
+    return service.build_linha_bruta(session, cod_ibge, periodo, origem_codigo, as_of=as_of)
 
 
 @router.get("/entes/{cod_ibge}/receita/arvore", response_model=DrillEnvelope)

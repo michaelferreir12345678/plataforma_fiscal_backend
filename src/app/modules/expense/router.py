@@ -18,6 +18,7 @@ from app.modules.expense.schemas import (
     RigidezOut,
 )
 from app.shared.envelope import DrillEnvelope
+from app.shared.linha_bruta import LinhaBrutaResponse
 from app.shared.scope import assert_ente_in_scope
 
 router = APIRouter(tags=["expense"])
@@ -43,6 +44,27 @@ def detalhe_despesa(
     """Cabeçalho + composição (raiz do eixo) + série + comparação com o exercício anterior."""
     assert_ente_in_scope(session, principal, cod_ibge)
     return service.build_detalhe(session, cod_ibge, periodo, eixo=eixo, as_of=as_of)
+
+
+@router.get(
+    "/entes/{cod_ibge}/despesa/linha/{eixo}/{codigo}", response_model=LinhaBrutaResponse
+)
+def linha_bruta_despesa(
+    cod_ibge: str,
+    eixo: str,
+    codigo: str,
+    periodo: str = _PERIODO_Q,
+    as_of: datetime | None = _AS_OF_Q,
+    principal: Principal = Depends(require_capability("ver")),
+    session: Session = Depends(get_db),
+) -> LinhaBrutaResponse:
+    """Fundo do drill: as linhas do RREO que produziram este nó de despesa.
+
+    O eixo é parte do caminho porque o mesmo código pode existir nos dois — e a linha de
+    origem é outra: função vem do Anexo 02, natureza do Anexo 01.
+    """
+    assert_ente_in_scope(session, principal, cod_ibge)
+    return service.build_linha_bruta(session, cod_ibge, periodo, eixo, codigo, as_of=as_of)
 
 
 @router.get("/entes/{cod_ibge}/despesa/arvore", response_model=DrillEnvelope)

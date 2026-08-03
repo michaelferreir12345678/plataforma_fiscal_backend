@@ -50,6 +50,7 @@ from app.modules.indicators.schemas import SerieAjuste
 from app.shared.ausencia import ausencia_de_entrega
 from app.shared.envelope import DrillEnvelope, Measures
 from app.shared.hierarchy import HierarchyNode, build_drill_envelope
+from app.shared.linha_bruta import LinhaBrutaResponse, LinhaRelatorio
 from app.shared.source_ref import SourceRef
 
 _ANEXO_FUNCAO = "Anexo 02"
@@ -161,6 +162,7 @@ def _upsert_no(session: Session, model: type, no: cls.NoDespesa) -> None:
 def _upsert_fato_eixo(
     session: Session, cod_ibge: str, periodo: str, versao: str,
     eixo: str, codigo: str, medidas: Medidas,
+    linha_origem: str | None = None,
 ) -> None:
     repository.upsert_fato(
         session,
@@ -168,6 +170,7 @@ def _upsert_fato_eixo(
             "cod_ibge": cod_ibge, "periodo": periodo, "versao_entrega": versao,
             **_chave_eixo(eixo, codigo),
             **{m: medidas.get(m) for m in cls.MEDIDAS},
+            "linha_origem": linha_origem,
         },
     )
 
@@ -192,6 +195,7 @@ def _materializar_funcao(session: Session, cod_ibge: str, periodo: str, versao: 
         _upsert_no(session, model, no)
 
     agregado: dict[str, Medidas] = {}
+    origem: dict[str, str] = {}
     for r in rows:
         alvo = no_por_desc.get(r.conta or "")
         medida = cls.classificar_coluna(r.coluna)
@@ -199,8 +203,16 @@ def _materializar_funcao(session: Session, cod_ibge: str, periodo: str, versao: 
             continue
         m = agregado.setdefault(alvo.codigo, {})
         m[medida] = m.get(medida, Decimal(0)) + Decimal(r.valor or 0)
+        # A descrição **bruta**, guardada aqui porque é aqui que ainda se sabe qual linha
+        # alimentou qual nó. O código do nó é derivado do texto já limpo, e a mesma
+        # descrição se repete sob funções diferentes ("Administração Geral" existe em
+        # Saúde, Educação, Judiciária): refazer esse vínculo depois erraria a função.
+        origem.setdefault(alvo.codigo, r.conta or "")
     for codigo, medidas in agregado.items():
-        _upsert_fato_eixo(session, cod_ibge, periodo, versao, cls.EIXO_FUNCAO, codigo, medidas)
+        _upsert_fato_eixo(
+            session, cod_ibge, periodo, versao, cls.EIXO_FUNCAO, codigo, medidas,
+            linha_origem=origem.get(codigo),
+        )
 
 
 def _materializar_natureza(session: Session, cod_ibge: str, periodo: str, versao: str) -> None:
@@ -220,6 +232,7 @@ def _materializar_natureza(session: Session, cod_ibge: str, periodo: str, versao
         _upsert_no(session, model, no)
 
     agregado: dict[str, Medidas] = {}
+    origem: dict[str, str] = {}
     for r in rows:
         cc = r.cod_conta
         medida = cls.classificar_coluna(r.coluna)
@@ -227,8 +240,92 @@ def _materializar_natureza(session: Session, cod_ibge: str, periodo: str, versao
             continue
         m = agregado.setdefault(cc, {})
         m[medida] = m.get(medida, Decimal(0)) + Decimal(r.valor or 0)
+        origem.setdefault(cc, r.conta or "")
     for codigo, medidas in agregado.items():
-        _upsert_fato_eixo(session, cod_ibge, periodo, versao, cls.EIXO_NATUREZA, codigo, medidas)
+        _upsert_fato_eixo(
+            session, cod_ibge, periodo, versao, cls.EIXO_NATUREZA, codigo, medidas,
+            linha_origem=origem.get(codigo),
+        )
+
+
+def build_linha_bruta(
+    session: Session, cod_ibge: str, periodo: str, eixo: str, codigo: str,
+    *, as_of: datetime | None = None,
+) -> LinhaBrutaResponse:
+    """Fundo do drill da despesa: as linhas do RREO que produziram este nó.
+
+    O vínculo vem de ``fato_despesa.linha_origem``, gravado na materialização. Refazê-lo
+    aqui por descrição erraria: o código da função é derivado do texto já limpo
+    (``FU10 - Administração Geral`` → ``Administração Geral``) e a mesma descrição se
+    repete sob funções diferentes — 31 dos 105 nós de Fortaleza não fechavam por texto.
+    """
+    if eixo not in (cls.EIXO_FUNCAO, cls.EIXO_NATUREZA):
+        raise AppError(
+            status=422,
+            title="Eixo inválido",
+            detail=f"Eixo '{eixo}' não existe; use '{cls.EIXO_FUNCAO}' ou '{cls.EIXO_NATUREZA}'.",
+        )
+    versao = _resolve_versao(session, cod_ibge, periodo, as_of)
+    fatos = _ensure_gold(session, cod_ibge, periodo, versao)
+    fato = next(
+        (f for f in fatos if _fato_codigo(f, eixo) == codigo),
+        None,
+    )
+    if fato is None:
+        raise AppError(
+            status=404,
+            title="Nó sem dado",
+            detail=(
+                f"O nó '{codigo}' do eixo {eixo} não tem linha no RREO de {cod_ibge} em "
+                f"{periodo}."
+            ),
+        )
+    # A regra do drill tem de ser **a mesma da materialização**, eixo a eixo — senão o
+    # fundo não reconcilia com o topo e a prova vira uma segunda opinião:
+    #   função  → o agregado é por descrição (o código é derivado do texto), então o
+    #             vínculo é ``linha_origem``, gravado quando ainda se sabia qual era;
+    #   natureza→ o agregado é por ``cod_conta`` (o slug estável do STN). Casar por
+    #             descrição aqui somava também a seção intra-orçamentária, que tem o mesmo
+    #             texto e outro slug: 6,89 bi contra os 6,02 bi do mart.
+    todas = repository.read_anexo(
+        session, cod_ibge=cod_ibge, periodo=periodo, versao_entrega=versao,
+        marca=_MARCA_ANEXO[eixo],
+    )
+    if eixo == cls.EIXO_NATUREZA:
+        brutas = [r for r in todas if r.cod_conta == codigo]
+    else:
+        brutas = [
+            r for r in todas if fato.linha_origem is not None and r.conta == fato.linha_origem
+        ]
+    linhas = [
+        LinhaRelatorio(
+            anexo=r.anexo, conta=r.conta, cod_conta=r.cod_conta, coluna=r.coluna,
+            valor=r.valor, linha_seq=r.linha_seq, medida=cls.classificar_coluna(r.coluna),
+        )
+        for r in sorted(brutas, key=lambda r: r.linha_seq or 0)
+    ]
+    conferencia: dict[str, Decimal] = {}
+    for linha in linhas:
+        if linha.medida is not None:
+            conferencia[linha.medida] = conferencia.get(linha.medida, Decimal(0)) + (
+                linha.valor or Decimal(0)
+            )
+    return LinhaBrutaResponse(
+        cod_ibge=cod_ibge,
+        periodo=periodo,
+        codigo=codigo,
+        descricao=fato.linha_origem,
+        medidas={m: getattr(fato, m, None) for m in cls.MEDIDAS},
+        linhas=linhas,
+        conferencia=conferencia,
+        observacao=(
+            None
+            if linhas
+            else "O nó foi materializado antes de a plataforma passar a registrar a linha "
+            "de origem. Rematerialize o período para habilitar o drill até a linha."
+        ),
+        source_ref=_source_ref(periodo, versao, eixo),
+    )
 
 
 def materializar_despesa(

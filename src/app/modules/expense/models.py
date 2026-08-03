@@ -79,3 +79,8 @@ class FatoDespesa(Base):
     pago: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
     inscrito_rap: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
     versao_entrega: Mapped[str] = mapped_column(Text, nullable=False)
+    #: Descrição **bruta** da linha do RREO que alimentou este nó — o vínculo do drill
+    #: até a linha. Gravada na materialização porque é lá que ainda se sabe qual linha
+    #: virou qual nó: o código da função é derivado do texto já limpo, e a mesma
+    #: descrição se repete sob funções diferentes.
+    linha_origem: Mapped[str | None] = mapped_column(Text, nullable=True)
