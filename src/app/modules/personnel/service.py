@@ -39,6 +39,7 @@ from app.modules.personnel.schemas import (
     PorPoderOut,
     SeriePessoalItem,
 )
+from app.shared import periodo as periodo_util
 from app.shared.ausencia import ausencia_de_entrega
 from app.shared.envelope import DrillEnvelope, Measures
 from app.shared.hierarchy import HierarchyNode, build_drill_envelope
@@ -60,11 +61,13 @@ def _source_ref(periodo: str, versao: str) -> SourceRef:
 
 
 def _rreo_periodo(periodo: str) -> str | None:
-    """Período RREO correspondente (base da RCL/limite). Q1→B2, Q2→B4, Q3→B6."""
-    m = _QUAD_RE.match(periodo)
-    if m is not None:
-        return f"{m.group(1)}-B{2 * int(m.group(2))}"
-    return periodo if _BIM_RE.match(periodo) else None
+    """Período RREO correspondente (base da RCL/limite). Regra canônica em §6.6.
+
+    A cópia local cobria só quadrimestre e devolvia ``None`` para o RGF semestral — o de
+    município com menos de 50 mil habitantes —, deixando o limite de pessoal sem
+    denominador justamente na faixa mais numerosa do país.
+    """
+    return periodo_util.em_bimestre(periodo)
 
 
 def _resolve_versao(session: Session, cod_ibge: str, periodo: str, as_of: datetime | None) -> str:

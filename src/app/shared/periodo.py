@@ -55,6 +55,40 @@ def mesmo_periodo_exercicio_anterior(periodo: str) -> str | None:
     return formatar(ano - 1, tipo, num)
 
 
+def em_bimestre(periodo: str) -> str | None:
+    """Converte um período fiscal ao **bimestre do RREO** que o encerra.
+
+    ``2025-Q3`` → ``2025-B6``; ``2025-S1`` → ``2025-B3``; ``2025-B4`` → ele mesmo.
+
+    É a tradução mais usada da plataforma e estava reescrita em três lugares —
+    ``cash_rap``, ``personnel`` e a docstring de ``debt`` —, todas restritas a
+    quadrimestre. Município com menos de 50 mil habitantes publica RGF **semestral**
+    (LRF, art. 63) e caía fora das três: o cálculo simplesmente não achava a RCL.
+
+    Existe porque quase tudo em ``gold.mart_indicador`` é ancorado no bimestre — o
+    denominador (RCL) vem do RREO Anexo 03. Pedir um indicador em ``2025-Q3`` não
+    encontra nada, e a leitura natural do erro é "falta dado", quando o que falta é a
+    tradução: o período existe, com outro nome.
+
+    A regra é de calendário, não de convenção: o quadrimestre *n* fecha no mês ``4n`` e o
+    bimestre ``2n`` fecha no mesmo mês; o semestre *n* fecha em ``6n``, como o bimestre
+    ``3n``. Anual não tem bimestre correspondente e devolve ``None``.
+    """
+    try:
+        ano, tipo, num = parse(periodo)
+    except ValueError:
+        return None
+    if tipo is None or num is None:
+        return None
+    if tipo == "B":
+        return periodo
+    fator = {"Q": 2, "S": 3}.get(tipo)
+    if fator is None:  # mensal não fecha bimestre por si só
+        return None
+    bimestre = fator * num
+    return formatar(ano, "B", bimestre) if 1 <= bimestre <= POR_ANO["B"] else None
+
+
 def ordenar_chave(periodo: str) -> tuple[int, int]:
     """Chave de ordenação cronológica (ano, posição no ano). Inválido vai para o fim."""
     try:

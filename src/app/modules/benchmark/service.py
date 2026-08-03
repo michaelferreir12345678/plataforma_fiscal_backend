@@ -37,6 +37,7 @@ from app.modules.catalog.models import DimEnte
 from app.modules.indicators import rotulos
 from app.modules.indicators.models import MartIndicador
 from app.modules.ingestion.models import DimEntrega
+from app.shared import periodo as periodo_util
 from app.shared.source_ref import SourceRef, composite_version_key
 
 _CRITERIO_ORDEM = {"porte": 0, "regiao": 1, "pib": 2}
@@ -365,6 +366,23 @@ def _resolver_coorte(
     return selected
 
 
+def _normalizar_periodo(periodo: str | None) -> str | None:
+    """Traduz o período pedido para o vocabulário de ``gold.mart_indicador``.
+
+    O mart é ancorado no **bimestre do RREO**: o denominador de quase todo indicador é a
+    RCL, que vem do Anexo 03. Mas as telas de pessoal, dívida e caixa trabalham em
+    **quadrimestre do RGF** e passavam ``2025-Q3`` adiante — período que aquele indicador
+    nunca terá. O erro que saía era "Sem 'divida_consolidada_liquida' para 23 em 2025-Q3",
+    lido como falta de dado quando o dado existe sob ``2025-B6``.
+
+    Traduzir aqui, e não em cada chamador, é o que impede a regra de calendário fiscal de
+    ser reescrita — já havia três cópias dela, todas cegas ao RGF semestral.
+    """
+    if periodo is None:
+        return None
+    return periodo_util.em_bimestre(periodo) or periodo
+
+
 def _resolver_periodo_indicador(
     session: Session,
     *,
@@ -373,6 +391,7 @@ def _resolver_periodo_indicador(
     periodo: str | None,
     as_of: datetime | None,
 ) -> tuple[str, str]:
+    periodo = _normalizar_periodo(periodo)
     if as_of is not None:
         candidates = repository.list_periodos_indicadores_ente(
             session, cod_ibge=cod_ibge

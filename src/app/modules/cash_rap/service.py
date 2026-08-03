@@ -41,6 +41,7 @@ from app.modules.catalog.models import DimEnte
 from app.modules.indicators import serie_ajuste
 from app.modules.indicators.schemas import SerieAjuste
 from app.modules.ingestion import repository as ingestion_repo
+from app.shared import periodo as periodo_util
 from app.shared.ausencia import ausencia_de_entrega
 from app.shared.envelope import DrillEnvelope, Measures
 from app.shared.hierarchy import HierarchyNode, build_drill_envelope
@@ -83,9 +84,13 @@ def _ano_quad(periodo: str) -> tuple[int, int]:
 
 
 def rreo_periodo_de_rgf(periodo: str) -> str | None:
-    """RREO bimestral correspondente ao quadrimestre RGF (Q1→B2, Q2→B4, Q3→B6)."""
-    m = _QUAD_RE.match(periodo)
-    return f"{m.group(1)}-B{2 * int(m.group(2))}" if m else None
+    """RREO bimestral correspondente ao período RGF. Delega à regra canônica (§6.6).
+
+    Era uma cópia local restrita a quadrimestre; o RGF **semestral** de município com menos
+    de 50 mil habitantes (LRF, art. 63) caía em ``None`` e o expurgo de RPNP sem lastro
+    simplesmente não achava o RGF.
+    """
+    return periodo_util.em_bimestre(periodo)
 
 
 def rgf_periodo_de_rreo(periodo_rreo: str) -> str | None:
