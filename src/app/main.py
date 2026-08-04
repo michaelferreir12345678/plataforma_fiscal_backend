@@ -14,6 +14,7 @@ from app.modules.assistant.router import router as assistant_router
 from app.modules.benchmark.router import router as benchmark_router
 from app.modules.cash_rap.router import router as cash_rap_router
 from app.modules.catalog.router import router as catalog_router
+from app.modules.coverage.router import router as coverage_router
 from app.modules.dashboard.carteira_router import router as carteira_router
 from app.modules.dashboard.estadual_router import geo_router as geo_router
 from app.modules.dashboard.estadual_router import router as estadual_router
@@ -30,6 +31,7 @@ from app.modules.limits.router import router as limits_router
 from app.modules.personnel.router import router as personnel_router
 from app.modules.platform.router import router as platform_router
 from app.modules.quality.router import router as quality_router
+from app.modules.reconciliation.router import router as reconciliation_router
 from app.modules.reports.router import router as reports_router
 from app.modules.result.router import router as result_router
 from app.modules.revenue.router import router as revenue_router
@@ -117,6 +119,8 @@ def create_app() -> FastAPI:
     app.include_router(geo_router)
     app.include_router(quality_router)
     app.include_router(platform_router)
+    app.include_router(coverage_router)
+    app.include_router(reconciliation_router)
 
     @app.on_event("startup")
     def recover_report_jobs() -> None:
