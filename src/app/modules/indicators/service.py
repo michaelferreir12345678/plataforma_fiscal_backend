@@ -54,6 +54,23 @@ def calcular_rcl(
             session, cod_ibge=cod_ibge, periodo=periodo, versao_entrega=versao
         )
     ]
+    if not linhas:
+        # **A entrega existe, o Anexo 03 não.** Sem esta guarda, `_calcular_rcl_puro([])`
+        # devolvia zeros e a materialização gravava `rcl_12m = 0` — ausência virando
+        # número, no denominador de quase todo limite da LRF. Eram 32 linhas em 8 entes,
+        # e a reconciliação com o RGF as expôs: o ente publicava R$ 57 milhões onde a
+        # plataforma dizia zero.
+        #
+        # Recusar é a única saída honesta: uma RCL zero não existe na realidade fiscal.
+        raise AppError(
+            status=404,
+            title="RREO sem o Anexo 03",
+            detail=(
+                f"A entrega {versao} do RREO de {cod_ibge} em {periodo} não traz o Anexo 03 "
+                f"(Receita Corrente Líquida). Sem ele não há RCL a apurar — e apurar zero "
+                f"seria afirmar que o ente não arrecadou."
+            ),
+        )
     resultado = _calcular_rcl_puro(linhas)
     memoria: dict[str, Any] = {
         "receita_corrente": str(resultado.receita_corrente),
