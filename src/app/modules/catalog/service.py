@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
 from app.modules.catalog import repository
-from app.modules.catalog.models import ESFERA_ESTADUAL, ESFERA_MUNICIPAL, DimEnte
+from app.modules.catalog.models import ESFERA_ESTADUAL, ESFERA_FEDERAL, ESFERA_MUNICIPAL, DimEnte
 from app.modules.catalog.schemas import (
     EnteBusca,
     EnteOut,
@@ -151,13 +151,32 @@ def seed_dimensoes(session: Session, *, anos: list[int] | None = None) -> None:
 
 
 def _normalizar_esfera(valor: str | None) -> str | None:
+    """Esfera do SICONFI → vocabulário da plataforma.
+
+    A fonte publica **quatro** esferas — ``M`` (5.570 municípios), ``E`` (26 estados),
+    ``D`` (Distrito Federal) e ``U`` (União). O mapeamento cobria só as duas primeiras, e
+    as outras duas caíam em ``None``: a União e o DF ficavam **sem esfera**, violando a
+    invariante nº 1 do domínio — nenhum limite da LRF se aplica sem ela.
+
+    **DF → estadual.** O Distrito Federal acumula competências estaduais e municipais
+    (CF, art. 32, §1º), e o teto de pessoal que lhe cabe é o da esfera estadual: 49% da
+    RCL no Executivo (LRF, art. 20, II). A classificação é corroborada pelo próprio
+    Tesouro, que o publica na CAPAG **dos estados** — são 27 entes ali, os 26 estados
+    mais o DF.
+
+    **União → federal.** A plataforma não publica limites federais e não atende a União.
+    Marcar a esfera é o que separa "conhecida e sem limite cadastrado" de "desconhecida":
+    a primeira é um fato, a segunda é uma falha de catálogo.
+    """
     if not valor:
         return None
     v = valor.strip().lower()
     if v in ("m", "municipal"):
         return ESFERA_MUNICIPAL
-    if v in ("e", "estadual"):
+    if v in ("e", "estadual", "d", "distrital"):
         return ESFERA_ESTADUAL
+    if v in ("u", "uniao", "união", "federal"):
+        return ESFERA_FEDERAL
     return None
 
 

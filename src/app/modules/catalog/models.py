@@ -13,6 +13,10 @@ from app.core.db import Base
 
 ESFERA_MUNICIPAL = "municipal"
 ESFERA_ESTADUAL = "estadual"
+#: União. Existe para que a esfera seja **conhecida e inaplicável**, e não desconhecida:
+#: a plataforma não publica limites federais, e `NULL` faz o cálculo dizer "esfera
+#: desconhecida" para um ente cuja esfera a fonte declara com todas as letras.
+ESFERA_FEDERAL = "federal"
 
 
 class DimEnte(Base):
