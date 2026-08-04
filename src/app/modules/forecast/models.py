@@ -83,3 +83,54 @@ class Cenario(Base):
     criado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    atualizado_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    #: Arquivar em vez de apagar: um cenário que embasou decisão não deve sumir do
+    #: histórico porque alguém limpou a lista. Some da tela, permanece auditável.
+    arquivado_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class CenarioVersao(Base):
+    """op.cenario_versao — cada salvamento do cenário, com a procedência do dado.
+
+    Editar um cenário **cria versão**, não sobrescreve: cenário é peça de decisão, e "o
+    que eu levei à reunião de agosto" precisa sobreviver ao ajuste de outubro.
+
+    As três colunas de procedência (``as_of``, ``versoes_entrega``,
+    ``premissas_observadas``) são o que separa *reproduzir* de *recalcular*. A última é a
+    menos óbvia: "aceitei o IPCA observado" muda de significado quando o observado muda, e
+    sem gravar o valor vigente à época a premissa registrada não reproduz nada.
+    """
+
+    __tablename__ = "cenario_versao"
+    __table_args__ = (
+        UniqueConstraint("cenario_id", "versao", name="uq_cenario_versao"),
+        {"schema": "op"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organizacao.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    cenario_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("cenario.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    versao: Mapped[int] = mapped_column(Integer, nullable=False)
+    nome: Mapped[str] = mapped_column(Text, nullable=False)
+    parametros: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    resultado: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    as_of: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    versoes_entrega: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    premissas_observadas: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    modelo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    horizonte: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    nota: Mapped[str | None] = mapped_column(Text, nullable=True)
+    criado_por: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("usuario.id", ondelete="SET NULL"), nullable=True
+    )
+    criado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

@@ -20,7 +20,7 @@ from app.core.deps import Principal
 from app.core.errors import AppError
 from app.modules.catalog import repository as catalog_repo
 from app.modules.catalog import service as catalog_service
-from app.modules.forecast import espaco_fiscal, premissas, repository, sanidade
+from app.modules.forecast import cenarios, espaco_fiscal, premissas, repository, sanidade
 from app.modules.forecast.algorithms import (
     ModeloInsuficiente,
     ResultadoModelo,
@@ -721,34 +721,38 @@ def simular_cenario(
 
     persistido = False
     cenario_id: str | None = None
+    versao_salva: int | None = None
     if req.salvar:
-        if principal.org_id is None:
-            raise AppError(
-                status=403,
-                title="Sem organização",
-                detail="Salvar cenário exige organização ativa.",
-            )
-        salvo = repository.criar_cenario(
+        # A gravação vive em `cenarios.salvar` porque é lá que a **procedência** é
+        # capturada. Gravar por outro caminho produziria versão sem saber sobre qual
+        # entrega o cálculo rodou — e uma versão assim não reproduz nada.
+        alvo = uuid.UUID(req.cenario_id) if req.cenario_id else None
+        salvo, versao = cenarios.salvar(
             session,
-            {
-                "org_id": principal.org_id,
-                "ente": cod_ibge,
-                "indicador": indicador,
-                "nome": req.nome,
-                "parametros": req.model_dump(exclude_none=True),
-                "resultado": {
-                    "projecao": [p.model_dump(mode="json") for p in cenario.projecao],
-                    "cruzamento": cenario.cruzamento.model_dump(mode="json"),
-                },
-                "criado_por": principal.usuario_id,
+            principal,
+            cod_ibge=cod_ibge,
+            indicador=indicador,
+            req=req,
+            resultado={
+                "projecao": [p.model_dump(mode="json") for p in cenario.projecao],
+                "cruzamento": cenario.cruzamento.model_dump(mode="json"),
+                "espaco_fiscal": (
+                    cenario.espaco_fiscal.model_dump(mode="json")
+                    if cenario.espaco_fiscal
+                    else None
+                ),
             },
+            modelo=base.modelo,
+            cenario_id=alvo,
         )
         persistido = True
         cenario_id = str(salvo.id)
+        versao_salva = versao.versao
 
     return CenarioSimularResponse(
         persistido=persistido,
         cenario_id=cenario_id,
+        versao=versao_salva,
         cod_ibge=cod_ibge,
         indicador=indicador,
         horizonte=req.horizonte,

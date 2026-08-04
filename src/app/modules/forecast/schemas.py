@@ -7,6 +7,7 @@ Invariante de produto: **toda** projeção carrega intervalo de confiança
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -204,6 +205,11 @@ class CenarioSimularRequest(BaseModel):
         default=None, description="Crescimento da RCL por período (%) — afeta % RCL e mínimos."
     )
     salvar: bool = Field(default=False, description="Persistir o cenário em op.cenario.")
+    #: Salvar sobre um cenário existente **cria versão** — não sobrescreve. Ausente, cria
+    #: um cenário novo. A distinção é o que preserva "o que eu levei à reunião de agosto".
+    cenario_id: str | None = Field(
+        default=None, description="Cenário a versionar; ausente cria um novo."
+    )
 
 
 class LimiteImpacto(BaseModel):
@@ -220,6 +226,8 @@ class LimiteImpacto(BaseModel):
 class CenarioSimularResponse(BaseModel):
     persistido: bool
     cenario_id: str | None = None
+    #: Número da versão criada — salvar sobre um cenário existente incrementa, não substitui.
+    versao: int | None = None
     cod_ibge: str
     indicador: str
     horizonte: int
@@ -238,3 +246,125 @@ class CenarioSalvo(BaseModel):
     nome: str
     parametros: dict
     criado_em: datetime
+
+
+# --------------------------------------------------------------------------- #
+# Cenários salvos (Sprint C2) — versão, procedência, comparação
+# --------------------------------------------------------------------------- #
+class ProcedenciaCenario(BaseModel):
+    """Sobre qual dado a versão foi calculada.
+
+    É o que separa **reproduzir** de **recalcular**. Sem isto, reabrir um cenário de agosto
+    em outubro mostra o resultado congelado com a mesma cara de um cálculo corrente — e as
+    mesmas premissas, hoje, dariam outro número.
+    """
+
+    as_of: datetime | None = None
+    #: Entregas que alimentaram a série histórica: ``{"2025-B6": "1", ...}``.
+    versoes_entrega: dict[str, Any] = Field(default_factory=dict)
+    #: Premissas macro vigentes quando o cenário foi salvo. "Aceitei o IPCA observado" muda
+    #: de significado quando o observado muda; sem o valor de então, não se reproduz nada.
+    premissas_observadas: dict[str, Any] = Field(default_factory=dict)
+    registrada: bool = Field(
+        default=True,
+        description="Falso para versões migradas do formato anterior, sem procedência.",
+    )
+
+
+class VersaoCenario(BaseModel):
+    versao: int
+    nome: str
+    parametros: dict
+    modelo: str | None = None
+    horizonte: int | None = None
+    nota: str | None = None
+    procedencia: ProcedenciaCenario
+    criado_em: datetime
+
+
+class CenarioDetalhe(BaseModel):
+    """Cabeçalho do cenário mais o histórico de versões."""
+
+    id: str
+    ente: str
+    indicador: str
+    nome: str
+    versao_atual: int
+    arquivado: bool = False
+    criado_em: datetime
+    atualizado_em: datetime | None = None
+    versoes: list[VersaoCenario] = Field(default_factory=list)
+
+
+class DivergenciaCenario(BaseModel):
+    """O que mudou entre o resultado guardado e o mesmo cálculo com o dado de hoje.
+
+    ``diverge=False`` com ``comparavel=False`` não é "está tudo igual": é "não deu para
+    comparar". Os dois casos produziriam a mesma tela se colapsados num booleano só.
+    """
+
+    comparavel: bool
+    diverge: bool = False
+    motivo: str | None = None
+    valor_guardado: Decimal | None = None
+    valor_recalculado: Decimal | None = None
+    delta: Decimal | None = None
+    entregas_novas: list[str] = Field(default_factory=list)
+
+
+class CenarioAbertoResponse(BaseModel):
+    """Cenário reaberto: o que foi decidido, o que o dado diz hoje, e a diferença."""
+
+    cenario: CenarioDetalhe
+    versao: VersaoCenario
+    #: Exatamente o que foi salvo — a peça que embasou a decisão.
+    guardado: dict | None = None
+    #: O mesmo cenário rodado agora. ``None`` quando o recálculo não é possível.
+    recalculado: CenarioSimularResponse | None = None
+    divergencia: DivergenciaCenario
+
+
+class CenarioComparadoItem(BaseModel):
+    cenario_id: str
+    nome: str
+    versao: int
+    encontrado: bool = True
+    motivo_ausencia: str | None = None
+    indicador: str | None = None
+    unidade: str | None = None
+    modelo: str | None = None
+    parametros: dict = Field(default_factory=dict)
+    #: Série projetada, período a período, para o eixo comum.
+    projecao: list[PontoProjecao] = Field(default_factory=list)
+    valor_final: Decimal | None = None
+    espaco_fiscal: EspacoFiscalOut | None = None
+    criado_em: datetime | None = None
+
+
+class ComparacaoCenariosResponse(BaseModel):
+    """Cenários lado a lado no mesmo eixo temporal.
+
+    ``periodos`` é a **interseção** dos horizontes, não a união: comparar um cenário de 4
+    períodos com um de 12 num eixo de 12 deixaria o primeiro terminando no meio do gráfico,
+    e a leitura natural — "este cenário cai no fim" — seria falsa.
+    """
+
+    cod_ibge: str
+    indicador: str | None = None
+    periodos: list[str] = Field(default_factory=list)
+    itens: list[CenarioComparadoItem] = Field(default_factory=list)
+    aviso: str | None = None
+
+
+class CenarioRenomearRequest(BaseModel):
+    nome: str = Field(min_length=1, max_length=120)
+
+
+class ComparacaoCenariosRequest(BaseModel):
+    """Cenários a comparar.
+
+    O limite de 6 não é arbitrário: acima disso o gráfico deixa de ser legível e a paleta
+    categórica acaba — comparar dez curvas é não comparar nenhuma.
+    """
+
+    cenario_ids: list[uuid.UUID] = Field(min_length=2, max_length=6)

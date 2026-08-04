@@ -94,6 +94,39 @@ docker compose -f docker-compose.prod.yml exec api python -m scripts.validacao_f
 A validação fiscal sai com **código 1** se algum número da plataforma divergir do
 demonstrativo oficial sem causa conhecida. Um deploy que a quebra não vai ao ar.
 
+### 3.1 O frontend é um passo separado — e tem uma armadilha
+
+O frontend não sobe por `docker compose`: é build estático servido pelo nginx a partir de
+**`/var/www/plataforma`**, que **não** é onde o repositório vive. Buildar em
+`/opt/plataforma/frontend/dist` e parar aí deixa o site inteiro na versão anterior, sem
+erro nenhum — os containers ficam saudáveis, o `/health` responde 200 e o navegador segue
+recebendo o bundle velho.
+
+```bash
+cd /opt/plataforma/frontend && git pull --ff-only
+# não há node na instância; o build roda em container
+docker run --rm -v /opt/plataforma/frontend:/app -w /app node:20-alpine     sh -c "npm ci --silent && npm run build"
+# **o passo que falta com facilidade:** publicar na raiz que o nginx serve
+rsync -a --delete /opt/plataforma/frontend/dist/ /var/www/plataforma/
+chown -R www-data:www-data /var/www/plataforma
+```
+
+**Verifique o que o servidor entrega, não o que está em disco.** `ls dist/assets` prova que
+o build aconteceu — não que ele está no ar. O nome do bundle tem hash, então a conferência
+é direta:
+
+```bash
+curl -s http://localhost/ | grep -o 'index-[A-Za-z0-9_-]*\.js'   # o que o nginx serve
+grep -o 'index-[A-Za-z0-9_-]*\.js' /var/www/plataforma/index.html  # o que está publicado
+```
+
+Os dois têm de coincidir, e coincidir com o build recém-gerado. Se quiser ir além, procure
+no bundle servido uma marca da mudança que acabou de subir:
+
+```bash
+curl -s http://localhost/assets/index-<hash>.js | grep -c 'texto novo da sprint'
+```
+
 ---
 
 ## 4. Backup e restore
