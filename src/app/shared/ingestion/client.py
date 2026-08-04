@@ -187,14 +187,38 @@ class JsonArrayRecordsClient(_BaseHttpClient):
 
 
 class JsonEnvelopeRecordsClient(_BaseHttpClient):
-    """Cliente para APIs que envelopam as linhas em ``registros``."""
+    """Cliente para APIs que envelopam as linhas em ``registros``, **com paginação**.
+
+    A API de transferências constitucionais devolve **10 registros por página** e sinaliza
+    a continuação em ``next``. Sem paginar, uma consulta por estado trazia os 10 primeiros
+    municípios em ordem alfabética e nada denunciava o corte: o Ceará ingeria Abaiara a
+    Aquiraz e os outros 174 municípios simplesmente não existiam. Cinco por cento do dado,
+    com aparência de cem.
+
+    O limite de páginas existe para que um ``next`` que nunca esvazia — servidor com
+    defeito, laço no cursor — pare em vez de girar para sempre.
+    """
+
+    #: Teto de segurança: 500 páginas × 10 registros cobre com folga a maior UF do país.
+    MAX_PAGINAS = 500
 
     def get_records(self, path: str, params: dict[str, Any]) -> list[dict[str, Any]]:
-        data = self._get_json(path, params)
-        if not isinstance(data, dict):
-            return []
-        records = data.get("registros", [])
-        return list(records) if isinstance(records, list) else []
+        acumulado: list[dict[str, Any]] = []
+        pagina = 1
+        while pagina <= self.MAX_PAGINAS:
+            data = self._get_json(path, {**params, "page": pagina} if pagina > 1 else params)
+            if not isinstance(data, dict):
+                break
+            registros = data.get("registros", [])
+            if not isinstance(registros, list) or not registros:
+                break
+            acumulado.extend(registros)
+            # ``next`` vazio (ou ausente) é o fim. Confiar no tamanho da página seria
+            # frágil: a última página cheia pararia o laço uma página cedo demais.
+            if not data.get("next"):
+                break
+            pagina += 1
+        return acumulado
 
 
 class ODataRecordsClient(_BaseHttpClient):
