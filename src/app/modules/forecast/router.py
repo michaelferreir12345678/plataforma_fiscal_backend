@@ -15,6 +15,7 @@ from app.modules.forecast.schemas import (
     CenarioSimularRequest,
     CenarioSimularResponse,
     ComparacaoModelosResponse,
+    PremissasResponse,
     ProjecaoResponse,
 )
 from app.shared.scope import assert_ente_in_scope
@@ -58,6 +59,21 @@ def comparacao_modelos(
     return service.comparar_modelos(
         session, cod_ibge, indicador, horizonte=horizonte, as_of=as_of
     )
+
+
+@router.get("/entes/{cod_ibge}/cenario/premissas", response_model=PremissasResponse)
+def premissas_cenario(
+    cod_ibge: str,
+    principal: Principal = Depends(require_capability("ver")),
+    session: Session = Depends(get_db),
+) -> PremissasResponse:
+    """As premissas macro **observadas**, com data e fonte, para o cenário abrir ancorado.
+
+    Sem isto a tela sugeria valores de fábrica indistinguíveis de valores medidos — e um
+    cenário construído sobre premissa inventada é uma conclusão inventada.
+    """
+    assert_ente_in_scope(session, principal, cod_ibge)
+    return service.premissas_observadas(session, cod_ibge)
 
 
 @router.post("/entes/{cod_ibge}/cenario/simular", response_model=CenarioSimularResponse)

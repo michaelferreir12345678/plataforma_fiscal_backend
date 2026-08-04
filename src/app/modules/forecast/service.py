@@ -13,13 +13,14 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.deps import Principal
 from app.core.errors import AppError
 from app.modules.catalog import repository as catalog_repo
 from app.modules.catalog import service as catalog_service
-from app.modules.forecast import repository
+from app.modules.forecast import espaco_fiscal, premissas, repository, sanidade
 from app.modules.forecast.algorithms import (
     ModeloInsuficiente,
     ResultadoModelo,
@@ -28,17 +29,22 @@ from app.modules.forecast.algorithms import (
     regressao_exogenas,
 )
 from app.modules.forecast.periodos import horizonte_periodos
+from app.modules.forecast.premissas import anual_para_mensal
 from app.modules.forecast.schemas import (
     CenarioSalvo,
     CenarioSimularRequest,
     CenarioSimularResponse,
     ComparacaoModelosResponse,
     CruzamentoLimite,
+    EspacoFiscalOut,
     LimiteImpacto,
     ModeloComparado,
     PontoHistorico,
     PontoProjecao,
+    PremissaObservada,
+    PremissasResponse,
     ProjecaoResponse,
+    ReconducaoOut,
 )
 from app.modules.forecast.series import (
     UNIDADE_PCT_RCL,
@@ -49,6 +55,7 @@ from app.modules.forecast.series import (
     indicador_config,
 )
 from app.modules.indicators.limites import LimiteLegal, classificar_faixa
+from app.modules.indicators.models import FatoRcl
 from app.shared.source_ref import SourceRef
 
 # Preferência quando o modelo não é forçado (do mais informativo ao mais simples).
@@ -221,6 +228,75 @@ def _persistir(
         )
 
 
+def _base_em_reais(
+    session: Session, cod_ibge: str, serie: SerieHistorica
+) -> tuple[Decimal | None, str | None]:
+    """Base de conversão da margem percentual para reais.
+
+    Para indicadores em % da RCL, a base é a **RCL do último período observado** — não a
+    projetada. Projetar o denominador junto com o numerador embutiria duas incertezas no
+    mesmo número e faria a margem oscilar por razão que o gestor não consegue atribuir. A
+    tela diz de qual período a base saiu; quem quiser o efeito de uma RCL diferente usa o
+    cenário, onde essa premissa é explícita.
+
+    Devolve ``None`` quando não há RCL — e aí a margem existe só em pontos percentuais, o
+    que é honesto. Zero aqui anunciaria margem nenhuma a quem talvez tenha bastante.
+    """
+    if serie.unidade != UNIDADE_PCT_RCL:
+        return None, None
+    ultimo = serie.pontos[-1].periodo
+    valor = session.scalar(
+        select(FatoRcl.rcl_12m)
+        .where(FatoRcl.cod_ibge == cod_ibge, FatoRcl.periodo_ref == ultimo)
+        .order_by(FatoRcl.versao_entrega.desc())
+        .limit(1)
+    )
+    if valor is not None:
+        return Decimal(valor), ultimo
+    # Sem o período exato, a RCL mais recente do ente ainda é uma base defensável — e
+    # melhor que nenhuma —, desde que a resposta **diga qual período ela é**. Devolver a
+    # base sem o período faria uma conversão de 2022 parecer contemporânea.
+    linha = session.execute(
+        select(FatoRcl.rcl_12m, FatoRcl.periodo_ref)
+        .where(FatoRcl.cod_ibge == cod_ibge, FatoRcl.rcl_12m > 0)
+        .order_by(FatoRcl.periodo_ref.desc())
+        .limit(1)
+    ).first()
+    return (Decimal(linha[0]), linha[1]) if linha else (None, None)
+
+
+def _espaco_e_reconducao(
+    session: Session,
+    cod_ibge: str,
+    serie: SerieHistorica,
+    esfera: str,
+    pontos: list[PontoProjecao],
+) -> tuple[EspacoFiscalOut | None, ReconducaoOut | None]:
+    """Margem até o limite na ponta do horizonte, e o que a lei exige se ela for negativa.
+
+    A projeção já respondia *quando* o limite seria cruzado. Faltava *quanto ainda cabe* —
+    e é essa a metade que vira decisão administrativa, porque empenho se assina em reais.
+    """
+    limite = _limite_do_indicador(session, serie, esfera)
+    if limite is None or not pontos:
+        return None, None
+    final = pontos[-1]
+    base_rs, base_periodo = _base_em_reais(session, cod_ibge, serie)
+    espaco = espaco_fiscal.calcular(
+        limite,
+        final.valor_previsto,
+        base_rs=base_rs,
+        base_nome="rcl",
+        base_periodo=base_periodo,
+        periodo_alvo=final.periodo_alvo,
+    )
+    esforco = espaco_fiscal.esforco_reconducao(espaco)
+    return (
+        EspacoFiscalOut(**espaco.__dict__),
+        ReconducaoOut(**esforco.__dict__),
+    )
+
+
 def _montar_resposta(
     *,
     cod_ibge: str,
@@ -233,6 +309,9 @@ def _montar_resposta(
     as_of: datetime | None,
     gerado_em: datetime | None,
     exog: ExogenasAlinhadas,
+    espaco: EspacoFiscalOut | None = None,
+    reconducao: ReconducaoOut | None = None,
+    saneamento: dict | None = None,
 ) -> ProjecaoResponse:
     ultimo = serie.pontos[-1]
     source_ref = SourceRef(**ultimo.source_ref)
@@ -242,6 +321,9 @@ def _montar_resposta(
         "exogenas_fontes": exog.fontes,
         "periodos_historicos": serie.periodos,
         "aviso": "Projeção estatística; não é garantia de execução. IC a 95%.",
+        # Nunca omitir que o treino ignorou observação: quem lê a projeção precisa saber
+        # que ela ignorou, qual, e por quê.
+        "saneamento": saneamento or {"pontos_excluidos": 0},
     }
     return ProjecaoResponse(
         cod_ibge=cod_ibge,
@@ -257,6 +339,8 @@ def _montar_resposta(
         historico=_historico(serie),
         projecao=pontos,
         cruzamento=cruzamento,
+        espaco_fiscal=espaco,
+        reconducao=reconducao,
         memoria=memoria,
         source_ref=source_ref,
     )
@@ -290,11 +374,17 @@ def build_projecao(
             detail=f"Sem histórico suficiente de '{indicador}' para {cod_ibge} (mínimo 2).",
         )
 
-    periodos_futuro = horizonte_periodos(serie.periodos[-1], horizonte)
+    # **A série é saneada antes do treino.** Um ponto impossível — 324,49% da RCL em
+    # despesa de pessoal, no acervo, por RCL corrompida na entrega — é consumido pelo
+    # modelo sem reclamação e devolvido como projeção plausível. Excluir e dizer é a
+    # única saída honesta: recusar tudo por causa de um ponto deixaria o gestor sem
+    # resposta onde há onze observações boas.
+    saneada = sanidade.sanear(serie.periodos, serie.valores, unidade=serie.unidade)
+    periodos_futuro = horizonte_periodos(saneada.periodos[-1], horizonte)
     exog = exog_override or alinhar_exogenas(
-        session, cod_ibge, serie.periodos, periodos_futuro
+        session, cod_ibge, saneada.periodos, periodos_futuro
     )
-    resultados = _rodar_modelos(serie.valores, exog, horizonte)
+    resultados = _rodar_modelos(saneada.valores, exog, horizonte)
 
     if modelo is not None and modelo not in resultados:
         raise AppError(
@@ -332,6 +422,7 @@ def build_projecao(
             )
 
     pontos, cruzamento = pontos_por_modelo[escolhido]
+    espaco, reconducao = _espaco_e_reconducao(session, cod_ibge, serie, esfera, pontos)
     return _montar_resposta(
         cod_ibge=cod_ibge,
         serie=serie,
@@ -343,6 +434,9 @@ def build_projecao(
         as_of=as_of,
         gerado_em=gerado_em if persistir else None,
         exog=exog,
+        espaco=espaco,
+        reconducao=reconducao,
+        saneamento=saneada.memoria(),
     )
 
 
@@ -488,12 +582,6 @@ def _aplicar_choque(resultado: ResultadoModelo, choque_pct: float) -> ResultadoM
 # --------------------------------------------------------------------------- #
 # Cenário (POST /cenario/simular) — não persiste salvo se salvar=True
 # --------------------------------------------------------------------------- #
-def _periodos_por_ano(codigo: str) -> int:
-    from app.modules.forecast.periodos import parse_periodo
-
-    return {"B": 6, "Q": 3, "M": 12, "A": 1}[parse_periodo(codigo).cadencia]
-
-
 def _overrides_exogenas(
     session: Session,
     cod_ibge: str,
@@ -503,20 +591,47 @@ def _overrides_exogenas(
 ) -> ExogenasAlinhadas:
     """Traduz as premissas macro do gestor em valores futuros das exógenas."""
     base = alinhar_exogenas(session, cod_ibge, serie.periodos, periodos_futuro)
-    por_ano = _periodos_por_ano(serie.periodos[-1])
     overrides: dict[str, list[float]] = {}
+    # **A conversão anual→mensal é composta, não linear.** Dividir por 12 parece inofensivo
+    # e não é: 12% ao ano viram 1,0% ao mês em vez de 0,9489% — 5,4% a mais na premissa,
+    # composto a cada passo do horizonte. As séries do BCB são variações mensais, então é
+    # nesta unidade que o override tem de entrar.
     if req.ipca_aa_pct is not None and "IPCA" in base.matriz.nomes:
-        overrides["IPCA"] = [req.ipca_aa_pct / 12.0] * len(periodos_futuro)
+        mensal = float(anual_para_mensal(req.ipca_aa_pct))
+        overrides["IPCA"] = [mensal] * len(periodos_futuro)
     if req.selic_aa_pct is not None and "SELIC" in base.matriz.nomes:
-        overrides["SELIC"] = [req.selic_aa_pct / 12.0] * len(periodos_futuro)
+        mensal = float(anual_para_mensal(req.selic_aa_pct))
+        overrides["SELIC"] = [mensal] * len(periodos_futuro)
     if req.fpm_variacao_pct is not None and "FPM" in base.matriz.nomes:
         media = base.media_por_nome["FPM"]
         overrides["FPM"] = [media * (1 + req.fpm_variacao_pct / 100.0)] * len(periodos_futuro)
-    _ = por_ano  # documentado: conversão anual→período (mensal) já embutida acima
     if not overrides:
         return base
     return alinhar_exogenas(
         session, cod_ibge, serie.periodos, periodos_futuro, overrides_futuro=overrides
+    )
+
+
+def premissas_observadas(session: Session, cod_ibge: str) -> PremissasResponse:
+    """As premissas de cenário como o mundo as reporta, para a tela abrir ancorada.
+
+    A tela abria com IPCA 4,5% e Selic 10,5% escritos no código do frontend — dois números
+    que alguém digitou uma vez e que apareciam com a mesma aparência de qualquer valor
+    informado. O acervo tem as séries reais, e a Selic observada é **14,28%**: quem
+    aceitasse o padrão simulava com 3,8 pontos percentuais de erro sem saber que havia um
+    padrão.
+    """
+    itens = [
+        PremissaObservada(**p.__dict__) for p in premissas.observadas(session, cod_ibge)
+    ]
+    return PremissasResponse(
+        cod_ibge=cod_ibge,
+        premissas=itens,
+        nota=(
+            "Valores observados, não projeções de mercado. São o ponto de partida do "
+            "cenário; altere-os para simular. Onde a série não sustenta o cálculo, a "
+            "premissa vem vazia com o motivo — nenhum valor de fábrica ocupa o lugar."
+        ),
     )
 
 
@@ -593,7 +708,10 @@ def simular_cenario(
     memoria: dict[str, Any] = {
         "premissas": req.model_dump(exclude_none=True),
         "modelo_base": base.modelo,
-        "conversao_macro": "IPCA/Selic anual → contribuição mensal (÷12); FPM vs média histórica",
+        "conversao_macro": (
+            "IPCA/Selic de taxa anual para mensal por capitalização composta "
+            "((1+a)^(1/12)−1, não a÷12); FPM como variação sobre a média histórica"
+        ),
         "observacao_minimos": (
             "Mínimos (saúde/educação) usam base impostos+transf.; aqui a RCL projetada "
             "é proxy explícita do teto/piso em R$ — não substitui a apuração oficial."

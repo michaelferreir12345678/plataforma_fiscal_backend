@@ -50,6 +50,69 @@ class CruzamentoLimite(BaseModel):
     esfera: str | None = None
 
 
+class EspacoFiscalOut(BaseModel):
+    """Quanto ainda cabe (ou quanto falta cortar) na posição projetada.
+
+    ``margem_pp`` e ``margem_rs`` são **sempre positivos**; ``situacao`` é o que diz se
+    são folga ou excesso. Um valor negativo rotulado "margem" convidaria à leitura errada
+    exatamente no caso em que o erro custa mais caro.
+    """
+
+    indicador: str
+    sentido: str
+    situacao: str  # folga | excedido | nao_aplicavel
+    limite_pct: Decimal
+    projetado_pct: Decimal
+    margem_pp: Decimal
+    margem_rs: Decimal | None = None
+    base_rs: Decimal | None = None
+    base_nome: str = "rcl"
+    #: De qual período a base saiu — observada, ao contrário de ``periodo_alvo``.
+    base_periodo: str | None = None
+    periodo_alvo: str | None = None
+
+
+class ReconducaoOut(BaseModel):
+    """Cronograma de redução que a LRF impõe a quem excedeu o limite de pessoal.
+
+    Art. 23: excesso eliminado em dois quadrimestres, ao menos um terço no primeiro. Não é
+    meta de gestão — é obrigação, e o descumprimento aciona as vedações do §3º.
+    """
+
+    aplicavel: bool
+    excesso_pp: Decimal
+    excesso_rs: Decimal | None = None
+    primeiro_quadrimestre_pp: Decimal
+    primeiro_quadrimestre_rs: Decimal | None = None
+    segundo_quadrimestre_pp: Decimal
+    segundo_quadrimestre_rs: Decimal | None = None
+    fundamento: str
+
+
+class PremissaObservada(BaseModel):
+    """Premissa de cenário como o mundo a reporta — com data, fonte e n de observações.
+
+    ``observado=None`` significa que a série não sustenta o cálculo, e ``motivo`` diz o
+    porquê. A tela então **pede** o valor em vez de sugerir um: uma premissa inventada é
+    indistinguível de uma medida depois que entra no formulário.
+    """
+
+    chave: str
+    rotulo: str
+    unidade: str
+    observado: Decimal | None = None
+    motivo: str | None = None
+    referencia: str | None = None
+    fonte: str | None = None
+    n_observacoes: int | None = None
+
+
+class PremissasResponse(BaseModel):
+    cod_ibge: str
+    premissas: list[PremissaObservada]
+    nota: str
+
+
 class ProjecaoResponse(BaseModel):
     """Histórico + projeção + IC + marcador de cruzamento (endpoint GET /projecao)."""
 
@@ -66,6 +129,10 @@ class ProjecaoResponse(BaseModel):
     historico: list[PontoHistorico]
     projecao: list[PontoProjecao]
     cruzamento: CruzamentoLimite
+    #: Margem até o limite na posição projetada — o número que transforma "cruza em
+    #: 2026-B2" numa decisão. Ausente quando o indicador não tem limite comparável.
+    espaco_fiscal: EspacoFiscalOut | None = None
+    reconducao: ReconducaoOut | None = None
     memoria: dict
     source_ref: SourceRef
 
