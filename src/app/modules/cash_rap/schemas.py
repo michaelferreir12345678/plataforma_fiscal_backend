@@ -51,6 +51,9 @@ class SuficienciaResumo(BaseModel):
     n_deficit: int
     total_rpnp_sem_lastro: Decimal
     total_disp_liquida_apos_positiva: Decimal  # soma só dos superávits (informativo)
+    #: Soma dos déficits (negativa). Existe para que a tela não anuncie o superávit como
+    #: se fosse o caixa do ente — os dois lados juntos é que descrevem a posição.
+    total_disp_liquida_apos_negativa: Decimal = Decimal(0)
 
 
 class SuficienciaMatriz(BaseModel):

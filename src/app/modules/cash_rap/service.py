@@ -247,6 +247,15 @@ def _resumo(disps: list[Disponibilidade]) -> SuficienciaResumo:
     total_apos_pos = sum(
         ((d.disp_liquida_apos or zero) for d in disps if (d.disp_liquida_apos or zero) > 0), zero
     )
+    # O outro lado da conta. Publicar só o positivo fazia o valor-herói da tela prometer
+    # "disponibilidade de caixa líquida" e entregar a soma **apenas** das fontes
+    # superavitárias — o gestor lia "tenho R$ X em caixa" quando o líquido consolidado é
+    # menor, às vezes muito menor. A análise continua sendo fonte a fonte (nunca
+    # consolidada, LRF art. 50, I), mas omitir o déficit não é analisar por fonte: é
+    # mostrar meia conta.
+    total_apos_neg = sum(
+        ((d.disp_liquida_apos or zero) for d in disps if (d.disp_liquida_apos or zero) < 0), zero
+    )
     return SuficienciaResumo(
         n_fontes=len(disps),
         n_suficientes=sum(1 for d in disps if d.suficiente),
@@ -254,6 +263,7 @@ def _resumo(disps: list[Disponibilidade]) -> SuficienciaResumo:
         n_deficit=sum(1 for d in disps if d.status == caixa.STATUS_DEFICIT),
         total_rpnp_sem_lastro=total_sem_lastro,
         total_disp_liquida_apos_positiva=total_apos_pos,
+        total_disp_liquida_apos_negativa=total_apos_neg,
     )
 
 

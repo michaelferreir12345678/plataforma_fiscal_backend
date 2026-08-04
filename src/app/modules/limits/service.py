@@ -31,6 +31,11 @@ from app.shared.source_ref import SourceRef
 SEMAFORO_INDICADORES = (
     "pessoal_executivo",
     "divida_consolidada_liquida",
+    # Os dois limites de endividamento que a plataforma declarava e nunca apurava. A
+    # primeira apuração já encontrou um município com 16,80% de operações de crédito
+    # contra o teto de 16% — estouro que ninguém tinha como ver.
+    "operacoes_credito",
+    "garantias",
     "saude_minimo",
     "educacao_mde",
 )
@@ -45,6 +50,24 @@ _PROVIDENCIAS: list[tuple[str, str, str, str]] = [
      "LRF art. 22, parágrafo único"),
     ("pessoal_executivo", "excedido",
      "Recondução ao limite em até 2 quadrimestres; vedações do art. 23.", "LRF art. 23"),
+    ("operacoes_credito", "alerta",
+     "Emissão de alerta pelo Tribunal de Contas ao ente.", "LRF art. 59, §1º, II"),
+    ("operacoes_credito", "prudencial",
+     "Contratação de novas operações exige demonstração de que o limite não será "
+     "ultrapassado; o Ministério da Fazenda verifica antes de autorizar.",
+     "Res. 43/2001 do Senado, art. 7º, I · LRF art. 32"),
+    ("operacoes_credito", "excedido",
+     "Vedada a contratação de nova operação de crédito enquanto o limite estiver "
+     "ultrapassado, ressalvado o refinanciamento do principal da dívida mobiliária.",
+     "Res. 43/2001 do Senado, art. 7º · LRF art. 33"),
+    ("garantias", "alerta",
+     "Emissão de alerta pelo Tribunal de Contas ao ente.", "LRF art. 59, §1º, II"),
+    ("garantias", "prudencial",
+     "Nova garantia depende de contragarantia em valor igual ou superior e de "
+     "adimplência do garantido.", "LRF art. 40, §1º · Res. 43/2001, art. 9º"),
+    ("garantias", "excedido",
+     "Vedada a concessão de nova garantia enquanto o montante exceder o limite.",
+     "Res. 43/2001 do Senado, art. 9º"),
     ("divida_consolidada_liquida", "prudencial",
      "Monitoramento reforçado da trajetória da dívida consolidada líquida.", "LRF art. 59"),
     ("divida_consolidada_liquida", "excedido",
