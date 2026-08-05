@@ -20,6 +20,7 @@ from app.modules.indicators import repository as indicators_repo
 from app.modules.indicators import serie_ajuste
 from app.modules.indicators import service as indicators_service
 from app.modules.indicators.schemas import SerieAjuste
+from app.modules.ingestion import repository as ingestion_repo
 from app.modules.revenue import natureza, repository
 from app.modules.revenue.models import DimOrigemReceita, FatoReceita
 from app.modules.revenue.schemas import (
@@ -85,6 +86,20 @@ def _resolve_versao(
     return versao
 
 
+def _effective_as_of(
+    session: Session, cod_ibge: str, periodo: str, versao: str, as_of: datetime | None
+) -> datetime | None:
+    """``as_of`` a ecoar na resposta (§6.5) — resolvido mesmo quando a query o omite."""
+    return ingestion_repo.effective_as_of(
+        session,
+        cod_ibge=cod_ibge,
+        relatorio="RREO",
+        periodo=periodo,
+        versao_entrega=versao,
+        requested=as_of,
+    )
+
+
 def build_linha_bruta(
     session: Session, cod_ibge: str, periodo: str, origem_codigo: str,
     *, as_of: datetime | None = None,
@@ -96,6 +111,7 @@ def build_linha_bruta(
     conferência abaixo prova isso a cada chamada, em vez de confiar na premissa.
     """
     versao = _resolve_versao(session, cod_ibge, periodo, as_of)
+    efetivo_as_of = _effective_as_of(session, cod_ibge, periodo, versao, as_of)
     fatos = _ensure_gold(session, cod_ibge, periodo, versao)
     fato = next((f for f in fatos if f.origem_codigo == origem_codigo), None)
     no = repository.get_origem(session, codigo=origem_codigo)
@@ -136,6 +152,7 @@ def build_linha_bruta(
     return LinhaBrutaResponse(
         cod_ibge=cod_ibge,
         periodo=periodo,
+        as_of=efetivo_as_of,
         codigo=origem_codigo,
         descricao=no.descricao if no else (linhas[0].conta if linhas else None),
         medidas={m: getattr(fato, m, None) for m in natureza.MEDIDAS},
@@ -369,6 +386,7 @@ def build_arvore(
     return build_drill_envelope(
         nodes, node, period=periodo, source_ref=_source_ref(periodo, versao),
         node_measures=measures_map,
+        as_of=_effective_as_of(session, cod_ibge, periodo, versao, as_of),
     )
 
 
@@ -437,6 +455,7 @@ def build_detalhe(
     return ReceitaDetalhe(
         cod_ibge=cod_ibge,
         periodo=periodo,
+        as_of=_effective_as_of(session, cod_ibge, periodo, versao, as_of),
         versao_entrega=versao,
         totais=totais,
         realizacao_pct=_pct(totais.arrecadado_acum, totais.previsto_atualizado),
@@ -499,6 +518,7 @@ def build_memoria(
     return MemoriaReceita(
         cod_ibge=cod_ibge,
         periodo=periodo,
+        as_of=_effective_as_of(session, cod_ibge, periodo, versao, as_of),
         versao_entrega=versao,
         medidas=list(natureza.MEDIDAS),
         totais=_totais(nodes, medidas),
@@ -542,6 +562,7 @@ def build_dependencia(
     return DependenciaOut(
         cod_ibge=cod_ibge,
         periodo=periodo,
+        as_of=_effective_as_of(session, cod_ibge, periodo, versao, as_of),
         versao_entrega=versao,
         resumo=resumo,
         maiores_transferencias=maiores,
@@ -575,6 +596,7 @@ def build_realizacao(
     return RealizacaoOut(
         cod_ibge=cod_ibge,
         periodo=periodo,
+        as_of=_effective_as_of(session, cod_ibge, periodo, versao, as_of),
         versao_entrega=versao,
         total=item(
             "*", "Total da receita",
@@ -766,6 +788,7 @@ def build_conciliacao(
     return ConciliacaoOut(
         cod_ibge=cod_ibge,
         periodo=periodo,
+        as_of=_effective_as_of(session, cod_ibge, periodo, versao, as_of),
         versao_entrega=versao,
         itens=itens,
         tolerancia_pct=_TOLERANCIA_PCT,

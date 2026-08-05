@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -26,7 +27,7 @@ class MatrizMensalOut(BaseModel):
 
     cod_ibge: str
     ano: int
-    as_of: str | None = None
+    as_of: datetime | None = None
     versao_entrega: str
     cod_conta: str
     descricao: str
@@ -59,7 +60,7 @@ class BalancoOut(BaseModel):
     ano: int
     tipo: str
     anexo: str | None = None
-    as_of: str | None = None
+    as_of: datetime | None = None
     versao_entrega: str
     destaques: dict[str, Decimal | None] = Field(default_factory=dict)
     linhas: list[BalancoLinha]
@@ -107,7 +108,7 @@ class ConciliacaoOut(BaseModel):
 
     cod_ibge: str
     ano: int
-    as_of: str | None = None
+    as_of: datetime | None = None
     tem_msc: bool
     tem_dca: bool
     n_checks: int
@@ -171,7 +172,7 @@ class PatrimonioDetalhe(BaseModel):
 
     cod_ibge: str
     ano: int
-    as_of: str | None = None
+    as_of: datetime | None = None
     esfera: str | None = None
     uf: str | None = None
     tem_msc: bool

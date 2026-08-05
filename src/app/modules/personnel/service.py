@@ -86,6 +86,20 @@ def _resolve_versao(session: Session, cod_ibge: str, periodo: str, as_of: dateti
     return versao
 
 
+def _effective_as_of(
+    session: Session, cod_ibge: str, periodo: str, versao: str, as_of: datetime | None
+) -> datetime | None:
+    """``as_of`` a ecoar na resposta (§6.5) — resolvido mesmo quando a query o omite."""
+    return ingestion_repo.effective_as_of(
+        session,
+        cod_ibge=cod_ibge,
+        relatorio=_RELATORIO,
+        periodo=periodo,
+        versao_entrega=versao,
+        requested=as_of,
+    )
+
+
 def _ente(session: Session, cod_ibge: str) -> DimEnte:
     ente = catalog_service.refresh_dim_ente(session, cod_ibge)
     if ente is None:
@@ -125,6 +139,19 @@ def _rcl_ajustada_publicada(
     EC 105/2019 manda deduzir as transferências recebidas por emenda individual. O
     demonstrativo já traz a conta pronta — reconstruí-la aqui significaria reimplementar
     uma regra que muda com a legislação e errar em silêncio quando ela mudar.
+
+    **Sem "olhar para frente" (A15, achado da Sprint A5).** O RGF republica, a cada nova
+    entrega, os quadrimestres já decorridos — mas só nos Anexos 02/03 (RCL e RCL Ajustada
+    de endividamento, ver ``indicators/endividamento.py::_valor_vigente``), que publicam
+    coluna comparativa "Até o Nº Quadrimestre". O Anexo 01 **não tem esse comparativo**:
+    a linha usa sempre a coluna "Valor" (4.168 linhas conferidas no acervo, nenhuma com
+    outra coluna) e cada entrega reporta só o próprio quadrimestre — não há retificação
+    recuperável olhando entregas posteriores, porque a entrega seguinte publica o *seu*
+    quadrimestre, não uma correção do anterior. Um ente cuja primeira entrega do ano veio
+    com a RCL ajustada visivelmente errada (ex.: 2307650/2023-Q1 — R$ 152,1 mi contra a
+    RCL cheia de R$ 1.031,3 mi no mesmo período) **fica com o denominador errado até a
+    entrega seguinte do próprio Anexo 01**, e a plataforma não tem, nesta fonte, como
+    corrigir isso sem inventar um número que o ente não publicou.
     """
     linha = session.execute(
         select(SilverRgf.valor)
@@ -516,6 +543,7 @@ def build_detalhe(
     return PessoalDetalhe(
         cod_ibge=cod_ibge,
         periodo=periodo,
+        as_of=_effective_as_of(session, cod_ibge, periodo, versao, as_of),
         periodo_rreo=_rreo_periodo(periodo),
         versao_entrega=versao,
         esfera=ente.esfera,
@@ -555,6 +583,7 @@ def build_arvore(
     return build_drill_envelope(
         nodes, node, period=periodo,
         source_ref=_source_ref(periodo, versao), node_measures=_measures_map(medidas),
+        as_of=_effective_as_of(session, cod_ibge, periodo, versao, as_of),
     )
 
 
@@ -591,6 +620,7 @@ def build_memoria(
     return MemoriaPessoal(
         cod_ibge=cod_ibge,
         periodo=periodo,
+        as_of=_effective_as_of(session, cod_ibge, periodo, versao, as_of),
         versao_entrega=versao,
         rpps=ente.rpps,
         despesa_bruta=apur.despesa_bruta,
@@ -636,6 +666,7 @@ def build_por_poder(
     return PorPoderOut(
         cod_ibge=cod_ibge,
         periodo=periodo,
+        as_of=_effective_as_of(session, cod_ibge, periodo, versao, as_of),
         versao_entrega=versao,
         esfera=ente.esfera,
         rpps=ente.rpps,

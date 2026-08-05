@@ -58,6 +58,36 @@ def _ente() -> str:
     return "4" + "".join(random.choices("0123456789", k=6))
 
 
+#: A14 (Sprint A5): FPM/FUNDEB/TRANSFERENCIA não têm vigência própria — vem de
+#: gold.dim_entrega sob cod_ibge='BR' (ingestão nacional batch, §6.7), compartilhada com
+#: o dado real do mesmo (ano, mês). ``homologada_em`` num futuro bem distante garante que
+#: esta entrega sintética vence o desempate de "mais recente" mesmo contra uma
+#: reingestão real futura. A versão ("1") não colide com nenhuma versão real (que usa
+#: datas/tags como 'pag2024'); a limpeza é escopada por versão — nunca apaga a real.
+_HOMOLOGADA_TRANSFERENCIA_TESTE = datetime(2099, 1, 1, tzinfo=UTC)
+
+
+def _dim_entrega_nacional(s, relatorio: str, ano: int, meses: list[int], versao: str = "1") -> None:
+    for mes in meses:
+        s.add(
+            DimEntrega(
+                cod_ibge="BR", relatorio=relatorio, periodo=f"{ano}-M{mes:02d}",
+                versao_entrega=versao, homologada_em=_HOMOLOGADA_TRANSFERENCIA_TESTE,
+                vigente=True,
+            )
+        )
+
+
+def _limpar_dim_entrega_nacional(s, versao: str = "1") -> None:
+    s.execute(
+        delete(DimEntrega).where(
+            DimEntrega.cod_ibge == "BR",
+            DimEntrega.relatorio.in_(["FPM", "FUNDEB", "TRANSFERENCIA"]),
+            DimEntrega.versao_entrega == versao,
+        )
+    )
+
+
 @pytest.fixture
 def limpar() -> Iterator[list[str]]:
     usados: list[str] = []
@@ -79,6 +109,7 @@ def limpar() -> Iterator[list[str]]:
                 delete(TransferenciaGenerica).where(TransferenciaGenerica.cod_ibge == cod)
             )
         s.execute(delete(BcbIndice).where(BcbIndice.versao_entrega == VERSAO_IPCA_TESTE))
+        _limpar_dim_entrega_nacional(s)
         s.commit()
 
 
@@ -301,6 +332,8 @@ def test_conciliacao_expoe_fonte_dos_dois_lados(client, make_org, limpar) -> Non
             cod_ibge=cod, tipo="Cota-Parte do ICMS", ano=2024, mes=6, valor=Decimal("500"),
             fonte="derivado_rreo_a1", versao_entrega="1",
         ))
+        _dim_entrega_nacional(s, "FPM", 2024, [6])
+        _dim_entrega_nacional(s, "TRANSFERENCIA", 2024, [6])
         s.commit()
     fx = make_org(capacidades=["ver"], entes=[cod])
     token = login(client, fx.email, fx.senha)
@@ -357,6 +390,8 @@ def test_ente_que_nao_abre_a_linha_concilia_por_contencao(client, make_org, limp
         # FUNDEB não tem agregado inequívoco: permanece "sem par" em vez de comparar errado.
         s.add(FndeFundebRepasse(cod_ibge=cod, ano=2024, mes=6, valor_repassado=Decimal("100"),
                                 versao_entrega="1"))
+        _dim_entrega_nacional(s, "FPM", 2024, [6])
+        _dim_entrega_nacional(s, "FUNDEB", 2024, [6])
         s.commit()
     fx = make_org(capacidades=["ver"], entes=[cod])
     token = login(client, fx.email, fx.senha)
@@ -400,6 +435,7 @@ def test_parte_maior_que_o_todo_e_erro_de_dado(client, make_org, limpar) -> None
             ))
         s.add(TesouroFpm(cod_ibge=cod, ano=2024, mes=6, valor_liquido=Decimal("500"),
                          versao_entrega="1"))
+        _dim_entrega_nacional(s, "FPM", 2024, [6])
         s.commit()
     fx = make_org(capacidades=["ver"], entes=[cod])
     token = login(client, fx.email, fx.senha)

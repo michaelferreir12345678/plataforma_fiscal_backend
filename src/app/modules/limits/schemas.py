@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 
 from pydantic import BaseModel
@@ -34,6 +35,7 @@ class LimiteItem(BaseModel):
 class LimitesResponse(BaseModel):
     cod_ibge: str
     periodo: str
+    as_of: datetime | None = None
     versao_entrega: str
     itens: list[LimiteItem]
     source_ref: SourceRef
@@ -55,6 +57,7 @@ class SerieItem(BaseModel):
 class LimiteDetail(BaseModel):
     cod_ibge: str
     periodo: str
+    as_of: datetime | None = None
     indicador: str
     esfera: str
     faixa: str | None = None

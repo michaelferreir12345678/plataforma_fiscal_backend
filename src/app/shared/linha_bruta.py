@@ -20,6 +20,7 @@ atualizada e arrecadado acumulado, a entrega publica "No Bimestre (b)", "% (b/a)
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, Field
@@ -51,6 +52,7 @@ class LinhaBrutaResponse(BaseModel):
 
     cod_ibge: str
     periodo: str
+    as_of: datetime | None = None
     #: Código do nó no mart (origem da receita, função/subfunção ou natureza).
     codigo: str
     descricao: str | None = None

@@ -29,6 +29,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from app.shared.envelope import DrillChild, DrillEnvelope, DrillNodeRef, Measures
 from app.shared.source_ref import SourceRef
@@ -110,6 +111,7 @@ def build_drill_envelope(
     period: str | None = None,
     source_ref: SourceRef | None = None,
     node_measures: Mapping[str, Measures] | None = None,
+    as_of: datetime | None = None,
 ) -> DrillEnvelope:
     """Monta o :class:`DrillEnvelope` para ``node_codigo`` (``None`` ⇒ raízes).
 
@@ -143,6 +145,7 @@ def build_drill_envelope(
             children=children,
             measures={},
             period=period,
+            as_of=as_of,
             source_ref=source_ref,
         )
 
@@ -156,5 +159,6 @@ def build_drill_envelope(
         children=children,
         measures=measures_for(node_codigo),
         period=period,
+        as_of=as_of,
         source_ref=source_ref,
     )

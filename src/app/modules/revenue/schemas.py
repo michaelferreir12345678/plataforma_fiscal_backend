@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -54,6 +55,7 @@ class ReceitaDetalhe(BaseModel):
 
     cod_ibge: str
     periodo: str
+    as_of: datetime | None = None
     versao_entrega: str
     totais: ReceitaTotais
     realizacao_pct: Decimal | None = None
@@ -81,6 +83,7 @@ class MemoriaReceita(BaseModel):
 
     cod_ibge: str
     periodo: str
+    as_of: datetime | None = None
     versao_entrega: str
     medidas: list[str]
     totais: ReceitaTotais
@@ -101,6 +104,7 @@ class TransferenciaTop(BaseModel):
 class DependenciaOut(BaseModel):
     cod_ibge: str
     periodo: str
+    as_of: datetime | None = None
     versao_entrega: str
     resumo: DependenciaResumo
     maiores_transferencias: list[TransferenciaTop]
@@ -119,6 +123,7 @@ class RealizacaoItem(BaseModel):
 class RealizacaoOut(BaseModel):
     cod_ibge: str
     periodo: str
+    as_of: datetime | None = None
     versao_entrega: str
     total: RealizacaoItem
     por_categoria: list[RealizacaoItem]
@@ -150,6 +155,7 @@ class ConciliacaoItem(BaseModel):
 class ConciliacaoOut(BaseModel):
     cod_ibge: str
     periodo: str
+    as_of: datetime | None = None
     versao_entrega: str
     itens: list[ConciliacaoItem]
     tolerancia_pct: Decimal

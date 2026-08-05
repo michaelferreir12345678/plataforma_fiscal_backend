@@ -40,6 +40,7 @@ from app.modules.dashboard.cockpit_schemas import (
     RiscoItem,
     TendenciaItem,
 )
+from app.modules.dashboard.estadual_service import rgf_periodo_de
 from app.modules.dashboard.service import COR_POR_FAIXA
 from app.modules.expense import repository as expense_repo
 from app.modules.expense.classificacao import SENTINELA
@@ -92,8 +93,8 @@ def _source_rreo(periodo: str, versao: str | None) -> SourceRef:
 
 
 # --- 1/2. Resumo e críticos (a partir do monitor de limites) ----------------
-def _limites(session: Session, cod_ibge: str, periodo: str) -> Any:
-    return limits_service.build_limites(session, cod_ibge, periodo)
+def _limites(session: Session, cod_ibge: str, periodo: str, *, as_of: datetime | None) -> Any:
+    return limits_service.build_limites(session, cod_ibge, periodo, as_of=as_of)
 
 
 def _criticos(limites: Any) -> list[CriticoItem]:
@@ -120,14 +121,19 @@ def _criticos(limites: Any) -> list[CriticoItem]:
 
 
 def _mudancas(
-    session: Session, cod_ibge: str, periodo: str, criticos: list[CriticoItem]
+    session: Session,
+    cod_ibge: str,
+    periodo: str,
+    criticos: list[CriticoItem],
+    *,
+    as_of: datetime | None,
 ) -> list[MudancaRelevante]:
     """Δ de cada indicador contra o período anterior — o "o que mudou" do resumo."""
     anterior = periodo_util.anterior(periodo)
     if anterior is None:
         return []
     versao_ant = indicators_repo.resolve_versao_rreo(
-        session, cod_ibge=cod_ibge, periodo=anterior
+        session, cod_ibge=cod_ibge, periodo=anterior, as_of=as_of
     )
     if versao_ant is None:
         return []
@@ -305,13 +311,22 @@ def _indisponivel(
 
 
 def _explicador_receita(
-    session: Session, cod_ibge: str, periodo: str, anterior: str | None
+    session: Session,
+    cod_ibge: str,
+    periodo: str,
+    anterior: str | None,
+    *,
+    as_of: datetime | None,
 ) -> ExplicadorItem:
     rotulo, medida, dim = "Receita por origem", "arrecadado_acum", "receita_origem"
     if anterior is None:
         return _indisponivel(dim, rotulo, medida, periodo, "Sem período anterior comparável.")
-    v_atual = indicators_repo.resolve_versao_rreo(session, cod_ibge=cod_ibge, periodo=periodo)
-    v_ant = indicators_repo.resolve_versao_rreo(session, cod_ibge=cod_ibge, periodo=anterior)
+    v_atual = indicators_repo.resolve_versao_rreo(
+        session, cod_ibge=cod_ibge, periodo=periodo, as_of=as_of
+    )
+    v_ant = indicators_repo.resolve_versao_rreo(
+        session, cod_ibge=cod_ibge, periodo=anterior, as_of=as_of
+    )
     if v_atual is None or v_ant is None:
         return _indisponivel(dim, rotulo, medida, periodo, f"Sem RREO vigente em {anterior}.")
 
@@ -342,13 +357,22 @@ def _explicador_receita(
 
 
 def _explicador_despesa(
-    session: Session, cod_ibge: str, periodo: str, anterior: str | None
+    session: Session,
+    cod_ibge: str,
+    periodo: str,
+    anterior: str | None,
+    *,
+    as_of: datetime | None,
 ) -> ExplicadorItem:
     rotulo, medida, dim = "Despesa por função", "empenhado", "despesa_funcao"
     if anterior is None:
         return _indisponivel(dim, rotulo, medida, periodo, "Sem período anterior comparável.")
-    v_atual = indicators_repo.resolve_versao_rreo(session, cod_ibge=cod_ibge, periodo=periodo)
-    v_ant = indicators_repo.resolve_versao_rreo(session, cod_ibge=cod_ibge, periodo=anterior)
+    v_atual = indicators_repo.resolve_versao_rreo(
+        session, cod_ibge=cod_ibge, periodo=periodo, as_of=as_of
+    )
+    v_ant = indicators_repo.resolve_versao_rreo(
+        session, cod_ibge=cod_ibge, periodo=anterior, as_of=as_of
+    )
     if v_atual is None or v_ant is None:
         return _indisponivel(dim, rotulo, medida, periodo, f"Sem RREO vigente em {anterior}.")
 
@@ -381,18 +405,20 @@ def _explicador_despesa(
     )
 
 
-def _explicador_pessoal(session: Session, cod_ibge: str, periodo_rgf: str | None) -> ExplicadorItem:
+def _explicador_pessoal(
+    session: Session, cod_ibge: str, periodo_rgf: str | None, *, as_of: datetime | None
+) -> ExplicadorItem:
     rotulo, medida, dim = "Pessoal por poder", "despesa_liquida", "pessoal_poder"
     base = periodo_rgf or ""
     if periodo_rgf is None:
         return _indisponivel(dim, rotulo, medida, base, "Ente sem RGF vigente.")
     anterior = periodo_util.anterior(periodo_rgf)
     v_atual = ingestion_repo.resolve_versao(
-        session, cod_ibge=cod_ibge, relatorio="RGF", periodo=periodo_rgf
+        session, cod_ibge=cod_ibge, relatorio="RGF", periodo=periodo_rgf, as_of=as_of
     )
     v_ant = (
         ingestion_repo.resolve_versao(
-            session, cod_ibge=cod_ibge, relatorio="RGF", periodo=anterior
+            session, cod_ibge=cod_ibge, relatorio="RGF", periodo=anterior, as_of=as_of
         )
         if anterior
         else None
@@ -430,6 +456,7 @@ def _explicador_pessoal(session: Session, cod_ibge: str, periodo_rgf: str | None
 def _comparacao_mart(
     session: Session, cod_ibge: str, indicador: str, atual: Decimal | None,
     periodo_base: str | None, base: str, rotulo: str,
+    *, as_of: datetime | None,
 ) -> ComparacaoItem:
     """Compara o indicador com o mesmo indicador num período-base do próprio ente."""
     if periodo_base is None:
@@ -438,7 +465,7 @@ def _comparacao_mart(
             motivo_indisponivel="Período-base indefinido para este período.",
         )
     versao = indicators_repo.resolve_versao_rreo(
-        session, cod_ibge=cod_ibge, periodo=periodo_base
+        session, cod_ibge=cod_ibge, periodo=periodo_base, as_of=as_of
     )
     mart = (
         indicators_repo.get_mart_indicador(
@@ -497,7 +524,12 @@ def _comparacao_coorte(
 
 
 def _comparacoes(
-    session: Session, cod_ibge: str, periodo: str, criticos: list[CriticoItem]
+    session: Session,
+    cod_ibge: str,
+    periodo: str,
+    criticos: list[CriticoItem],
+    *,
+    as_of: datetime | None,
 ) -> list[ComparacaoItem]:
     principal_ind = next((c for c in criticos if c.faixa is not None), None)
     if principal_ind is None:
@@ -506,12 +538,12 @@ def _comparacoes(
     return [
         _comparacao_mart(
             session, cod_ibge, ind, atual, periodo_util.anterior(periodo),
-            "periodo_anterior", "Período anterior",
+            "periodo_anterior", "Período anterior", as_of=as_of,
         ),
         _comparacao_mart(
             session, cod_ibge, ind, atual,
             periodo_util.mesmo_periodo_exercicio_anterior(periodo),
-            "exercicio_anterior", "Mesmo período do exercício anterior",
+            "exercicio_anterior", "Mesmo período do exercício anterior", as_of=as_of,
         ),
         _comparacao_coorte(session, cod_ibge, ind, periodo, atual),
         ComparacaoItem(
@@ -629,20 +661,30 @@ def build_cockpit(
         session, cod_ibge=cod_ibge, periodo=periodo, as_of=as_of
     )
     source = _source_rreo(periodo, versao)
+    # Instante bitemporal efetivo (§6.5): mesmo sem ``as_of`` explícito na query, o
+    # cabeçalho devolve um valor concreto — é nele que o front "pina" as 7 camadas, para
+    # que uma retificação no meio do carregamento não misture versões na mesma tela.
+    efetivo_as_of = (
+        ingestion_repo.effective_as_of(
+            session, cod_ibge=cod_ibge, relatorio="RREO", periodo=periodo,
+            versao_entrega=versao, requested=as_of,
+        )
+        if versao is not None
+        else as_of
+    )
 
-    limites = _limites(session, cod_ibge, periodo)
+    limites = _limites(session, cod_ibge, periodo, as_of=as_of)
     criticos = _criticos(limites)
-    mudancas = _mudancas(session, cod_ibge, periodo, criticos)
+    mudancas = _mudancas(session, cod_ibge, periodo, criticos, as_of=as_of)
     riscos, n_alertas, n_criticos = _riscos(session, principal, cod_ibge)
 
-    # O RGF correspondente ancora os explicadores de pessoal.
-    entregas_rgf = [
-        e.periodo
-        for e in catalog_service.repository.periodos_com_dado(
-            session, cod_ibge=cod_ibge, relatorio="RGF"
-        )
-    ]
-    periodo_rgf = periodo_util.mais_recente(entregas_rgf)
+    # O RGF correspondente ancora os explicadores de pessoal — precisa ser o do **mesmo
+    # ciclo** do período RREO selecionado (A18: usava sempre o RGF mais recente do ente,
+    # inteiro alheio ao período pedido, e misturava dois exercícios na mesma tela sem
+    # aviso). Reusa o mapeamento B→Q de ``estadual_service.rgf_periodo_de`` — a mesma
+    # regra canônica (§6.6) que a Visão Estadual já usa para ancorar disponibilidade de
+    # caixa no quadrimestre certo.
+    periodo_rgf = rgf_periodo_de(periodo)
     anterior = periodo_util.anterior(periodo)
 
     return CockpitResponse(
@@ -650,16 +692,16 @@ def build_cockpit(
         nome=ente.nome if ente else None,
         esfera=ente.esfera if ente else None,
         periodo=periodo,
-        as_of=as_of,
+        as_of=efetivo_as_of,
         resumo=_resumo(criticos, mudancas, n_alertas, n_criticos, source),
         criticos=criticos,
         tendencias=_tendencias(session, cod_ibge, as_of=as_of),
         explicadores=[
-            _explicador_receita(session, cod_ibge, periodo, anterior),
-            _explicador_despesa(session, cod_ibge, periodo, anterior),
-            _explicador_pessoal(session, cod_ibge, periodo_rgf),
+            _explicador_receita(session, cod_ibge, periodo, anterior, as_of=as_of),
+            _explicador_despesa(session, cod_ibge, periodo, anterior, as_of=as_of),
+            _explicador_pessoal(session, cod_ibge, periodo_rgf, as_of=as_of),
         ],
-        comparacoes=_comparacoes(session, cod_ibge, periodo, criticos),
+        comparacoes=_comparacoes(session, cod_ibge, periodo, criticos, as_of=as_of),
         riscos=riscos,
         qualidade=_qualidade(session, cod_ibge),
         source_ref=source,

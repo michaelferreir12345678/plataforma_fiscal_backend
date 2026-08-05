@@ -47,6 +47,7 @@ from app.modules.indicators import repository as indicators_repo
 from app.modules.indicators import serie_ajuste
 from app.modules.indicators import service as indicators_service
 from app.modules.indicators.schemas import SerieAjuste
+from app.modules.ingestion import repository as ingestion_repo
 from app.shared.ausencia import ausencia_de_entrega
 from app.shared.envelope import DrillEnvelope, Measures
 from app.shared.hierarchy import HierarchyNode, build_drill_envelope
@@ -99,6 +100,20 @@ def _resolve_versao(
             detail=f"Sem RREO vigente para {cod_ibge} em {periodo}.",
         )
     return versao
+
+
+def _effective_as_of(
+    session: Session, cod_ibge: str, periodo: str, versao: str, as_of: datetime | None
+) -> datetime | None:
+    """``as_of`` a ecoar na resposta (§6.5) — resolvido mesmo quando a query o omite."""
+    return ingestion_repo.effective_as_of(
+        session,
+        cod_ibge=cod_ibge,
+        relatorio="RREO",
+        periodo=periodo,
+        versao_entrega=versao,
+        requested=as_of,
+    )
 
 
 def _pct(parte: Decimal | None, todo: Decimal | None) -> Decimal | None:
@@ -266,6 +281,7 @@ def build_linha_bruta(
             detail=f"Eixo '{eixo}' não existe; use '{cls.EIXO_FUNCAO}' ou '{cls.EIXO_NATUREZA}'.",
         )
     versao = _resolve_versao(session, cod_ibge, periodo, as_of)
+    efetivo_as_of = _effective_as_of(session, cod_ibge, periodo, versao, as_of)
     fatos = _ensure_gold(session, cod_ibge, periodo, versao)
     fato = next(
         (f for f in fatos if _fato_codigo(f, eixo) == codigo),
@@ -313,6 +329,7 @@ def build_linha_bruta(
     return LinhaBrutaResponse(
         cod_ibge=cod_ibge,
         periodo=periodo,
+        as_of=efetivo_as_of,
         codigo=codigo,
         descricao=fato.linha_origem,
         medidas={m: getattr(fato, m, None) for m in cls.MEDIDAS},
@@ -520,6 +537,7 @@ def build_arvore(
         nodes, node, period=periodo,
         source_ref=_source_ref(periodo, versao, _anexo_do_eixo(eixo)),
         node_measures=_measures_map(medidas),
+        as_of=_effective_as_of(session, cod_ibge, periodo, versao, as_of),
     )
 
 
@@ -542,6 +560,7 @@ def build_detalhe(
     return DespesaDetalhe(
         cod_ibge=cod_ibge,
         periodo=periodo,
+        as_of=_effective_as_of(session, cod_ibge, periodo, versao, as_of),
         versao_entrega=versao,
         eixo=eixo,
         totais=totais,
@@ -642,6 +661,7 @@ def build_memoria(
     return MemoriaDespesa(
         cod_ibge=cod_ibge,
         periodo=periodo,
+        as_of=_effective_as_of(session, cod_ibge, periodo, versao, as_of),
         versao_entrega=versao,
         medidas=list(cls.MEDIDAS),
         totais_funcao=tot_f,
@@ -756,6 +776,7 @@ def build_estagios(
     return EstagiosOut(
         cod_ibge=cod_ibge,
         periodo=periodo,
+        as_of=_effective_as_of(session, cod_ibge, periodo, versao, as_of),
         versao_entrega=versao,
         eixo=eixo,
         totais=totais,
@@ -829,6 +850,7 @@ def build_execucao(
     return ExecucaoOut(
         cod_ibge=cod_ibge,
         periodo=periodo,
+        as_of=_effective_as_of(session, cod_ibge, periodo, versao, as_of),
         versao_entrega=versao,
         eixo=eixo,
         bimestre=bimestre,
@@ -877,6 +899,7 @@ def build_rigidez(
     return RigidezOut(
         cod_ibge=cod_ibge,
         periodo=periodo,
+        as_of=_effective_as_of(session, cod_ibge, periodo, versao, as_of),
         versao_entrega=versao,
         despesa_total=total,
         rigida=rigida,

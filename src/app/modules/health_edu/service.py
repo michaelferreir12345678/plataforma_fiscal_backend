@@ -956,11 +956,11 @@ def build_saude_arvore(
     ]
     try:
         envelope = build_drill_envelope(
-            nodes, node, period=periodo, source_ref=ctx.source_saude
+            nodes, node, period=periodo, source_ref=ctx.source_saude, as_of=ctx.as_of
         )
     except KeyError as exc:
         raise AppError(status=404, title="Subfunção inexistente", detail=str(exc)) from exc
-    return MinimoArvoreOut(**envelope.model_dump(), as_of=ctx.as_of)
+    return MinimoArvoreOut(**envelope.model_dump())
 
 
 def build_educacao_arvore(
@@ -1001,11 +1001,11 @@ def build_educacao_arvore(
     ]
     try:
         envelope = build_drill_envelope(
-            nodes, node, period=periodo, source_ref=ctx.source_educacao
+            nodes, node, period=periodo, source_ref=ctx.source_educacao, as_of=ctx.as_of
         )
     except KeyError as exc:
         raise AppError(status=404, title="Fonte MDE inexistente", detail=str(exc)) from exc
-    return MinimoArvoreOut(**envelope.model_dump(), as_of=ctx.as_of)
+    return MinimoArvoreOut(**envelope.model_dump())
 
 
 def _projecao(

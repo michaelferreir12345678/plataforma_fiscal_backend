@@ -24,6 +24,7 @@ from app.modules.debt import service as debt_service
 from app.modules.indicators import repository as indicators_repo
 from app.modules.indicators import serie_ajuste
 from app.modules.indicators.schemas import SerieAjuste
+from app.modules.ingestion import repository as ingestion_repo
 from app.modules.result import repository, resultado
 from app.modules.result.models import FatoResultado, MetaFiscal
 from app.modules.result.schemas import (
@@ -146,10 +147,18 @@ def materializar_resultado(
 
 def _obter(
     session: Session, cod_ibge: str, periodo: str, as_of: datetime | None
-) -> tuple[FatoResultado, resultado.Apuracao, str]:
+) -> tuple[FatoResultado, resultado.Apuracao, str, datetime | None]:
     versao = _resolve_versao(session, cod_ibge, periodo, as_of)
     fato, ap = materializar_resultado(session, cod_ibge, periodo, versao)
-    return fato, ap, versao
+    efetivo_as_of = ingestion_repo.effective_as_of(
+        session,
+        cod_ibge=cod_ibge,
+        relatorio="RREO",
+        periodo=periodo,
+        versao_entrega=versao,
+        requested=as_of,
+    )
+    return fato, ap, versao, efetivo_as_of
 
 
 # --- derivações ---
@@ -282,12 +291,13 @@ def build_detalhe(
     session: Session, cod_ibge: str, periodo: str, *, as_of: datetime | None = None
 ) -> ResultadoDetalhe:
     """Cabeçalho (resultado × meta) + componentes primários + série (Padrão de Detalhe)."""
-    fato, ap, versao = _obter(session, cod_ibge, periodo, as_of)
+    fato, ap, versao, efetivo_as_of = _obter(session, cod_ibge, periodo, as_of)
     valores = _valores(ap)
     serie, ajuste = _serie(session, cod_ibge, periodo)
     return ResultadoDetalhe(
         cod_ibge=cod_ibge,
         periodo=periodo,
+        as_of=efetivo_as_of,
         versao_entrega=versao,
         valores=valores,
         # Detalhe é a via consumida por relatórios e agregados: **só meta oficial (A6)**.
@@ -307,7 +317,7 @@ def build_cascata(
     session: Session, cod_ibge: str, periodo: str, *, as_of: datetime | None = None
 ) -> CascataOut:
     """Waterfall: receita→−despesa→primário→−juros→nominal (acima) e DCL início→fim (abaixo)."""
-    _, ap, versao = _obter(session, cod_ibge, periodo, as_of)
+    _, ap, versao, efetivo_as_of = _obter(session, cod_ibge, periodo, as_of)
     m = ap.medidas
     rec = m.get("receita_primaria")
     desp = m.get("despesa_primaria")
@@ -349,7 +359,7 @@ def build_cascata(
         ),
     ]
     return CascataOut(
-        cod_ibge=cod_ibge, periodo=periodo, versao_entrega=versao,
+        cod_ibge=cod_ibge, periodo=periodo, as_of=efetivo_as_of, versao_entrega=versao,
         acima_da_linha=acima, abaixo_da_linha=abaixo, source_ref=_source_ref(periodo, versao),
     )
 
@@ -358,7 +368,7 @@ def build_reconciliacao(
     session: Session, cod_ibge: str, periodo: str, *, as_of: datetime | None = None
 ) -> ReconciliacaoOut:
     """Acima × abaixo da linha, ajustes metodológicos e cruzamento da DCL com a Sprint 8."""
-    _, ap, versao = _obter(session, cod_ibge, periodo, as_of)
+    _, ap, versao, efetivo_as_of = _obter(session, cod_ibge, periodo, as_of)
     m = ap.medidas
     ajustes = _recon_ajustes(ap)
     soma = resultado.soma_ajustes(ap.ajustes)
@@ -384,6 +394,7 @@ def build_reconciliacao(
     return ReconciliacaoOut(
         cod_ibge=cod_ibge,
         periodo=periodo,
+        as_of=efetivo_as_of,
         versao_entrega=versao,
         nominal_acima=acima,
         nominal_abaixo=abaixo,
@@ -454,7 +465,7 @@ def build_meta(
     é exclusiva da tela do ente: agregados e relatórios institucionais chamam sem ``org_id``
     e continuam vendo apenas dado oficial (decisão §11.5 da auditoria).
     """
-    _, ap, versao = _obter(session, cod_ibge, periodo, as_of)
+    _, ap, versao, efetivo_as_of = _obter(session, cod_ibge, periodo, as_of)
     resumo = _meta_resumo(ap)
     bimestre = _bimestre(periodo)
     fracao = Decimal(bimestre) / Decimal(6)
@@ -492,6 +503,7 @@ def build_meta(
     return MetaOut(
         cod_ibge=cod_ibge,
         periodo=periodo,
+        as_of=efetivo_as_of,
         versao_entrega=versao,
         resumo=resumo,
         bimestre=bimestre,
@@ -587,11 +599,12 @@ def build_memoria(
     session: Session, cod_ibge: str, periodo: str, *, as_of: datetime | None = None
 ) -> MemoriaResultado:
     """Memória rastreável: componentes, fórmulas, identidades e origem de cada número."""
-    _, ap, versao = _obter(session, cod_ibge, periodo, as_of)
+    _, ap, versao, efetivo_as_of = _obter(session, cod_ibge, periodo, as_of)
     m = ap.medidas
     return MemoriaResultado(
         cod_ibge=cod_ibge,
         periodo=periodo,
+        as_of=efetivo_as_of,
         versao_entrega=versao,
         valores=_valores(ap),
         ajustes=_recon_ajustes(ap),

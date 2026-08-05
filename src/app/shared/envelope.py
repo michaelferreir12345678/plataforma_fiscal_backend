@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, Field
@@ -55,6 +56,10 @@ class DrillEnvelope(BaseModel):
     children: list[DrillChild] = Field(default_factory=list)  # drill DOWN
     measures: Measures = Field(default_factory=dict)  # agregado do próprio node
     period: str | None = None
+    #: Instante bitemporal efetivo (§6.5) — ausente só nas hierarquias que ainda não o
+    #: resolvem (ex.: catálogo/dimensões sem versionamento). Onde a hierarquia é lida de
+    #: uma entrega versionada, vem sempre preenchido para sustentar o "pin" de sub-cards.
+    as_of: datetime | None = None
     source_ref: SourceRef | None = None
 
 

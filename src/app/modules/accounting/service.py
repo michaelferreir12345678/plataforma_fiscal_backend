@@ -172,6 +172,36 @@ def _source_msc(periodo: str, versao: str) -> SourceRef:
     )
 
 
+def _ctx_as_of(session: Session, ctx: Contexto) -> datetime | None:
+    """``as_of`` efetivo (§6.5) do contexto materializado — ecoado no cabeçalho da página.
+
+    Com ``as_of`` explícito na query, é ele mesmo. Sem pedido explícito, resolve o
+    ``homologada_em`` da fonte que ancorou o contexto: a DCA (anual) quando presente —
+    é ela quem fecha o exercício —, senão o último mês da MSC. Sem nenhuma das duas
+    (ente sem patrimônio ingerido), fica ``None``: não há vigência para ecoar.
+    """
+    if ctx.as_of is not None:
+        return ctx.as_of
+    if ctx.dca_versao is not None:
+        return ingestion_repo.entrega_homologada_em(
+            session,
+            cod_ibge=ctx.cod_ibge,
+            relatorio=_REL_DCA,
+            periodo=str(ctx.ano),
+            versao_entrega=ctx.dca_versao,
+        )
+    mes = ctx.mes_referencia
+    if mes is not None:
+        return ingestion_repo.entrega_homologada_em(
+            session,
+            cod_ibge=ctx.cod_ibge,
+            relatorio=_REL_MSC,
+            periodo=mes.periodo,
+            versao_entrega=mes.versao,
+        )
+    return None
+
+
 # --- materialização silver → gold (idempotente por versão) ---
 def _materializar_msc_mes(
     session: Session, cod_ibge: str, uf: str, periodo: str, mes: int, versao: str
@@ -508,7 +538,8 @@ def build_arvore(
         # Sem MSC (ex.: Fortaleza não publica MSC): árvore vazia, mas honesta.
         return DrillEnvelope(
             node=None, breadcrumb=[], children=[], measures={},
-            period=periodo, source_ref=_source_dca(ano, ctx.dca_versao),
+            period=periodo, as_of=_ctx_as_of(session, ctx),
+            source_ref=_source_dca(ano, ctx.dca_versao),
         )
     node_codigo: str | None = None
     if node:
@@ -548,7 +579,8 @@ def build_arvore(
         breadcrumb = _breadcrumb_pcasp(session, node_codigo)
     return DrillEnvelope(
         node=node_ref, breadcrumb=breadcrumb, children=children, measures=node_measures,
-        period=mes.periodo, source_ref=_source_msc(mes.periodo, mes.versao),
+        period=mes.periodo, as_of=_ctx_as_of(session, ctx),
+        source_ref=_source_msc(mes.periodo, mes.versao),
     )
 
 
@@ -615,7 +647,7 @@ def build_matriz(
     variacao = (encerr - abertura) if (encerr is not None and abertura is not None) else None
     ref = rows[-1]
     return MatrizMensalOut(
-        cod_ibge=cod_ibge, ano=ano_r, as_of=as_of.isoformat() if as_of else None,
+        cod_ibge=cod_ibge, ano=ano_r, as_of=_ctx_as_of(session, ctx),
         versao_entrega=ctx.msc_meses[-1].versao, cod_conta=ref.cod_conta,
         descricao=ref.descricao, nivel=ref.nivel, classe=classe, natureza=ref.natureza,
         breadcrumb=_breadcrumb_pcasp(session, ref.cod_conta), meses=meses,
@@ -694,7 +726,7 @@ def build_balanco(
     return BalancoOut(
         cod_ibge=cod_ibge, ano=ano_r, tipo=tipo,
         anexo=f"DCA-Anexo {_TIPO_ANEXO[tipo]}",
-        as_of=as_of.isoformat() if as_of else None, versao_entrega=ctx.dca_versao,
+        as_of=_ctx_as_of(session, ctx), versao_entrega=ctx.dca_versao,
         destaques=_destaques_balanco(session, cod_ibge, ano_r, tipo, ctx.dca_versao),
         linhas=linhas,
         memoria={
@@ -906,7 +938,7 @@ def build_conciliacao(
 
     n_div = sum(1 for c in checks if c.divergente and c.aplicavel)
     return ConciliacaoOut(
-        cod_ibge=cod_ibge, ano=ano_r, as_of=as_of.isoformat() if as_of else None,
+        cod_ibge=cod_ibge, ano=ano_r, as_of=_ctx_as_of(session, ctx),
         tem_msc=ctx.tem_msc, tem_dca=ctx.tem_dca,
         n_checks=len(checks), n_divergencias=n_div, conciliado=n_div == 0,
         checks=checks,
@@ -987,7 +1019,7 @@ def build_detalhe(
         return PatrimonioDetalhe(
             cod_ibge=cod_ibge,
             ano=datetime.now(UTC).year - 1,
-            as_of=as_of.isoformat() if as_of else None,
+            as_of=as_of,
             tem_msc=False,
             tem_dca=False,
             cobertura=_cobertura(
@@ -1020,7 +1052,7 @@ def build_detalhe(
     elif mes is not None:
         source_ref = _source_msc(mes.periodo, mes.versao)
     return PatrimonioDetalhe(
-        cod_ibge=cod_ibge, ano=ano_r, as_of=as_of.isoformat() if as_of else None,
+        cod_ibge=cod_ibge, ano=ano_r, as_of=_ctx_as_of(session, ctx),
         esfera=ctx.esfera, uf=ctx.uf, tem_msc=ctx.tem_msc, tem_dca=ctx.tem_dca,
         ativo=ativo, passivo_pl=passivo_pl, patrimonio_liquido=pl,
         vpd=vpd, vpa=vpa, resultado_patrimonial=resultado, balanco_fechado=balanco_fechado,

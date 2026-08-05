@@ -57,6 +57,36 @@ def _ente() -> str:
     return "6" + "".join(random.choices("0123456789", k=6))
 
 
+#: A14 (Sprint A5): FPM/FUNDEB/TRANSFERENCIA não têm vigência própria — vem de
+#: gold.dim_entrega sob cod_ibge='BR' (ingestão nacional batch, §6.7), compartilhada com
+#: o dado real do mesmo (ano, mês). ``homologada_em`` num futuro bem distante garante que
+#: esta entrega sintética vence o desempate de "mais recente" mesmo contra uma
+#: reingestão real futura — sem isso, o teste ficaria refém de quando o backfill real
+#: rodou. A versão ("1") não colide com nenhuma versão real (que usa datas/tags como
+#: 'pag2024'), e a limpeza abaixo é escopada por versão — nunca apaga a entrega real.
+_HOMOLOGADA_SINTETICA = datetime(2099, 1, 1, tzinfo=UTC)
+
+
+def _dim_entrega_nacional(s, relatorio: str, ano: int, meses: list[int], versao: str = "1") -> None:
+    for mes in meses:
+        s.add(
+            DimEntrega(
+                cod_ibge="BR", relatorio=relatorio, periodo=f"{ano}-M{mes:02d}",
+                versao_entrega=versao, homologada_em=_HOMOLOGADA_SINTETICA, vigente=True,
+            )
+        )
+
+
+def _limpar_dim_entrega_nacional(s, versao: str = "1") -> None:
+    s.execute(
+        delete(DimEntrega).where(
+            DimEntrega.cod_ibge == "BR",
+            DimEntrega.relatorio.in_(["FPM", "FUNDEB", "TRANSFERENCIA"]),
+            DimEntrega.versao_entrega == versao,
+        )
+    )
+
+
 @pytest.fixture
 def limpar() -> Iterator[list[str]]:
     usados: list[str] = []
@@ -75,6 +105,7 @@ def limpar() -> Iterator[list[str]]:
             s.execute(
                 delete(TransferenciaGenerica).where(TransferenciaGenerica.cod_ibge == cod)
             )
+        _limpar_dim_entrega_nacional(s)
         s.commit()
 
 
@@ -213,6 +244,9 @@ def test_conciliacao_sinaliza_divergencia_sem_alterar_rreo(client, make_org, lim
         # Transferência sem par no RREO ⇒ sinalizada, nunca inventada.
         s.add(TransferenciaGenerica(cod_ibge=cod, tipo="ICMS", ano=2024, mes=5,
                                     valor=Decimal("50"), versao_entrega="1"))
+        _dim_entrega_nacional(s, "FPM", 2024, [5, 6])
+        _dim_entrega_nacional(s, "FUNDEB", 2024, [5, 6])
+        _dim_entrega_nacional(s, "TRANSFERENCIA", 2024, [5])
         s.commit()
     fx = make_org(capacidades=["ver"], entes=[cod])
     token = login(client, fx.email, fx.senha)

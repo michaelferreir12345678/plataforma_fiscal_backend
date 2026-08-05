@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -58,6 +59,7 @@ class PessoalDetalhe(BaseModel):
 
     cod_ibge: str
     periodo: str  # RGF quadrimestral (base do Anexo 1)
+    as_of: datetime | None = None
     # Período RREO correspondente (Q1→B2, Q2→B4, Q3→B6): é nele que a RCL e o
     # mart_indicador do limite são apurados — a tela precisa dele para pedir /rcl e
     # simular o limite no mesmo período em que o indicador existe.
@@ -90,6 +92,7 @@ class MemoriaPessoal(BaseModel):
 
     cod_ibge: str
     periodo: str
+    as_of: datetime | None = None
     versao_entrega: str
     rpps: bool
     despesa_bruta: Decimal | None = None
@@ -110,6 +113,7 @@ class MemoriaPessoal(BaseModel):
 class PorPoderOut(BaseModel):
     cod_ibge: str
     periodo: str
+    as_of: datetime | None = None
     versao_entrega: str
     esfera: str | None = None
     rpps: bool

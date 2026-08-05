@@ -13,6 +13,7 @@ from app.modules.catalog import service as catalog_service
 from app.modules.indicators import repository as indicators_repo
 from app.modules.indicators import service as indicators_service
 from app.modules.indicators.limites import LimiteLegal, classificar_faixa
+from app.modules.ingestion import repository as ingestion_repo
 from app.modules.limits import repository
 from app.modules.limits.schemas import (
     LimiteDetail,
@@ -130,23 +131,47 @@ def _esfera_do_ente(session: Session, cod_ibge: str) -> str:
     return ente.esfera
 
 
-def build_limites(session: Session, cod_ibge: str, periodo: str) -> LimitesResponse:
+def build_limites(
+    session: Session, cod_ibge: str, periodo: str, *, as_of: datetime | None = None
+) -> LimitesResponse:
     """Todos os limites do ente/período com faixa e distância ao teto/alerta."""
     esfera = _esfera_do_ente(session, cod_ibge)
-    versao = indicators_repo.resolve_versao_rreo(session, cod_ibge=cod_ibge, periodo=periodo)
+    versao = indicators_repo.resolve_versao_rreo(
+        session, cod_ibge=cod_ibge, periodo=periodo, as_of=as_of
+    )
+    efetivo_as_of = (
+        ingestion_repo.effective_as_of(
+            session,
+            cod_ibge=cod_ibge,
+            relatorio="RREO",
+            periodo=periodo,
+            versao_entrega=versao,
+            requested=as_of,
+        )
+        if versao is not None
+        else as_of
+    )
     itens: list[LimiteItem] = []
     if versao is not None:
         for mart in repository.list_mart_by_periodo(
             session, cod_ibge=cod_ibge, periodo=periodo, versao_entrega=versao
         ):
             limite = _limite_dim(session, mart.indicador, esfera)
-            sentido = limite.sentido if limite else "teto"
-            teto = mart.teto_pct
-            if teto is None:
-                # Sem limite na dimensão, o indicador é gerencial: fica sem teto, não com
-                # teto zero. A distinção decide se a tela mostra faixa ou "sem limite".
-                teto = limite.teto_pct if limite else None
-            alerta = limite.alerta_pct if limite else None
+            if limite is None:
+                # A17: sem entrada em dim_limite_legal, o indicador é **gerencial**
+                # (rcl_per_capita, investimento_rcl, resultado_primario_rcl —
+                # registrados sem faixa/teto por indicators/gerenciais.py, de
+                # propósito). O Monitor de Limites é a tela de conformidade contra
+                # teto/piso legal; sem limite, não há "distância ao teto" nem "faixa"
+                # que façam sentido aqui — o item herdava a formatação de moeda em
+                # milhões e o rótulo "teto 0%" de um indicador medido em R$/hab
+                # (Fortaleza: R$ 4.870,66/hab virava "R$ 0,0 M"). Esses indicadores já
+                # têm o lugar certo: o Benchmarking (Módulo 12), que os formata pela
+                # unidade real (`formatBenchmarkValue`).
+                continue
+            sentido = limite.sentido
+            teto = mart.teto_pct if mart.teto_pct is not None else limite.teto_pct
+            alerta = limite.alerta_pct
             dist_teto, dist_alerta = _distancias(sentido, mart.valor_pct_rcl, teto, alerta)
             itens.append(
                 LimiteItem(
@@ -158,7 +183,7 @@ def build_limites(session: Session, cod_ibge: str, periodo: str) -> LimitesRespo
                     faixa=mart.faixa,
                     teto_pct=teto,
                     alerta_pct=alerta,
-                    prudencial_pct=limite.prudencial_pct if limite else None,
+                    prudencial_pct=limite.prudencial_pct,
                     distancia_teto=dist_teto,
                     distancia_alerta=dist_alerta,
                     denominador=mart.denominador,
@@ -168,6 +193,7 @@ def build_limites(session: Session, cod_ibge: str, periodo: str) -> LimitesRespo
     return LimitesResponse(
         cod_ibge=cod_ibge,
         periodo=periodo,
+        as_of=efetivo_as_of,
         versao_entrega=versao or "",
         itens=itens,
         source_ref=SourceRef(relatorio="RREO", periodo=periodo, versao_entrega=versao),
@@ -218,6 +244,14 @@ def build_limite_detail(
             title="Sem RREO",
             detail=f"Sem RREO vigente para {cod_ibge} em {periodo}.",
         )
+    efetivo_as_of = ingestion_repo.effective_as_of(
+        session,
+        cod_ibge=cod_ibge,
+        relatorio="RREO",
+        periodo=periodo,
+        versao_entrega=versao,
+        requested=as_of,
+    )
     mart = indicators_repo.get_mart_indicador(
         session, cod_ibge=cod_ibge, periodo=periodo, indicador=indicador, versao_entrega=versao
     )
@@ -244,6 +278,7 @@ def build_limite_detail(
     return LimiteDetail(
         cod_ibge=cod_ibge,
         periodo=periodo,
+        as_of=efetivo_as_of,
         indicador=indicador,
         esfera=esfera,
         faixa=mart.faixa,

@@ -19,17 +19,20 @@ from app.shared.scope import assert_ente_in_scope
 
 router = APIRouter(tags=["limits"])
 
+_AS_OF_Q = Query(None, description="Consulta bitemporal 'as of' (§6.5).")
+
 
 @router.get("/entes/{cod_ibge}/limites", response_model=LimitesResponse)
 def listar_limites(
     cod_ibge: str,
     periodo: str = Query(..., description="Período RREO (ex.: 2024-B6)."),
+    as_of: datetime | None = _AS_OF_Q,
     principal: Principal = Depends(require_capability("ver")),
     session: Session = Depends(get_db),
 ) -> LimitesResponse:
     """Todos os limites do ente/período com faixa e distância ao teto/alerta."""
     assert_ente_in_scope(session, principal, cod_ibge)
-    return service.build_limites(session, cod_ibge, periodo)
+    return service.build_limites(session, cod_ibge, periodo, as_of=as_of)
 
 
 @router.get("/entes/{cod_ibge}/limites/{indicador}", response_model=LimiteDetail)
@@ -37,7 +40,7 @@ def detalhar_limite(
     cod_ibge: str,
     indicador: str,
     periodo: str = Query(..., description="Período RREO (ex.: 2024-B6)."),
-    as_of: datetime | None = Query(None),
+    as_of: datetime | None = _AS_OF_Q,
     principal: Principal = Depends(require_capability("ver")),
     session: Session = Depends(get_db),
 ) -> LimiteDetail:

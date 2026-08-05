@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -45,6 +46,7 @@ class DespesaDetalhe(BaseModel):
 
     cod_ibge: str
     periodo: str
+    as_of: datetime | None = None
     versao_entrega: str
     eixo: str
     totais: DespesaTotais
@@ -85,6 +87,7 @@ class MemoriaDespesa(BaseModel):
 
     cod_ibge: str
     periodo: str
+    as_of: datetime | None = None
     versao_entrega: str
     medidas: list[str]
     totais_funcao: DespesaTotais
@@ -132,6 +135,7 @@ class EstagioItem(BaseModel):
 class EstagiosOut(BaseModel):
     cod_ibge: str
     periodo: str
+    as_of: datetime | None = None
     versao_entrega: str
     eixo: str
     totais: DespesaTotais
@@ -158,6 +162,7 @@ class ExecucaoEstagio(BaseModel):
 class ExecucaoOut(BaseModel):
     cod_ibge: str
     periodo: str
+    as_of: datetime | None = None
     versao_entrega: str
     eixo: str = "funcao"  # anexo de origem: função (A02) não publica 'pago'
     bimestre: int
@@ -179,6 +184,7 @@ class RigidezOut(BaseModel):
 
     cod_ibge: str
     periodo: str
+    as_of: datetime | None = None
     versao_entrega: str
     despesa_total: Decimal
     rigida: Decimal
