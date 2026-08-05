@@ -212,6 +212,8 @@ def test_conciliacao_reconciliada(client, make_org, limpar) -> None:
     assert set(checks) >= {"rollup_msc", "balanco_fecha", "msc_dca_ativo", "msc_dca_encerramento"}
     assert conc["tem_msc"] and conc["tem_dca"]
     assert conc["conciliado"] is True and conc["n_divergencias"] == 0
+    # U33 (Sprint F2): com MSC, o rótulo continua descrevendo os 3 checks de verdade.
+    assert conc["titulo"] == "Conciliação MSC ↔ DCA"
     # Ativo = Passivo + PL (DCA).
     assert float(checks["balanco_fecha"]["esquerda"]) == 200.0
     assert float(checks["balanco_fecha"]["direita"]) == 200.0
@@ -240,6 +242,12 @@ def test_conciliacao_sinaliza_divergencia(client, make_org, limpar) -> None:
     assert checks["balanco_fecha"]["divergente"] is True
     assert float(checks["balanco_fecha"]["diferenca"]) == 10.0  # 200 − 190
     assert conc["conciliado"] is False and conc["n_divergencias"] >= 1
+    # U33 (Sprint F2): sem MSC (com_msc=False), só o check do Balanço roda (1 de 3) — o
+    # título não pode dizer "Conciliação MSC ↔ DCA" como se os três tivessem passado.
+    assert conc["tem_msc"] is False
+    assert conc["titulo"] == "Balanço fecha"
+    assert conc["n_checks"] == 1
+    assert "não publica MSC" in conc["observacao"]
 
 
 # --- balanços (DCA) ---

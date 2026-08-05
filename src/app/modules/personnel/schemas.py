@@ -67,6 +67,10 @@ class PessoalDetalhe(BaseModel):
     versao_entrega: str
     esfera: str | None = None
     rpps: bool
+    #: U25 (Sprint F2): o RGF é quadrimestral, salvo município < 50 mil hab. (LRF art. 63,
+    #: II) — o cálculo (mapeamento Q→B, `alerts.rules.cadencia_rgf`) já trata os dois
+    #: casos certo; só o cabeçalho não dizia qual cadência vale para este ente.
+    cadencia_rgf: str = "quadrimestral"
     totais: PessoalTotais
     rcl_12m: Decimal | None = None
     executivo: PoderItem | None = None  # indicador-assinatura (teto 54%/49% da RCL)

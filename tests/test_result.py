@@ -208,6 +208,46 @@ def test_meta_nao_informada(client, make_org, limpar) -> None:
     assert "não informada" in meta["observacao"]
 
 
+def test_meta_nominal_informada_sem_meta_primaria(client, make_org, limpar) -> None:
+    """U28 (Sprint F2): quando o ente só publica meta NOMINAL, `informada` já era True
+    (a checagem do backend olha os dois); o achado era o front não desenhar essas linhas."""
+    cod = _ente()
+    limpar.append(cod)
+    linhas = [
+        *[x for x in _A6 if "Meta" not in x[1]],
+        (61, "MetaDeResultadoNominalFixadaNoAnexoDeM", VALOR, "80"),
+    ]
+    _seed(cod, linhas=linhas)
+    fx = make_org(capacidades=["ver"], entes=[cod])
+    token = login(client, fx.email, fx.senha)
+
+    meta = client.get(
+        f"/entes/{cod}/resultado/meta", params={"periodo": PERIODO}, headers=auth_header(token)
+    ).json()
+    assert meta["resumo"]["informada"] is True
+    assert meta["resumo"]["meta_primario"] is None
+    assert float(meta["resumo"]["meta_nominal"]) == 80.0
+    assert float(meta["resumo"]["realizado_nominal"]) == 150.0  # resultado_nominal do fato
+
+
+def test_memoria_formulas_verbalizam_o_regime_rpps(client, make_org, limpar) -> None:
+    """U27 (Sprint F2): a memória diz "(com RPPS)"/"(sem RPPS)" nas fórmulas — não só na
+    NotaRpps recolhida do front. resultado.py: primário vem da linha ComRPPS; nominal e
+    abaixo da linha, das linhas SemRPPS."""
+    cod = _ente()
+    limpar.append(cod)
+    _seed(cod)
+    fx = make_org(capacidades=["ver"], entes=[cod])
+    token = login(client, fx.email, fx.senha)
+
+    mem = client.get(
+        f"/entes/{cod}/resultado/memoria", params={"periodo": PERIODO}, headers=auth_header(token)
+    ).json()
+    assert "(com RPPS)" in mem["formula_primario"]
+    assert "(sem RPPS)" in mem["formula_nominal"]
+    assert "(sem RPPS)" in mem["formula_nominal_abaixo"]
+
+
 def test_memoria_rastreavel(client, make_org, limpar) -> None:
     cod = _ente()
     limpar.append(cod)

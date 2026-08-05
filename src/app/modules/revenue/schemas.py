@@ -31,6 +31,14 @@ class DependenciaResumo(BaseModel):
     total: Decimal
     pct_propria: Decimal | None = None
     pct_transferida: Decimal | None = None
+    # U21/U22 (Sprint F2): a barra "própria × transferida" fundia corrente e capital numa
+    # tinta só. São naturezas econômicas diferentes (uma recorrente, outra eventual — ex.:
+    # convênio de capital) e a fusão escondia essa diferença. Desdobrado sem mudar
+    # `transferida`, que continua sendo a soma dos dois.
+    transferida_corrente: Decimal | None = None
+    transferida_capital: Decimal | None = None
+    pct_transferida_corrente: Decimal | None = None
+    pct_transferida_capital: Decimal | None = None
 
 
 class SerieReceitaItem(BaseModel):

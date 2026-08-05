@@ -37,7 +37,23 @@ class CapagHero(BaseModel):
     endividamento_pct: Decimal | None = None
     ind_poupanca: Decimal | None = None
     ind_liquidez: Decimal | None = None
+    #: U26 (Sprint F2): a coluna "metodologia_versao" do conector mistura três grandezas
+    #: conforme o layout — ICF (oficial), versão de metodologia (estadual) ou o **ano-base**
+    #: real da planilha (municipal histórico, coluna ``Ano_Base``). Quando o valor bruto é
+    #: um ano plausível, ele é o ano-base da fonte, não uma "metodologia" — extraído aqui
+    #: (campo novo) sem tocar no dado armazenado; ``metodologia_versao`` continua intacto
+    #: e some da resposta só nesse caso (para não repetir o mesmo número sob dois rótulos).
     metodologia_versao: str | None = None
+    #: "ICF" (município — layout oficial do Tesouro) ou "Metodologia" (estado — layout
+    #: estadual); ``None`` quando não há ``metodologia_versao`` a rotular. Resolvido pelo
+    #: mesmo critério que já escolhe o relatório da entrega (``_relatorio_capag``:
+    #: ``len(cod_ibge) == 7`` ⇒ município), sem precisar de coluna nova para saber a origem.
+    metodologia_rotulo: str | None = None
+    ano_base_fonte: int | None = None
+    #: True quando o layout trouxe ``Ano_Base`` e ele diverge do ano-base esperado
+    #: (``ano_ref - 1`` — a classificação de um exercício sempre apura o anterior já
+    #: encerrado). Divergência é sinalizada, nunca corrigida silenciosamente.
+    ano_base_fonte_diverge: bool | None = None
     as_of: datetime | None = None
     source_ref: SourceRef
 

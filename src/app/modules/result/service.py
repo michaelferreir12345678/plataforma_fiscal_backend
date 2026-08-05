@@ -608,9 +608,15 @@ def build_memoria(
         versao_entrega=versao,
         valores=_valores(ap),
         ajustes=_recon_ajustes(ap),
-        formula_primario="resultado_primario = receita_primaria − despesa_primaria",
-        formula_nominal="resultado_nominal = resultado_primario − juros_liquidos",
-        formula_nominal_abaixo="resultado_nominal abaixo = dcl_inicio − dcl_fim",
+        # U27 (Sprint F2): o Anexo 6 publica primário e nominal em linhas com regime
+        # diferente (resultado.py: "...ComRPPSAcimaDaLinha" alimenta o primário,
+        # "...SemRPPS..." alimenta o nominal e o abaixo da linha) — a memória verbaliza
+        # o regime de cada fórmula, não só a NotaRpps recolhida da tela.
+        formula_primario="resultado_primario (com RPPS) = receita_primaria − despesa_primaria",
+        formula_nominal=(
+            "resultado_nominal (sem RPPS) = resultado_primario (com RPPS) − juros_liquidos"
+        ),
+        formula_nominal_abaixo="resultado_nominal abaixo (sem RPPS) = dcl_inicio − dcl_fim",
         identidade_primario_ok=_identidade_primario(m),
         identidade_nominal_dcl_ok=_identidade_nominal_dcl(m),
         fontes=ap.fontes,

@@ -937,17 +937,33 @@ def build_conciliacao(
         )
 
     n_div = sum(1 for c in checks if c.divergente and c.aplicavel)
-    return ConciliacaoOut(
-        cod_ibge=cod_ibge, ano=ano_r, as_of=_ctx_as_of(session, ctx),
-        tem_msc=ctx.tem_msc, tem_dca=ctx.tem_dca,
-        n_checks=len(checks), n_divergencias=n_div, conciliado=n_div == 0,
-        checks=checks,
-        observacao=(
+    # U33 (Sprint F2): "Conciliação MSC ↔ DCA" describes 3 checks — mas 2 deles (rollup e
+    # o cruzamento MSC×DCA) só existem quando há MSC. Sem MSC, só a identidade do Balanço
+    # roda: chamar isso de "conciliado" na mesma legenda do caso com MSC faz o gestor
+    # concluir que os três testes passaram, quando só um rodou.
+    titulo = "Conciliação MSC ↔ DCA" if ctx.tem_msc else "Balanço fecha"
+    observacao = (
+        (
             "Conciliação do patrimônio: (1) rollup da MSC (pai = Σ filhos, convenção devedor "
             "líquido, exata); (2) identidade do Balanço (Ativo = Passivo + PL); (3) cruzamento "
             "MSC↔DCA no fechamento do exercício. Tolerância de R$ 1,00 (arredondamento). "
             "Divergência acima da tolerância é sinalizada — nunca silenciada."
-        ),
+        )
+        if ctx.tem_msc
+        else (
+            "Este ente não publica MSC: só a identidade do Balanço Patrimonial roda "
+            "(Ativo = Passivo + PL, DCA Anexo I-AB). Os checks de rollup e de cruzamento "
+            "MSC↔DCA exigem a Matriz de Saldos Contábeis e não se aplicam aqui. Tolerância "
+            "de R$ 1,00 (arredondamento)."
+        )
+    )
+    return ConciliacaoOut(
+        cod_ibge=cod_ibge, ano=ano_r, as_of=_ctx_as_of(session, ctx),
+        tem_msc=ctx.tem_msc, tem_dca=ctx.tem_dca,
+        titulo=titulo,
+        n_checks=len(checks), n_divergencias=n_div, conciliado=n_div == 0,
+        checks=checks,
+        observacao=observacao,
         memoria={
             "tolerancia_reais": str(_TOL),
             "convencao_rollup": "devedor líquido (D +, C −); exibição em convenção natural",

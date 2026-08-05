@@ -111,6 +111,11 @@ class ConciliacaoOut(BaseModel):
     as_of: datetime | None = None
     tem_msc: bool
     tem_dca: bool
+    #: U33 (Sprint F2): "Conciliação MSC ↔ DCA" só faz sentido quando há MSC — sem ela,
+    #: só o check do Balanço (Ativo = Passivo + PL) roda, e chamar isso de "conciliação
+    #: entre fontes" descreve dois checks que nunca executaram. Rótulo condicional,
+    #: calculado aqui (fonte única) em vez de reimplementado em cada consumidor.
+    titulo: str = "Conciliação MSC ↔ DCA"
     n_checks: int
     n_divergencias: int
     conciliado: bool

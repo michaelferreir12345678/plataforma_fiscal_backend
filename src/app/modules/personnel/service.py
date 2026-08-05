@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
+from app.modules.alerts import rules as alert_rules
 from app.modules.catalog import service as catalog_service
 from app.modules.catalog.models import DimEnte
 from app.modules.indicators import serie_ajuste
@@ -548,6 +549,7 @@ def build_detalhe(
         versao_entrega=versao,
         esfera=ente.esfera,
         rpps=ente.rpps,
+        cadencia_rgf=alert_rules.cadencia_rgf(ente.esfera, ente.populacao),
         totais=totais,
         rcl_12m=rcl,
         executivo=_item_executivo(session, cod_ibge, periodo, medidas, as_of),

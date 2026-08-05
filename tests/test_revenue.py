@@ -200,6 +200,10 @@ def test_detalhe_realizacao_e_dependencia(client, make_org, limpar) -> None:
     assert float(det["rcl_12m"]) == 10_000_000.0  # RCL da Sprint 2 reusada
     assert float(det["dependencia"]["transferida"]) == 500.0
     assert float(det["dependencia"]["propria"]) == 700.0
+    # U21/U22 (Sprint F2): desdobramento corrente × capital — a fixture só tem
+    # TransferenciasCorrentes (FPM + FUNDEB), então toda a transferida é corrente.
+    assert float(det["dependencia"]["transferida_corrente"]) == 500.0
+    assert float(det["dependencia"]["transferida_capital"]) == 0.0
     assert [c["codigo"] for c in det["composicao"]] == ["ReceitasCorrentes", "ReceitasDeCapital"]
     assert det["serie"][-1]["periodo"] == PERIODO
     assert [b["codigo"] for b in det["periodo_breadcrumb"]] == ["2024"]  # drill temporal UP
@@ -225,6 +229,54 @@ def test_detalhe_realizacao_e_dependencia(client, make_org, limpar) -> None:
     assert maiores[0]["descricao"] == "Cota-Parte do FPM"  # maior transferência
     assert float(maiores[0]["arrecadado_acum"]) == 300.0
     assert float(maiores[0]["pct_das_transferencias"]) == 60.0
+
+
+def test_dependencia_desdobra_transferencia_de_capital(client, make_org, limpar) -> None:
+    """U21/U22 (Sprint F2): TransferenciasDeCapital soma em `transferida_capital`, não
+    fica escondida dentro de um único "transferida" com corrente."""
+    cod = _ente()
+    limpar.append(cod)
+    linhas = [
+        *_LINHAS[:-1],  # tudo menos o total (SubtotalDasReceitas)
+        (71, "TransferenciasDeCapital", "TRANSFERÊNCIAS DE CAPITAL", "150", "150"),
+        (78, "TransferenciasDaUniaoCapital", "Convênio da União", None, "150"),
+        (90, "SubtotalDasReceitas", "SUBTOTAL DAS RECEITAS (III) = (I + II)", "1650", "1350"),
+    ]
+    _seed_rreo(cod, linhas=linhas)
+    fx = make_org(capacidades=["ver"], entes=[cod])
+    token = login(client, fx.email, fx.senha)
+
+    det = client.get(
+        f"/entes/{cod}/receita", params={"periodo": PERIODO}, headers=auth_header(token)
+    ).json()
+    # transferida = 500 (corrente: FPM 300 + FUNDEB 200) + 150 (capital) = 650.
+    assert float(det["dependencia"]["transferida"]) == 650.0
+    assert float(det["dependencia"]["transferida_corrente"]) == 500.0
+    assert float(det["dependencia"]["transferida_capital"]) == 150.0
+    # A soma dos dois desdobramentos nunca pode divergir do total — é o mesmo número,
+    # só exibido em duas cores em vez de uma.
+    soma = float(det["dependencia"]["transferida_corrente"]) + float(
+        det["dependencia"]["transferida_capital"]
+    )
+    assert soma == float(det["dependencia"]["transferida"])
+
+
+def test_memoria_hierarquia_e_3_niveis_nao_5(client, make_org, limpar) -> None:
+    """U19 (Sprint F2): a árvore só deriva Categoria → Origem → Espécie (3 níveis) — o
+    SICONFI não expõe Rubrica/Alínea (sem código numérico pontuado)."""
+    cod = _ente()
+    limpar.append(cod)
+    _seed_rreo(cod)
+    fx = make_org(capacidades=["ver"], entes=[cod])
+    token = login(client, fx.email, fx.senha)
+
+    mem = client.get(
+        f"/entes/{cod}/receita/memoria",
+        params={"periodo": PERIODO}, headers=auth_header(token),
+    ).json()
+    assert mem["hierarquia"] == "Categoria → Origem → Espécie (natureza da receita)"
+    assert "Rubrica" not in mem["hierarquia"]
+    assert "Alínea" not in mem["hierarquia"]
 
 
 def test_conciliacao_sinaliza_divergencia_sem_alterar_rreo(client, make_org, limpar) -> None:

@@ -60,6 +60,12 @@ _REL_SADIPEM_CRONO = "SADIPEM-CRONOGRAMA"
 _ANEXO_DDCL = "Anexo 02 — DDCL"
 _ANO_RE = re.compile(r"^(\d{4})")
 _ZERO = Decimal(0)
+# U26 (Sprint F2): o layout municipal histórico da CAPAG grava a coluna ``Ano_Base`` (um
+# ano-calendário puro) dentro do mesmo campo que os demais layouts usam para ICF/versão de
+# metodologia (texto). Só um valor puramente numérico de 4 dígitos, em faixa plausível,
+# é tratado como ano-base — texto como "Metodologia-v1" ou um ICF numérico com casas
+# decimais nunca casa.
+_ANO_BASE_RE = re.compile(r"^(19|20)\d{2}$")
 
 
 def _ano(periodo: str) -> int:
@@ -474,7 +480,31 @@ def _ensure_capag(
     return fato
 
 
+def _parse_ano_base_fonte(bruto: str | None) -> int | None:
+    """Extrai o ano-base quando ``metodologia_versao`` é, na verdade, ``Ano_Base``.
+
+    Só o valor puramente numérico de 4 dígitos em ``[1900, 2099]`` casa — texto de
+    metodologia ("Metodologia-v1", "STN-fixture") ou um ICF numérico com casas decimais
+    não casam, então o campo continua ``None`` e ``metodologia_versao`` segue como estava.
+    """
+    if bruto is None:
+        return None
+    texto = bruto.strip()
+    if not _ANO_BASE_RE.match(texto):
+        return None
+    return int(texto)
+
+
 def _capag_hero(fato: FatoCapag, *, as_of: datetime | None) -> CapagHero:
+    ano_base_fonte = _parse_ano_base_fonte(fato.metodologia_versao)
+    # Quando o bruto era o ano-base, ele não é "metodologia": some daqui para não repetir
+    # o mesmo número sob o rótulo errado — reaparece em ano_base_fonte.
+    metodologia_versao = None if ano_base_fonte is not None else fato.metodologia_versao
+    metodologia_rotulo = (
+        ("ICF" if _relatorio_capag(fato.cod_ibge) == _REL_CAPAG else "Metodologia")
+        if metodologia_versao is not None
+        else None
+    )
     return CapagHero(
         ano_ref=fato.ano_ref,
         nota_final=fato.nota_final,
@@ -482,7 +512,15 @@ def _capag_hero(fato: FatoCapag, *, as_of: datetime | None) -> CapagHero:
         endividamento_pct=calculos.endividamento_capag_pct(fato.ind_endividamento),
         ind_poupanca=fato.ind_poupanca,
         ind_liquidez=fato.ind_liquidez,
-        metodologia_versao=fato.metodologia_versao,
+        metodologia_versao=metodologia_versao,
+        metodologia_rotulo=metodologia_rotulo,
+        ano_base_fonte=ano_base_fonte,
+        # None quando não há ano-base a conferir (a fonte não trouxe ``Ano_Base``) — não
+        # é "sem divergência", é "nada a comparar". Mesma regra de ``distancia_teto``:
+        # devolver False aqui diria "conferido, bate" para um caso que nunca foi apurado.
+        ano_base_fonte_diverge=(
+            None if ano_base_fonte is None else ano_base_fonte != fato.ano_ref - 1
+        ),
         as_of=as_of,
         source_ref=_source_capag(fato.ano_ref, fato.versao_entrega, fato.cod_ibge),
     )

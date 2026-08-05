@@ -685,3 +685,163 @@ def test_divida_403_fora_da_carteira(client, make_org) -> None:
     )
     assert response.status_code == 403
     assert response.json()["title"] == "Ente fora do escopo"
+
+
+# --- Sprint F2 (U26): ano-base × metodologia/ICF não se misturam -----------------------
+#
+# capag.py::_parse_municipal_historico lê Ano_Base (um ano-calendário) para a mesma coluna
+# que os layouts oficial/estadual usam para ICF/metodologia (texto). O rótulo único
+# "Metodologia" herdava as três grandezas. `_capag_hero` (debt/service.py) separa: quando
+# o valor bruto é um ano plausível, ele sai como `ano_base_fonte` e `metodologia_versao`
+# fica None nessa resposta (o mesmo número não aparece duas vezes sob dois rótulos).
+#
+# Cada teste usa seu próprio `ano_ref` (entrega CAPAG nacional, escopo 'BR') — todos fora
+# de ANO=2097 (debt_case) e distintos entre si, porque a entrega CAPAG é global e duas
+# `vigente=True` para o mesmo período/relatório disputariam a resolução.
+
+
+def _seed_capag_u26(
+    cod_ibge: str, ano_ref: int, versao: str, metodologia_versao: str | None
+) -> None:
+    with SessionLocal() as session:
+        # O banco de dev não reseta entre execuções (mesma lição já registrada em outras
+        # sprints): uma corrida anterior deste mesmo teste deixou uma entrega BR/CAPAG
+        # `vigente=True` para este `ano_ref`, que disputaria a resolução com a nova.
+        session.execute(
+            update(DimEntrega)
+            .where(
+                DimEntrega.cod_ibge == "BR",
+                DimEntrega.relatorio == "CAPAG",
+                DimEntrega.periodo == str(ano_ref),
+            )
+            .values(vigente=False)
+        )
+        _entrega(
+            session,
+            cod_ibge="BR",
+            relatorio="CAPAG",
+            periodo=str(ano_ref),
+            versao=versao,
+            homologada_em=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        session.add(
+            TesouroCapag(
+                cod_ibge=cod_ibge,
+                ano_ref=ano_ref,
+                nota_final="B",
+                ind_endividamento=Decimal("0.60"),
+                ind_poupanca=Decimal("0.10"),
+                ind_liquidez=Decimal("1.10"),
+                metodologia_versao=metodologia_versao,
+                valid_time=date(ano_ref, 12, 31),
+                versao_entrega=versao,
+            )
+        )
+        session.commit()
+
+
+def test_capag_ano_base_fonte_separado_da_metodologia(client, make_org) -> None:
+    """Layout municipal histórico: ``Ano_Base`` vira ``ano_base_fonte``, não "Metodologia"."""
+    cod = _ente()
+    ano_ref = 2098
+    _seed_capag_u26(cod, ano_ref, f"{cod}-capag-anobase", metodologia_versao=str(ano_ref - 1))
+    org = make_org(capacidades=["ver"], entes=[cod])
+    token = login(client, org.email, org.senha)
+    body = client.get(
+        f"/entes/{cod}/divida/capag",
+        params={"periodo": f"{ano_ref}-Q3"},
+        headers=auth_header(token),
+    ).json()
+    assert body["hero"]["ano_base_fonte"] == ano_ref - 1
+    assert body["hero"]["metodologia_versao"] is None
+    assert body["hero"]["metodologia_rotulo"] is None
+    # ano_base_fonte (ano_ref - 1) bate com o esperado — sem divergência.
+    assert body["hero"]["ano_base_fonte_diverge"] is False
+
+
+def test_capag_metodologia_icf_nao_vira_ano_base(client, make_org) -> None:
+    """Layout oficial/estadual: ICF/metodologia (texto) não casa com o parser de ano."""
+    cod = _ente()
+    ano_ref = 2099
+    _seed_capag_u26(cod, ano_ref, f"{cod}-capag-icf", metodologia_versao="Metodologia-v3")
+    org = make_org(capacidades=["ver"], entes=[cod])
+    token = login(client, org.email, org.senha)
+    body = client.get(
+        f"/entes/{cod}/divida/capag",
+        params={"periodo": f"{ano_ref}-Q3"},
+        headers=auth_header(token),
+    ).json()
+    assert body["hero"]["metodologia_versao"] == "Metodologia-v3"
+    # cod (7 dígitos) é município ⇒ o texto vem do layout oficial ⇒ rótulo "ICF".
+    assert body["hero"]["metodologia_rotulo"] == "ICF"
+    assert body["hero"]["ano_base_fonte"] is None
+    assert body["hero"]["ano_base_fonte_diverge"] is None
+
+
+def test_capag_metodologia_rotulo_estadual(client, make_org) -> None:
+    """Ente estadual (cod_ibge curto) publica pelo layout CAPAG-EST: rótulo "Metodologia",
+    não "ICF" — são publicações e conectores diferentes do Tesouro (`_relatorio_capag`)."""
+    cod = "23"  # UF (não tem 7 dígitos) ⇒ _relatorio_capag resolve CAPAG-EST
+    ano_ref = 2097  # distinto de 2098/2099/2050 usados pelos outros testes deste bloco
+    # versao_entrega precisa ser única a cada execução — "23" é fixo (é a UF), e o banco de
+    # dev não reseta entre corridas (mesma lição do resto do arquivo).
+    versao = f"{cod}-capag-est-{_ente()}"
+    with SessionLocal() as session:
+        session.execute(
+            update(DimEntrega)
+            .where(
+                DimEntrega.cod_ibge == "BR",
+                DimEntrega.relatorio == "CAPAG-EST",
+                DimEntrega.periodo == str(ano_ref),
+            )
+            .values(vigente=False)
+        )
+        session.add(
+            DimEntrega(
+                cod_ibge="BR", relatorio="CAPAG-EST", periodo=str(ano_ref),
+                versao_entrega=versao, homologada_em=datetime(2026, 1, 1, tzinfo=UTC),
+                vigente=True,
+            )
+        )
+        session.execute(
+            delete(TesouroCapag).where(
+                TesouroCapag.cod_ibge == cod, TesouroCapag.ano_ref == ano_ref
+            )
+        )
+        session.add(
+            TesouroCapag(
+                cod_ibge=cod, ano_ref=ano_ref, nota_final="A",
+                ind_endividamento=Decimal("0.30"), ind_poupanca=Decimal("0.20"),
+                ind_liquidez=Decimal("1.80"), metodologia_versao="Metodologia estadual v1",
+                valid_time=date(ano_ref, 12, 31), versao_entrega=versao,
+            )
+        )
+        session.commit()
+    org = make_org(capacidades=["ver"], entes=[cod])
+    token = login(client, org.email, org.senha)
+    body = client.get(
+        f"/entes/{cod}/divida/capag",
+        params={"periodo": f"{ano_ref}-Q3"},
+        headers=auth_header(token),
+    ).json()
+    assert body["hero"]["metodologia_versao"] == "Metodologia estadual v1"
+    assert body["hero"]["metodologia_rotulo"] == "Metodologia"
+
+
+def test_capag_ano_base_fonte_divergente_e_sinalizado(client, make_org) -> None:
+    """Ano-base publicado ≠ ano_ref-1: sinalizado, nunca corrigido em silêncio."""
+    cod = _ente()
+    ano_ref = 2050
+    ano_base_errado = ano_ref - 3  # 2047 — casa com o parser de ano (1900–2099), só diverge
+    _seed_capag_u26(
+        cod, ano_ref, f"{cod}-capag-diverge", metodologia_versao=str(ano_base_errado)
+    )
+    org = make_org(capacidades=["ver"], entes=[cod])
+    token = login(client, org.email, org.senha)
+    body = client.get(
+        f"/entes/{cod}/divida/capag",
+        params={"periodo": f"{ano_ref}-Q3"},
+        headers=auth_header(token),
+    ).json()
+    assert body["hero"]["ano_base_fonte"] == ano_base_errado
+    assert body["hero"]["ano_base_fonte_diverge"] is True

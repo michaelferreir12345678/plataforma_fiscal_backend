@@ -336,15 +336,25 @@ def _dependencia(nodes: list[HierarchyNode], medidas: dict[str, Medidas]) -> Dep
     """Própria × transferida sobre o arrecadado acumulado, sem dupla contagem.
 
     Percorre só as **raízes das origens transferidas** (``1.7``/``2.4``); o restante
-    do total é receita própria.
+    do total é receita própria. Desdobra ainda por categoria econômica (corrente ×
+    capital — U21/U22): as duas raízes de transferência (``TransferenciasCorrentes``,
+    ``TransferenciasDeCapital``) são filhas diretas de ``ReceitasCorrentes``/
+    ``ReceitasDeCapital``, então o ``parent_codigo`` já diz a qual das duas pertence.
     """
     total = _totais(nodes, medidas).arrecadado_acum or Decimal(0)
     transferida = Decimal(0)
+    transferida_corrente = Decimal(0)
+    transferida_capital = Decimal(0)
     for node in nodes:
         if natureza.is_transferida_origem(node.codigo) and (
             node.parent_codigo is None or not natureza.is_transferida_origem(node.parent_codigo)
         ):
-            transferida += medidas.get(node.codigo, {}).get("arrecadado_acum", Decimal(0))
+            valor = medidas.get(node.codigo, {}).get("arrecadado_acum", Decimal(0))
+            transferida += valor
+            if node.parent_codigo == "ReceitasDeCapital":
+                transferida_capital += valor
+            else:
+                transferida_corrente += valor
     propria = total - transferida
     return DependenciaResumo(
         propria=propria,
@@ -352,6 +362,10 @@ def _dependencia(nodes: list[HierarchyNode], medidas: dict[str, Medidas]) -> Dep
         total=total,
         pct_propria=_pct(propria, total),
         pct_transferida=_pct(transferida, total),
+        transferida_corrente=transferida_corrente,
+        transferida_capital=transferida_capital,
+        pct_transferida_corrente=_pct(transferida_corrente, total),
+        pct_transferida_capital=_pct(transferida_capital, total),
     )
 
 
@@ -523,7 +537,11 @@ def build_memoria(
         medidas=list(natureza.MEDIDAS),
         totais=_totais(nodes, medidas),
         formula_realizacao="realizacao_pct = arrecadado_acum / previsto_atualizado × 100",
-        hierarquia="Categoria → Origem → Espécie → Rubrica → Alínea (natureza da receita)",
+        # U19 (Sprint F2): a árvore derivada de natureza.construir_arvore só produz 3
+        # níveis (Categoria → Origem → Espécie, por ordem de leitura + caixa do texto);
+        # o rótulo anunciava 5 (…→ Rubrica → Alínea), que o SICONFI não expõe (sem código
+        # numérico pontuado — ver o docstring de natureza.py).
+        hierarquia="Categoria → Origem → Espécie (natureza da receita)",
         inconsistencias=_inconsistencias(nodes, fatos, medidas),
         detalhes={
             "linhas_fato": len(fatos),

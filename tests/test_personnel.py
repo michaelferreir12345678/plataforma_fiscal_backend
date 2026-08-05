@@ -80,13 +80,14 @@ def _seed(
     rgf_rows: list[tuple[str, str, str]] | None = None,
     periodo: str = PERIODO,
     seed_rreo: bool = True,
+    populacao: int | None = None,
 ) -> None:
     """Ente (com flag rpps) + RGF Anexo 1 (por poder) + RREO Anexo 3 (RCL) para o bimestre."""
     homolog = homologada_em or datetime(2025, 1, 10, tzinfo=UTC)
     silver_esfera = "E" if esfera == "estadual" else "M"
     with SessionLocal() as s:
         # dim_ente carrega o rpps (refresh_dim_ente preserva rpps e conforma esfera do silver).
-        s.merge(DimEnte(cod_ibge=cod, nome="Ente", esfera=esfera, rpps=rpps))
+        s.merge(DimEnte(cod_ibge=cod, nome="Ente", esfera=esfera, rpps=rpps, populacao=populacao))
         s.merge(SilverEnte(cod_ibge=cod, nome="Ente", uf="CE", esfera=silver_esfera))
         if nova_entrega:
             s.add(
@@ -173,6 +174,34 @@ def test_faixa_por_esfera_estadual(client, make_org, limpar) -> None:
     legislativo = next(i for i in pp["itens"] if i["poder_codigo"] == "ENTE.LEG")
     assert legislativo["faixa"] is None
     assert float(legislativo["pct_rcl"]) == 7.0  # 700 / 10000
+
+
+def test_cadencia_rgf_quadrimestral_por_padrao(client, make_org, limpar) -> None:
+    """U25 (Sprint F2): sem população conhecida (ou >= 50 mil), a cadência é quadrimestral."""
+    cod = _ente()
+    limpar.append(cod)
+    _seed(cod, populacao=2_000_000)
+    fx = make_org(capacidades=["ver"], entes=[cod])
+    token = login(client, fx.email, fx.senha)
+
+    det = client.get(
+        f"/entes/{cod}/pessoal", params={"periodo": PERIODO}, headers=auth_header(token)
+    ).json()
+    assert det["cadencia_rgf"] == "quadrimestral"
+
+
+def test_cadencia_rgf_semestral_municipio_pequeno(client, make_org, limpar) -> None:
+    """U25 (Sprint F2): município < 50 mil hab. publica RGF semestral (LRF art. 63, II)."""
+    cod = _ente()
+    limpar.append(cod)
+    _seed(cod, populacao=12_000)
+    fx = make_org(capacidades=["ver"], entes=[cod])
+    token = login(client, fx.email, fx.senha)
+
+    det = client.get(
+        f"/entes/{cod}/pessoal", params={"periodo": PERIODO}, headers=auth_header(token)
+    ).json()
+    assert det["cadencia_rgf"] == "semestral"
 
 
 def test_arvore_drill_por_poder(client, make_org, limpar) -> None:
