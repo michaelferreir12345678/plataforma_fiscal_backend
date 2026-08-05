@@ -13,6 +13,7 @@ from app.modules.forecast import cenarios, service
 from app.modules.forecast.schemas import (
     CenarioAbertoResponse,
     CenarioDetalhe,
+    CenarioDuplicarRequest,
     CenarioRenomearRequest,
     CenarioSimularRequest,
     CenarioSimularResponse,
@@ -155,6 +156,39 @@ def arquivar_cenario(
     )
     session.commit()
     return detalhe
+
+
+@router.post("/cenarios/{cenario_id}/duplicar", response_model=CenarioDetalhe, status_code=201)
+def duplicar_cenario(
+    cenario_id: uuid.UUID,
+    req: CenarioDuplicarRequest = CenarioDuplicarRequest(),
+    principal: Principal = Depends(require_capability("ver")),
+    session: Session = Depends(get_db),
+) -> CenarioDetalhe:
+    """Copia o cenário para um cabeçalho novo — mesma capacidade que cria/salva um cenário.
+
+    Duplicar não edita nada existente; cria um segundo registro independente, então a
+    mesma barra baixa de ``simular_cenario`` (``ver``) se aplica.
+    """
+    detalhe = cenarios.duplicar(session, principal, cenario_id=cenario_id, nome=req.nome)
+    session.commit()
+    return detalhe
+
+
+@router.delete("/cenarios/{cenario_id}/definitivo", status_code=204)
+def excluir_cenario_definitivo(
+    cenario_id: uuid.UUID,
+    principal: Principal = Depends(require_capability("editar")),
+    session: Session = Depends(get_db),
+) -> Response:
+    """Apaga o cenário e o histórico de versões — irreversível, distinto de arquivar.
+
+    Mesma capacidade de renomear/arquivar: as três ações mudam ou removem um registro que
+    já existia, ao contrário de simular/salvar/duplicar, que só criam.
+    """
+    cenarios.excluir_definitivo(session, principal, cenario_id=cenario_id)
+    session.commit()
+    return Response(status_code=204)
 
 
 @router.post("/entes/{cod_ibge}/cenarios/comparar", response_model=ComparacaoCenariosResponse)

@@ -53,6 +53,7 @@ from app.modules.forecast.schemas import (
     ProcedenciaCenario,
     VersaoCenario,
 )
+from app.modules.tenancy import repository as tenancy_repo
 
 #: Diferença a partir da qual o recálculo deixa de ser ruído de arredondamento e passa a
 #: ser mudança de fato. Abaixo disso, dois números que arredondam igual na tela.
@@ -80,7 +81,7 @@ def _procedencia(versao: CenarioVersao) -> ProcedenciaCenario:
     )
 
 
-def _versao_out(versao: CenarioVersao) -> VersaoCenario:
+def _versao_out(versao: CenarioVersao, emails: dict[uuid.UUID, str]) -> VersaoCenario:
     return VersaoCenario(
         versao=versao.versao,
         nome=versao.nome,
@@ -90,10 +91,21 @@ def _versao_out(versao: CenarioVersao) -> VersaoCenario:
         nota=versao.nota,
         procedencia=_procedencia(versao),
         criado_em=versao.criado_em,
+        criado_por=emails.get(versao.criado_por) if versao.criado_por else None,
     )
 
 
-def _detalhe(cenario: Cenario, versoes: list[CenarioVersao]) -> CenarioDetalhe:
+def _emails_do_cenario(
+    session: Session, cenario: Cenario, versoes: list[CenarioVersao]
+) -> dict[uuid.UUID, str]:
+    """E-mails de quem criou o cabeçalho e cada versão, resolvidos numa só ida ao banco."""
+    ids = [cenario.criado_por, *(v.criado_por for v in versoes)]
+    return tenancy_repo.emails_por_usuario(session, ids=[i for i in ids if i is not None])
+
+
+def _detalhe(
+    cenario: Cenario, versoes: list[CenarioVersao], emails: dict[uuid.UUID, str]
+) -> CenarioDetalhe:
     return CenarioDetalhe(
         id=str(cenario.id),
         ente=cenario.ente,
@@ -103,7 +115,8 @@ def _detalhe(cenario: Cenario, versoes: list[CenarioVersao]) -> CenarioDetalhe:
         arquivado=cenario.arquivado_em is not None,
         criado_em=cenario.criado_em,
         atualizado_em=cenario.atualizado_em,
-        versoes=[_versao_out(v) for v in versoes],
+        criado_por=emails.get(cenario.criado_por) if cenario.criado_por else None,
+        versoes=[_versao_out(v, emails) for v in versoes],
     )
 
 
@@ -326,9 +339,10 @@ def abrir(
             # invalida a reabertura: o guardado continua valendo como registro da decisão.
             recalculado = None
 
+    emails = _emails_do_cenario(session, cenario, versoes)
     return CenarioAbertoResponse(
-        cenario=_detalhe(cenario, versoes),
-        versao=_versao_out(alvo),
+        cenario=_detalhe(cenario, versoes, emails),
+        versao=_versao_out(alvo, emails),
         guardado=alvo.resultado,
         recalculado=recalculado,
         divergencia=_divergencia(
@@ -344,10 +358,11 @@ def listar(
     cenarios = repository.list_cenarios(
         session, org_id=org_id, ente=cod_ibge, incluir_arquivados=incluir_arquivados
     )
-    return [
-        _detalhe(c, repository.list_versoes(session, org_id=org_id, cenario_id=c.id))
-        for c in cenarios
-    ]
+    resultado: list[CenarioDetalhe] = []
+    for c in cenarios:
+        versoes = repository.list_versoes(session, org_id=org_id, cenario_id=c.id)
+        resultado.append(_detalhe(c, versoes, _emails_do_cenario(session, c, versoes)))
+    return resultado
 
 
 def renomear(
@@ -365,9 +380,8 @@ def renomear(
     cenario.nome = nome
     cenario.atualizado_em = datetime.now(UTC)
     session.flush()
-    return _detalhe(
-        cenario, repository.list_versoes(session, org_id=org_id, cenario_id=cenario_id)
-    )
+    versoes = repository.list_versoes(session, org_id=org_id, cenario_id=cenario_id)
+    return _detalhe(cenario, versoes, _emails_do_cenario(session, cenario, versoes))
 
 
 def arquivar(
@@ -385,9 +399,85 @@ def arquivar(
     cenario.arquivado_em = None if desarquivar else datetime.now(UTC)
     cenario.atualizado_em = datetime.now(UTC)
     session.flush()
-    return _detalhe(
-        cenario, repository.list_versoes(session, org_id=org_id, cenario_id=cenario_id)
+    versoes = repository.list_versoes(session, org_id=org_id, cenario_id=cenario_id)
+    return _detalhe(cenario, versoes, _emails_do_cenario(session, cenario, versoes))
+
+
+def duplicar(
+    session: Session, principal: Principal, *, cenario_id: uuid.UUID, nome: str | None = None
+) -> CenarioDetalhe:
+    """Copia o cenário para um cabeçalho novo e independente (Sprint G1).
+
+    "Testar uma variação sem perder o original" não é o que o versionamento resolve —
+    salvar uma nova versão *substitui* qual delas a lista mostra por padrão. Duplicar cria
+    um segundo cenário, com a última versão do original como ponto de partida, para que os
+    dois possam ser comparados lado a lado depois (o mesmo painel que já existe para
+    cenários distintos).
+    """
+    org_id = _org(principal)
+    original = repository.get_cenario(session, org_id=org_id, cenario_id=cenario_id)
+    if original is None:
+        raise AppError(status=404, title="Cenário não encontrado", detail=str(cenario_id))
+    ultima = repository.get_versao(session, org_id=org_id, cenario_id=cenario_id)
+    if ultima is None:
+        raise AppError(
+            status=404,
+            title="Cenário sem versões",
+            detail="Nada para duplicar — o cenário não tem nenhuma versão gravada.",
+        )
+
+    novo_nome = nome or f"Cópia de {original.nome}"
+    agora = datetime.now(UTC)
+    clone = repository.criar_cenario(
+        session,
+        {
+            "org_id": org_id,
+            "ente": original.ente,
+            "indicador": original.indicador,
+            "nome": novo_nome,
+            "parametros": ultima.parametros,
+            "resultado": ultima.resultado,
+            "criado_por": principal.usuario_id,
+            "atualizado_em": agora,
+        },
     )
+    versao = repository.criar_versao(
+        session,
+        {
+            "org_id": org_id,
+            "cenario_id": clone.id,
+            "versao": 1,
+            "nome": novo_nome,
+            "parametros": ultima.parametros,
+            "resultado": ultima.resultado,
+            # A procedência do clone é a mesma da versão copiada — duplicar não recalcula,
+            # então "sobre qual dado" continua sendo a mesma resposta de antes.
+            "as_of": ultima.as_of,
+            "versoes_entrega": ultima.versoes_entrega,
+            "premissas_observadas": ultima.premissas_observadas,
+            "modelo": ultima.modelo,
+            "horizonte": ultima.horizonte,
+            "nota": f"Duplicado de '{original.nome}' (v{ultima.versao}).",
+            "criado_por": principal.usuario_id,
+        },
+    )
+    session.flush()
+    return _detalhe(clone, [versao], _emails_do_cenario(session, clone, [versao]))
+
+
+def excluir_definitivo(session: Session, principal: Principal, *, cenario_id: uuid.UUID) -> None:
+    """Apaga o cenário e todas as suas versões — irreversível, distinto de arquivar.
+
+    Arquivar é sempre a resposta certa **quando o cenário embasou uma decisão**: o registro
+    precisa sobreviver mesmo fora da lista. Um rascunho criado por engano não carrega esse
+    peso, e forçar o arquivamento nesse caso só ensina o gestor a ignorar a lista de
+    arquivados. A UI exige confirmação antes de chamar isto — aqui não há mais pergunta.
+    """
+    org_id = _org(principal)
+    cenario = repository.get_cenario(session, org_id=org_id, cenario_id=cenario_id)
+    if cenario is None:
+        raise AppError(status=404, title="Cenário não encontrado", detail=str(cenario_id))
+    repository.excluir_cenario(session, cenario)
 
 
 def _pontos_do_resultado(resultado: dict | None) -> list[dict]:

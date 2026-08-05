@@ -65,6 +65,16 @@ def get_cenario(session: Session, *, org_id: uuid.UUID, cenario_id: uuid.UUID) -
     )
 
 
+def excluir_cenario(session: Session, cenario: Cenario) -> None:
+    """Apaga o cenário; ``op.cenario_versao`` cai junto por ON DELETE CASCADE (migration 0039).
+
+    Irreversível — distinto de ``arquivar`` (que só marca ``arquivado_em``). Quem chama
+    já validou org/existência via :func:`get_cenario`.
+    """
+    session.delete(cenario)
+    session.flush()
+
+
 def list_cenarios(
     session: Session,
     *,

@@ -183,6 +183,24 @@ class ComparacaoModelosResponse(BaseModel):
 # --------------------------------------------------------------------------- #
 # Cenário
 # --------------------------------------------------------------------------- #
+class NovoContratoDivida(BaseModel):
+    """Premissas de uma operação de crédito hipotética (Sprint G1, escopo mínimo).
+
+    Calcula o impacto do principal no teto de 120%/200% da RCL. **Não persiste**: o
+    contrato hipotético não vira linha em nenhuma tabela — uma operação real nasce no
+    SADIPEM, não num cenário "e se?".
+    """
+
+    principal_rs: float = Field(gt=0, description="Valor do novo contrato de dívida (R$).")
+    prazo_meses: int = Field(gt=0, le=480, description="Prazo total da operação, em meses.")
+    carencia_meses: int = Field(
+        default=0, ge=0, le=120, description="Carência antes da 1ª amortização, em meses."
+    )
+    taxa_aa_pct: float = Field(
+        default=0.0, ge=0, le=100, description="Taxa de juros anual do contrato (%)."
+    )
+
+
 class CenarioSimularRequest(BaseModel):
     """Deltas em linguagem de gestor. Só persiste se ``salvar=True`` (aceite Sprint 14)."""
 
@@ -204,6 +222,31 @@ class CenarioSimularRequest(BaseModel):
     crescimento_rcl_pct: float | None = Field(
         default=None, description="Crescimento da RCL por período (%) — afeta % RCL e mínimos."
     )
+    # Robustez (Sprint G1): parâmetros com significado fiscal próprio, distintos dos
+    # choques genéricos — cada um audita separado no resultado, em vez de se esconder
+    # dentro de "crescimento do indicador".
+    fundeb_variacao_pct: float | None = Field(
+        default=None,
+        description=(
+            "Variação assumida do FUNDEB (%), separada do choque de FPM — aplica-se à "
+            "projeção de RCL/receita (a série agregada não decompõe por fonte de repasse)."
+        ),
+    )
+    reajuste_folha_pct: float | None = Field(
+        default=None,
+        description=(
+            "Reajuste/variação de folha (revisão salarial, admissões), distinto do choque "
+            "genérico de pessoal — só se aplica ao indicador 'pessoal'."
+        ),
+    )
+    novo_contrato_divida: NovoContratoDivida | None = Field(
+        default=None,
+        description=(
+            "Operação de crédito hipotética (principal/prazo/carência/taxa). Calcula o "
+            "impacto no teto de 120%/200% da RCL sem persistir o contrato — o SADIPEM "
+            "continua sendo a fonte de uma operação real."
+        ),
+    )
     salvar: bool = Field(default=False, description="Persistir o cenário em op.cenario.")
     #: Salvar sobre um cenário existente **cria versão** — não sobrescreve. Ausente, cria
     #: um cenário novo. A distinção é o que preserva "o que eu levei à reunião de agosto".
@@ -223,6 +266,30 @@ class LimiteImpacto(BaseModel):
     cruza: bool = False
 
 
+class ImpactoContratoDivida(BaseModel):
+    """Quanto um novo contrato hipotético consome do teto de 120%/200% da RCL (DCL).
+
+    A operação conta na Dívida Consolidada Líquida a partir da contratação — a carência
+    adia a amortização, não a contagem no teto. É por isso que ``pct_rcl_adicional`` entra
+    de uma vez, sem diluir pelo prazo.
+    """
+
+    principal_rs: Decimal
+    prazo_meses: int
+    carencia_meses: int
+    taxa_aa_pct: Decimal
+    #: ``None`` quando o acervo não tem RCL para converter o principal em pontos
+    #: percentuais — ausência, não zero (zero anunciaria impacto nenhum).
+    pct_rcl_adicional: Decimal | None = None
+    pct_rcl_resultante: Decimal | None = None
+    teto_pct: Decimal
+    faixa: str | None = None
+    cruza: bool = False
+    base_rs: Decimal | None = None
+    base_periodo: str | None = None
+    fundamento: str
+
+
 class CenarioSimularResponse(BaseModel):
     persistido: bool
     cenario_id: str | None = None
@@ -235,6 +302,9 @@ class CenarioSimularResponse(BaseModel):
     cenario: ProjecaoResponse
     impacto_limites: list[LimiteImpacto]
     impacto_minimos: list[LimiteImpacto]
+    #: Só presente quando ``indicador == "divida"`` e o gestor informou
+    #: ``novo_contrato_divida`` — o simulador estruturado de operação de crédito (Sprint G1).
+    impacto_contrato_divida: ImpactoContratoDivida | None = None
     memoria: dict
     source_refs: list[SourceRef]
 
@@ -280,6 +350,10 @@ class VersaoCenario(BaseModel):
     nota: str | None = None
     procedencia: ProcedenciaCenario
     criado_em: datetime
+    #: E-mail de quem gravou esta versão. ``None`` quando o usuário foi removido ou a
+    #: versão é anterior ao registro de autoria. Gravado desde a Sprint C2 em
+    #: ``op.cenario_versao.criado_por`` e nunca projetado até aqui (Sprint G1).
+    criado_por: str | None = None
 
 
 class CenarioDetalhe(BaseModel):
@@ -293,6 +367,9 @@ class CenarioDetalhe(BaseModel):
     arquivado: bool = False
     criado_em: datetime
     atualizado_em: datetime | None = None
+    #: E-mail de quem criou o cenário (Sprint G1) — mesma ausência possível que em
+    #: ``VersaoCenario.criado_por``.
+    criado_por: str | None = None
     versoes: list[VersaoCenario] = Field(default_factory=list)
 
 
@@ -358,6 +435,12 @@ class ComparacaoCenariosResponse(BaseModel):
 
 class CenarioRenomearRequest(BaseModel):
     nome: str = Field(min_length=1, max_length=120)
+
+
+class CenarioDuplicarRequest(BaseModel):
+    """Nome do clone; ausente vira "Cópia de {nome do original}"."""
+
+    nome: str | None = Field(default=None, max_length=120)
 
 
 class ComparacaoCenariosRequest(BaseModel):

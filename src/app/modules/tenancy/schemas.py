@@ -15,7 +15,7 @@ MetricaCobranca = Literal["por_ente", "por_populacao", "por_consulta_ia", "fixo"
 assert set(METRICAS_COBRANCA) == set(MetricaCobranca.__args__)  # type: ignore[attr-defined]
 
 Capacidade = Literal[
-    "ver", "exportar", "config_alerta", "gerar_relatorio", "usar_ia", "administrar"
+    "ver", "exportar", "editar", "config_alerta", "gerar_relatorio", "usar_ia", "administrar"
 ]
 TipoConta = Literal["prefeitura", "estado", "consultoria"]
 

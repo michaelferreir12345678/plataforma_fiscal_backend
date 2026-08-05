@@ -34,9 +34,17 @@ from app.core.db import Base
 METRICAS_COBRANCA: tuple[str, ...] = ("por_ente", "por_populacao", "por_consulta_ia", "fixo")
 
 # Capacidades RBAC (op.papel_permissao.capacidade)
+#
+# A19 (Sprint G1): "editar" nasceu **consumida** — forecast/router.py já condicionava
+# renomear/arquivar cenário a ``require_capability("editar")`` desde a Sprint C2, mas a
+# capacidade nunca existiu aqui nem no CheckConstraint do banco. Não era possível conceder
+# "editar" a papel nenhum (o INSERT em op.papel_permissao violaria a constraint), então os
+# dois endpoints devolviam 403 para todo mundo, sempre. A migration 0040 estende o
+# CheckConstraint; esta tupla é a única fonte de verdade que ele espelha.
 CAPACIDADES: tuple[str, ...] = (
     "ver",
     "exportar",
+    "editar",
     "config_alerta",
     "gerar_relatorio",
     "usar_ia",

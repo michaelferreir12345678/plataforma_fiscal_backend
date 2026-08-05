@@ -37,6 +37,7 @@ from app.modules.forecast.schemas import (
     ComparacaoModelosResponse,
     CruzamentoLimite,
     EspacoFiscalOut,
+    ImpactoContratoDivida,
     LimiteImpacto,
     ModeloComparado,
     PontoHistorico,
@@ -47,6 +48,7 @@ from app.modules.forecast.schemas import (
     ReconducaoOut,
 )
 from app.modules.forecast.series import (
+    UNIDADE_BRL,
     UNIDADE_PCT_RCL,
     ExogenasAlinhadas,
     SerieHistorica,
@@ -556,6 +558,25 @@ def comparar_modelos(
     )
 
 
+def _combinar_choques(*pcts: float | None) -> float | None:
+    """Compõe choques de crescimento independentes por multiplicação, não por soma.
+
+    Dois choques de +5% cada não valem +10%: valem ``1,05 × 1,05 − 1 = 10,25%``. É a mesma
+    armadilha da conversão anual→mensal corrigida na Sprint C1 — o erro da soma linear é
+    pequeno com valores baixos e cresce a cada passo do horizonte.
+
+    Devolve ``None`` quando nenhum ``pct`` foi informado, para não introduzir um choque de
+    "zero" onde a resposta correta é "nenhuma premissa adicional".
+    """
+    fator = 1.0
+    informado = False
+    for pct in pcts:
+        if pct:
+            fator *= 1.0 + pct / 100.0
+            informado = True
+    return (fator - 1.0) * 100.0 if informado else None
+
+
 def _aplicar_choque(resultado: ResultadoModelo, choque_pct: float) -> ResultadoModelo:
     """Aplica um choque de crescimento composto por período sobre a projeção (cenário)."""
     fator = 1.0 + choque_pct / 100.0
@@ -669,6 +690,75 @@ def _impacto_pct(limite: LimiteLegal, pct: Decimal) -> LimiteImpacto:
     )
 
 
+def _impacto_contrato_divida(
+    session: Session,
+    cod_ibge: str,
+    serie: SerieHistorica,
+    cenario: ProjecaoResponse,
+    esfera: str,
+    req: CenarioSimularRequest,
+) -> ImpactoContratoDivida | None:
+    """Quanto um novo contrato hipotético consome do teto de 120%/200% da RCL (DCL).
+
+    Escopo mínimo (ficha Sprint G1): calcula o impacto no teto sem persistir o contrato — a
+    operação de crédito em si nasce no SADIPEM, não num cenário "e se?". O principal soma à
+    DCL projetada **de uma vez**, porque a LRF conta a dívida a partir da contratação, não
+    da amortização: o impacto aparece mesmo com a operação em carência.
+    """
+    contrato = req.novo_contrato_divida
+    if contrato is None or serie.indicador != "divida":
+        return None
+    limite = _limite_do_indicador(session, serie, esfera)
+    if limite is None:
+        return None
+    base_rs, base_periodo = _base_em_reais(session, cod_ibge, serie)
+    pct_atual = cenario.projecao[-1].valor_previsto
+    principal = _dec(contrato.principal_rs)
+    fundamento = (
+        "LRF art. 30, §7º c/c Resolução do Senado 43/2001 — a operação conta na Dívida "
+        "Consolidada Líquida a partir da contratação, independentemente de carência."
+    )
+    if not base_rs:
+        # Sem RCL para converter, zero anunciaria "sem impacto" onde a resposta honesta é
+        # "não dá para converter" — a mesma regra de `EspacoFiscalOut.margem_rs`.
+        return ImpactoContratoDivida(
+            principal_rs=principal,
+            prazo_meses=contrato.prazo_meses,
+            carencia_meses=contrato.carencia_meses,
+            taxa_aa_pct=_dec(contrato.taxa_aa_pct),
+            pct_rcl_adicional=None,
+            pct_rcl_resultante=None,
+            teto_pct=limite.teto_pct,
+            faixa=None,
+            cruza=False,
+            base_rs=None,
+            base_periodo=None,
+            fundamento=f"{fundamento} Sem RCL no acervo para converter o principal em % da RCL.",
+        )
+    pct_adicional = (principal / base_rs) * Decimal(100)
+    pct_resultante = pct_atual + pct_adicional
+    faixa = classificar_faixa(pct_resultante, limite)
+    cruza = (
+        pct_resultante >= limite.teto_pct
+        if limite.sentido == "teto"
+        else pct_resultante < limite.teto_pct
+    )
+    return ImpactoContratoDivida(
+        principal_rs=principal,
+        prazo_meses=contrato.prazo_meses,
+        carencia_meses=contrato.carencia_meses,
+        taxa_aa_pct=_dec(contrato.taxa_aa_pct),
+        pct_rcl_adicional=pct_adicional,
+        pct_rcl_resultante=pct_resultante,
+        teto_pct=limite.teto_pct,
+        faixa=faixa,
+        cruza=cruza,
+        base_rs=base_rs,
+        base_periodo=base_periodo,
+        fundamento=fundamento,
+    )
+
+
 def simular_cenario(
     session: Session,
     principal: Principal,
@@ -691,6 +781,16 @@ def simular_cenario(
     periodos_futuro = horizonte_periodos(serie.periodos[-1], req.horizonte)
     exog = _overrides_exogenas(session, cod_ibge, serie, periodos_futuro, req)
 
+    # Robustez (Sprint G1): FUNDEB (receita) e reajuste de folha (pessoal) têm significado
+    # fiscal próprio — cada um só se aplica ao indicador a que pertence, e compõe com o
+    # choque genérico por multiplicação (ver `_combinar_choques`), nunca por soma.
+    choque_extra: float | None = None
+    if indicador == "pessoal":
+        choque_extra = req.reajuste_folha_pct
+    elif serie.unidade == UNIDADE_BRL:
+        choque_extra = req.fundeb_variacao_pct
+    choque_efetivo = _combinar_choques(req.crescimento_indicador_pct, choque_extra)
+
     cenario = build_projecao(
         session,
         cod_ibge,
@@ -699,11 +799,32 @@ def simular_cenario(
         modelo=base.modelo,
         persistir=False,
         exog_override=exog,
-        choque_pct=req.crescimento_indicador_pct,
+        choque_pct=choque_efetivo,
     )
 
     esfera = base.esfera or _ente_esfera(session, cod_ibge)
     tetos, pisos = _impacto_cenario(session, serie, cenario, esfera, req)
+    contrato_impacto = _impacto_contrato_divida(session, cod_ibge, serie, cenario, esfera, req)
+
+    # Uma premissa informada que não se aplica ao indicador corrente não pode desaparecer
+    # em silêncio — foi exatamente esse silêncio que manteve `crescimento_rcl_pct` inerte
+    # no ramo PCT_RCL por uma sprint inteira (A20). Aqui a lista viaja sempre, vazia quando
+    # não há nada a avisar.
+    avisos_premissas: list[str] = []
+    if req.fundeb_variacao_pct and serie.unidade != UNIDADE_BRL:
+        avisos_premissas.append(
+            "fundeb_variacao_pct informado mas não se aplica a indicadores em % RCL "
+            "(pessoal/dívida) — o efeito de FUNDEB sobre esses indicadores passa pela RCL; "
+            "use crescimento_rcl_pct."
+        )
+    if req.reajuste_folha_pct and indicador != "pessoal":
+        avisos_premissas.append(
+            "reajuste_folha_pct informado mas só se aplica ao indicador 'pessoal'."
+        )
+    if req.novo_contrato_divida and indicador != "divida":
+        avisos_premissas.append(
+            "novo_contrato_divida informado mas só se aplica ao indicador 'divida'."
+        )
 
     memoria: dict[str, Any] = {
         "premissas": req.model_dump(exclude_none=True),
@@ -712,6 +833,15 @@ def simular_cenario(
             "IPCA/Selic de taxa anual para mensal por capitalização composta "
             "((1+a)^(1/12)−1, não a÷12); FPM como variação sobre a média histórica"
         ),
+        "choque_efetivo_pct": choque_efetivo,
+        "choque_efetivo_composicao": (
+            "crescimento_indicador_pct × "
+            f"{'reajuste_folha_pct' if indicador == 'pessoal' else 'fundeb_variacao_pct'} "
+            "— composição multiplicativa, não soma"
+            if choque_extra
+            else None
+        ),
+        "avisos_premissas": avisos_premissas,
         "observacao_minimos": (
             "Mínimos (saúde/educação) usam base impostos+transf.; aqui a RCL projetada "
             "é proxy explícita do teto/piso em R$ — não substitui a apuração oficial."
@@ -760,6 +890,7 @@ def simular_cenario(
         cenario=cenario,
         impacto_limites=tetos,
         impacto_minimos=pisos,
+        impacto_contrato_divida=contrato_impacto,
         memoria=memoria,
         source_refs=[base.source_ref],
     )
@@ -777,7 +908,18 @@ def _impacto_cenario(
         limite = _limite_do_indicador(session, serie, esfera)
         if limite is None:
             return [], []
-        return [_impacto_pct(limite, final)], []
+        # A20: `crescimento_rcl_pct` era aplicado só no ramo BRL — Pessoal e Dívida (os
+        # dois indicadores com teto mais severo) ignoravam o slider por inteiro. O que a
+        # série carrega aqui já É a razão numerador/RCL; um crescimento assumido da RCL sem
+        # crescimento correspondente do numerador **dilui** o indicador — dividir pelo
+        # fator de crescimento reproduz esse efeito sem precisar reprojetar o numerador em
+        # R$ separadamente.
+        pct_final = final
+        if req.crescimento_rcl_pct:
+            fator = Decimal(1) + _dec(req.crescimento_rcl_pct) / Decimal(100)
+            if fator > 0:
+                pct_final = final / fator
+        return [_impacto_pct(limite, pct_final)], []
     # BRL (RCL/receita): aplica crescimento de RCL do cenário à base e projeta tetos/pisos.
     base_rs = final
     if req.crescimento_rcl_pct:
