@@ -9,6 +9,12 @@
 > B2, C1, C2**; **A4 parcial** (mínimos bloqueados na fonte). Aberto e crítico: **A14** e
 > **A15** — a mesma família, *versão que existe, vigência que não se declara*. Três frentes
 > de diagnóstico interrompidas por limite de sessão, a reexecutar (§20, P2–P4).
+> **Segunda rodada (2026-08-04, §12):** 8 frentes paralelas de leitura de código cobriram as
+> 23 páginas de novo, com foco em profundidade/drill-down, rastreabilidade (`as_of`) e
+> legendas — achou 6 achados críticos novos (**A16–A21**, um deles regressão sobre a U1) e
+> 16 de clareza (**U19–U34**), e produziu as **8 fichas de sprint** (A5 estendida, A6, F1,
+> F2, G1, D1, H1, B3) que o plano de §9 previa e ainda não detalhava. **Não verificados
+> contra o banco** — ver a ressalva de método no início do §12 antes de agir sobre eles.
 
 ---
 
@@ -817,16 +823,724 @@ Prioridade conforme a ordem pedida: correção dos dados → fórmulas e regras 
 | **A2** | Reconciliação com fonte oficial: painel de divergências | fiscal, dados | A0 | ✅ **Concluída** (motor + endpoint; triagem persistida fica para A2b) |
 | **A3** | Invariantes do domínio verificadas por dado (esfera, denominador, faixa) | fiscal, testes | A0 | ✅ **Concluída** — 7 invariantes, 0 violadas |
 | **A4** | Fechar as lacunas de ingestão (mínimos, MSC, SIOPS/SIOPE, FPM) | dados | A1 | ⚠️ **Parcialmente concluída** — FPM/transferências corrigidos (11→185); mínimos **bloqueados na fonte**; MSC e SIOPS adiados |
-| **A5** | **A14** — eleger a versão vigente das transferências e impedir a dupla contagem | dados, fiscal | A4 | 🔴 **Próxima** — identificada e quantificada, correção não iniciada |
+| **A5** | **A14 + A15 + A21** — eleger a versão vigente (transferências, RGF republicado, alertas órfãos): a mesma família, fechada de uma vez | dados, fiscal | A4 | ✅ **Concluída** — A14/A21 fechados desde a primeira rodada; A15 corrigido no cálculo on-read **e** o `gold.mart_indicador` reprocessado nacionalmente (autorizado pelo usuário), com 0 divergência residual real confirmada e suíte completa verde. Achado adicional: o Anexo 01 do RGF (pessoal) não tem como ser corrigido por este mecanismo — ver ficha |
 | **B1** | Clareza conceitual: notas metodológicas, glossário, ano-base × publicação | UX, fiscal | A0 | ✅ **Concluída** — 10 achados de leitura invertida fechados; `NotaMetodologica` e `Termo` como peças reusáveis |
 | **B2** | Limites ausentes: garantias e operações de crédito | fiscal | A3 | ✅ **Concluída** — 3.866 indicadores, 178 entes; achou 1 ente com o teto de operações de crédito **excedido** |
 | **C1** | Previsões e cenários "E se?" em nível governamental | previsão, fiscal, UX | B1 | ✅ **Concluída** — premissas ancoradas no observado (a Selic de fábrica estava 3,8 p.p. fora), conversão composta, saneamento da série e **espaço fiscal em reais**; achou o **A15** |
 | **C2** | Cenários salvos: persistência, versão, comparação, exportação | previsão, arquitetura | C1 | ✅ **Concluída** — versão em vez de sobrescrita, procedência do dado gravada, reabertura que compara guardado × hoje, comparação por interseção e exportação com premissas junto (migration 0039) |
-| **D1** | Drill-down por órgão, fonte de recurso, programa/ação | dados, UX | A4 | Planejada |
+| **A6** | Regressões de leitura crítica: medidor de piso do cockpit, indicador gerencial em Limites, período do explicador de pessoal (**A16–A18**) | UX, fiscal | B0, B2 | ✅ **Concluída** — A16/A17/A18 corrigidos, com teste de regressão para os três; `make lint && make test` e `npm run test` verdes |
+| **F1** | `as_of` e memória de cálculo visíveis em toda tela (fechar a regra R3 onde ainda falta) | dados, UX | B1 | ✅ **Concluída** — `as_of` propagado a Receita/Despesa/Linha Bruta/Pessoal/Resultado/Patrimônio/Limites/Cockpit; padrão de "pin" replicado nos sub-cards; `make lint && make mypy && make test` (backend) e `eslint` + `tsc --noEmit` + `vitest` (frontend, 229 testes) verdes, verificados diretamente (não por relato) |
+| **F2** | Legendas: fechar o que a B1 não terminou (RPPS no ponto de leitura, CAPAG, semântica de piso, hierarquias) | UX, fiscal | B1 | Planejada. Ficha em §12.3 |
+| **G1** | Cenários "E se?" em padrão de memorando técnico: RBAC morto (**A19**), `crescimento_rcl_pct` no-op (**A20**), parâmetros fiscais reais, CRUD completo | previsão, fiscal, RBAC | C2 | ✅ **Concluída** — "editar" adicionada ao enum RBAC (migration 0040); `crescimento_rcl_pct` propagado ao ramo PCT_RCL; FUNDEB/reajuste de folha/contrato de dívida como parâmetros próprios; duplicar/excluir definitivamente/exportar comparação/`criado_por`/seletor de modelo; alerta preditivo leva `?indicador=` |
+| **D1** | Drill-down por órgão, fonte de recurso, programa/ação | dados, UX | A4 | Ficha detalhada em §12.3 — maior parte já pronta no backend |
+| **H1** | Governança: billing zerado, auditoria de RBAC, control plane sem auditoria própria, licença invisível ao tenant | arquitetura, billing | A0 | Planejada. Ficha em §12.3 |
+| **B3** | Funcionalidades construídas e nunca ligadas: impressão, links de relatório, gráficos acessíveis, sinalização do Assistente | UX | B1 | Planejada. Ficha em §12.3 |
 | **E1** | Segurança, isolamento entre organizações e desempenho | arquitetura, segurança | A0 | Planejada |
 
 *(Cada sprint recebe ficha detalhada — objetivo, problema, justificativa, páginas afetadas,
 tarefas, riscos, critérios de aceite, testes, evidências — quando entra em execução.)*
+
+---
+
+## 12. Segunda rodada — auditoria de profundidade, rastreabilidade e robustez (2026-08-04)
+
+> **Método distinto do resto deste documento — leia antes de agir sobre qualquer achado
+> abaixo.** As seções 1–11 foram construídas verificando contra o banco (consulta direta,
+> reconciliação executada, teste de regressão). Esta rodada usou **8 frentes paralelas de
+> leitura de código** (uma por grupo de páginas), cruzando com o que já estava registrado
+> aqui para não redescobrir nada — mas **sem consulta ao banco de desenvolvimento ou
+> produção**. Trate os achados abaixo como *"localizados no código, com evidência de
+> arquivo:linha"*, não como *"confirmados por dado"*, até que a ficha da sprint
+> correspondente rode a verificação. Onde um achado já tratado (U1, U2, o seletor-demo
+> SP/Fortaleza, o defeito do Anexo 01) foi só confirmado como fechado, não reaparece abaixo.
+>
+> Escopo: as 23 páginas, agrupadas em 8 frentes (Receita/Despesa; Pessoal/Dívida;
+> Resultado/Caixa/Saúde&Educação; Patrimônio/Limites/Benchmarking; Cockpit/Carteira;
+> Previsões/Alertas/Relatórios; Assistente/Central de Dados; Admin/Plataforma/Perfil).
+
+### 12.1 Novos achados críticos (mesma régua de A1–A15)
+
+| # | Achado | Página(s) | Evidência | Gravidade |
+|---|---|---|---|---|
+| A16 | Medidor de piso do Cockpit dobra a margem de tolerância: `RadialMeter` recebe `max = teto*1.1` como parâmetro `piso` de `classifyFloor`, que multiplica de novo por 1,05/1,10 internamente. Um ente exatamente no mínimo de saúde (15,00%, que o backend classifica `adequado`) aparece "Abaixo do mínimo", cor de pior severidade. **Regressão sobre a U1**, que corrigiu o mesmo componente para tetos sem cobrir pisos com o mesmo rigor. | Cockpit | `CockpitPage.tsx:298`, `RadialMeter.tsx:59`, `theme.ts:119-124` | **Crítica** |
+| A17 | Indicadores gerenciais sem teto legal (`rcl_per_capita`) renderizam "teto 0%" e o valor em R$ milhões **1.000.000× menor** que o real (Fortaleza: R$ 4.870,66/hab tratado como R$ e dividido por 1e6). `build_limites` devolve todo `mart_indicador` do período sem filtrar por `dim_limite_legal`. | Limites | `LimitesPage.tsx:104,140`, `limits/service.py:139-167`, `indicators/gerenciais.py:125-136` | **Crítica** |
+| A18 | O explicador "Pessoal por poder" do Cockpit sempre usa o RGF **mais recente que o ente já teve**, não o correspondente ao período RREO selecionado — abrir um período antigo mistura dois períodos na mesma tela sem aviso. Existe mapeamento B→Q correto em `estadual_service.py:231`, não reaproveitado aqui. | Cockpit | `cockpit_service.py:640-645` | Alta |
+| A19 | A capacidade RBAC `"editar"`, exigida por `PATCH`/`DELETE /cenarios/{id}` (renomear/arquivar cenário), **não existe** no enum de capacidades nem passaria o `CheckConstraint` do banco — os dois botões retornam 403 para **todo** usuário, sempre, desde o deploy da Sprint C2. | Previsões | `forecast/router.py:135,148`, `tenancy/models.py:37-44,112` | **Crítica** (funcionalidade da C2 morta) |
+| A20 | `crescimento_rcl_pct` é *no-op* nas simulações de Pessoal e Dívida — os dois indicadores com teto mais severo do produto. O gestor muda a premissa de RCL e o resultado simulado não muda. | Previsões | `forecast/service.py:672-785` (ramo `PCT_RCL` não usa `crescimento_rcl_pct`) | **Crítica** |
+| A21 | Retificação que corrige um indicador para dentro do limite **não fecha o alerta antigo** — mesma família de A14/A15 (*versão nova chega, vigência não se propaga*), agora do lado dos alertas: `_alertas_limite` só grava quando a faixa continua não-nula, nunca limpa a que ficou órfã. | Alertas | `engine.py:313-358` | Alta |
+
+Recomendo A21 **junto da A5** (mesma causa raiz, mesma correção de "eleger o vigente e
+reavaliar"), não como sprint separada — ver ficha em §12.3.
+
+### 12.2 Novos achados de clareza e legenda (continuando U1–U18)
+
+| # | Achado | Página | Evidência |
+|---|---|---|---|
+| U19 | Receita anuncia hierarquia de 5 níveis (Categoria→Origem→Espécie→Rubrica→Alínea); a árvore só deriva 3. Despesa mostra 4 níveis no cabeçalho fixo, mas o próprio backend já expõe o rótulo certo (2 níveis) numa Memória que o cabeçalho não usa. | Receita, Despesa | `ReceitaPage.tsx:193`, `natureza.py:6-13`; `DespesaPage.tsx:168`, `classificacao.py:223-226` |
+| U20 | "Receita arrecadada" não diz bruto × líquido de deduções; a medida `deducoes` é materializada e nunca chega à tela. | Receita | `natureza.py:29`, `ReceitaPage.tsx:206-220` |
+| U21/U22 | Transferências correntes/capital fundidas numa barra só; `SeloCobertura` existe em Receita e falta em Despesa (páginas irmãs, tratamento inconsistente). | Receita, Despesa | `ReceitaPage.tsx:150-169`; ausência confirmada em `DespesaPage.tsx` |
+| U23 | Cabeçalho/série presos ao eixo função mesmo com a árvore navegando em natureza, sem aviso do descompasso. | Despesa | `DespesaPage.tsx:52` |
+| U25 | Cabeçalho de Pessoal não diz se a cadência é quadrimestral ou semestral (porte < 50 mil hab.) — o cálculo já trata isso certo, só o rótulo não. | Pessoal | `PessoalPage.tsx:78` |
+| U26 | O card CAPAG já resolveu o achado-semente do ano-base (B1: "classificação de {ano} · dados de {ano-1}") — mas "Metodologia" ainda mistura **três grandezas diferentes** sob um rótulo único: ano-base real da planilha (quando o layout traz `Ano_Base`), ICF (índice de qualidade da informação, layout oficial) e versão de metodologia (layout estadual). Nenhuma validação cruza o `Ano_Base` real contra o `ano_ref-1` calculado. | Dívida | `DividaPage.tsx:316-318`, `capag.py:268-269,303,369-375` |
+| U27 | O resultado primário/nominal ainda não diz "(com RPPS)"/"(sem RPPS)" no número principal — a `NotaRpps` da B1 existe, mas fica num card de Reconciliação recolhido por padrão, longe do `MetricHeader` que ela explica. A memória de cálculo também não verbaliza o regime. | Resultado | `ResultadoPage.tsx:90-115,154,458-460` |
+| U28 | `meta_nominal`/`realizado_nominal` existem no schema e nunca aparecem — se o ente publica só meta nominal, a tela mostra "Meta de resultado primário —", parecendo ausência total quando há meta cadastrada. | Resultado | `result/schemas.py:56-65`, `ResultadoPage.tsx:240-244` |
+| U29/U30 | `Art42Panel` calcula o quadrimestre avaliado e não o exibe; FUNDEB não repete a nota de expurgo de RPNP sem lastro que a árvore MDE/ASPS já traz. | Caixa, Saúde&Educação | `CaixaPage.tsx:397-444`; `SaudeEducacaoPage.tsx:664-699` |
+| U33 | "✓ Conciliado" (Patrimônio) aparece para entes **sem MSC nenhuma** — só 1 de 3 checks roda, mas o rótulo e a `observacao` fixa descrevem os 3 como se todos tivessem rodado. | Patrimônio | `PatrimonioPage.tsx:224-230`, `accounting/service.py:913-918` |
+| U31/U34 | Sem `SeloCobertura`/`SeloQualidadePagina` em Limites e Benchmarking, apesar de `INDICADORES_POR_PAGINA` já registrar as duas — justamente a página mais sensível a "faltou apurar" (Limites) e a de coorte mais rala (Benchmarking, Nordeste ~10%). | Limites, Benchmarking | `coverage/service.py:50-60` |
+| U32 | Barra de progresso de Limites não inverte a direção visual para pisos — só o texto distingue "piso" de "teto". | Limites | `LimitesPage.tsx:106` |
+
+*(Achados menores — cadência de teste sem esfera estadual, célula ambígua na conferência da
+Linha Bruta, casamento de número por string exata no Assistente, seletor de período inerte,
+etc. — viraram tarefas dentro das fichas abaixo, sem número próprio.)*
+
+### 12.3 Fichas de sprint
+
+#### Sprint A5 — Eleger a versão vigente (A14 + A15 + A21): a mesma família, fechada de uma vez
+
+**Objetivo:** impedir que uma versão de entrega superada continue sendo somada/lida junto
+da vigente, nas três frentes já provadas: transferências (A14), RGF republicado (A15) e
+alertas não reavaliados (A21).
+
+**Problema:** `silver.tesouro_fpm`, `silver.fnde_fundeb_repasse` e
+`silver.transferencia_generica` guardam `versao_entrega` sem coluna de vigência —
+`forecast/series.py::_fpm_periodo` e 3 leitores de `revenue/repository.py` somam todas as
+versões (Fortaleza: R$ 3.095,00 mi de FPM 2024 lido onde o real é R$ 1.547,50 mi; 185/185
+entes com versão duplicada em 2025). O RGF republica quadrimestres anteriores a cada nova
+entrega — é assim que a retificação chega — e a materialização usa o primeiro valor, nunca
+revisita (63 quadrimestres divergentes >2%, 5 com o dobro ou mais; o caso extremo produziu
+324,49% da RCL em pessoal). O motor de alertas nunca reavalia um alerta de limite quando a
+entrega que o originou é superada por uma retificação que resolve.
+
+**Justificativa:** são números que alimentam a previsão, a conciliação de receita e a fila
+de alertas — o núcleo da promessa de "não pode haver erro". Já era a próxima sprint do
+plano (§9) antes desta rodada.
+
+**Páginas afetadas:** Previsões (exógena FPM), Receita (conciliação), Pessoal/Limites (RCL
+como denominador), Alertas (fila).
+
+**Tarefas:**
+- Coluna de vigência (ou eleição por `(fonte, ente, período)` mais recente via
+  `bronze.raw_payload_tesouro_fpm.ingerido_em`) nas três tabelas de transferência; migration
+  sem apagar histórico.
+- Filtrar por vigência em `_fpm_periodo` e nos 3 leitores de `revenue/repository.py`.
+- RGF: ao materializar um período, reconsultar as entregas subsequentes que o republicam e
+  usar o valor mais recente publicado para aquele quadrimestre.
+- Alertas: em `_alertas_limite`, se a faixa do indicador voltou a `adequado`, fechar/expirar
+  o alerta órfão.
+- Reprocessar o mart afetado (RCL, pessoal) para os 63 quadrimestres da A15.
+
+**Riscos:** reprocessamento pode mudar números já publicados/exportados — avisar quem já
+exportou; script idempotente (padrão de `materialize_endividamento.py`, B2).
+
+**Critérios de aceite:** Fortaleza FPM 2024 = R$ 1.547,50 mi em previsão e conciliação; as
+63 divergências de RGF passam a usar o valor republicado; alerta de indicador hoje
+`adequado` aparece fechado/expirado.
+
+**Testes:** completude por fonte/ano (formaliza o que revelou a A14); republicação de RGF
+(entrega N+1 corrige N); reavaliação de alerta (retificação que resolve fecha o alerta).
+
+**Evidências:** consulta antes/depois em `gold.mart_indicador`/`silver.tesouro_fpm` para
+Fortaleza 2024 e os 5 entes da tabela de A15; captura da fila de alertas antes/depois.
+
+**Prompt Claude Code:**
+```
+Implemente a Sprint A5 de backend_plataforma_fiscal/docs/evolucao_plataforma.md — família
+A14+A15+A21 ("versão que existe, vigência que não se declara"), a próxima sprint crítica
+do plano (§9).
+
+1) Transferências (A14): silver.tesouro_fpm, silver.fnde_fundeb_repasse,
+silver.transferencia_generica não têm coluna de vigência. Adicione (migration reversível) e
+eleja a vigente por (fonte, ente, período) usando bronze.raw_payload_tesouro_fpm.ingerido_em
+como critério de recência — nunca apague histórico. Filtre por vigência em
+forecast/series.py::_fpm_periodo e nos 3 leitores de revenue/repository.py que hoje somam
+todas as versões. Prove com Fortaleza FPM 2024: hoje lê R$ 3.095,00 mi, deve ler
+R$ 1.547,50 mi.
+
+2) RGF republicado (A15): o RGF republica os quadrimestres anteriores a cada entrega nova —
+é a forma como a retificação chega, e a materialização usa só o primeiro valor. Ao
+materializar RCL/pessoal, use o valor mais recente publicado para cada quadrimestre entre as
+entregas disponíveis. Reprocesse os 63 quadrimestres já identificados como divergentes
+(>2%) — 5 deles com o dobro ou mais do valor correto. **Correção registrada durante a
+implementação (ver §11, entrada da A5):** o sentido abaixo estava invertido nesta ficha — o
+valor da 1ª entrega é o preso/desatualizado, e o republicado é o vigente (regra do CLAUDE.md:
+"retificação supera a versão anterior"). O caso 2307650/2023 deve passar de **R$ 152,1 mi**
+(1ª entrega, presa) **para R$ 1.031,3 mi / R$ 1.022,4 mi** (republicado, vigente) de RCL
+Ajustada no 1º quadrimestre — não o contrário.
+
+3) Alertas órfãos (A21, achado desta rodada): engine.py::_alertas_limite nunca fecha um
+alerta cuja faixa voltou a "adequado" após retificação. Adicione a reavaliação: se o
+indicador que originou o alerta não está mais em faixa não-nula, feche/expire o registro em
+vez de deixá-lo ativo indefinidamente.
+
+Testes obrigatórios: completude por fonte/ano (formalizar o que revelou a A14);
+republicação de RGF (entrega N+1 corrige N, materialização usa o corrigido, com caso de
+regressão para 2307650/2023); reavaliação de alerta (retificação que resolve fecha o
+registro). Script de reprocessamento idempotente, no padrão de materialize_endividamento.py
+(B2) — reexecutar não deve duplicar nem falhar em silêncio. make lint && make test.
+```
+
+---
+
+#### Sprint A6 — Regressões de leitura crítica no Cockpit e em Limites (A16, A17, A18)
+
+**Objetivo:** corrigir três casos em que a tela afirma o oposto (ou uma ordem de grandeza
+errada) do que o dado diz — a mesma classe de defeito que a U1 já corrigiu uma vez, reaberta
+em três lugares novos.
+
+**Problema:** (A16) `RadialMeter` recebe `max=teto*1.1` como parâmetro `piso` de
+`classifyFloor`, que multiplica de novo internamente — o limiar efetivo vira 110% do mínimo
+legal, não 100%; um ente exatamente adequado aparece "Abaixo do mínimo". (A17)
+`build_limites` lista todo `mart_indicador` do período sem filtrar por `dim_limite_legal` —
+indicadores gerenciais herdam formatação de limite legal e de moeda absoluta (÷1e6),
+produzindo um valor 1.000.000× menor. (A18) o explicador de pessoal do cockpit sempre usa o
+RGF mais recente do ente, não o correspondente ao período RREO selecionado.
+
+**Justificativa:** são exatamente os números que um secretário lê primeiro (o velocímetro
+do cockpit, a lista de limites) — errar a leitura de conformidade é o pior tipo de erro que
+a plataforma pode cometer.
+
+**Páginas afetadas:** Cockpit, Limites.
+
+**Tarefas:**
+- `classifyFloor` recebe o piso real (`teto`, não `max` pré-multiplicado), sem remultiplicar
+  internamente; teste de regressão para "exatamente no mínimo".
+- `build_limites`: filtrar para indicadores com `dim_limite_legal`; gerenciais saem desta
+  lista ou ganham formatação `brl_per_capita` própria.
+- `cockpit_service.py`: mapear o RGF do mesmo ciclo do período RREO selecionado (reusar o
+  mapeamento B→Q de `estadual_service.py:231`).
+
+**Riscos:** mudar `classifyFloor` afeta outros consumidores (Saúde&Educação, Benchmarking)
+— checar todos antes de alterar a assinatura.
+
+**Critérios de aceite:** ente com saúde exatamente em 15,00% aparece "adequado" no cockpit,
+igual à `/saude-educacao`; `rcl_per_capita` sai da lista de Limites (ou aparece em R$/hab
+sem "teto 0%"); explicador de pessoal em `2024-B2` mostra o RGF de `2024-Q2`.
+
+**Testes:** `piso-vs-teto.test.tsx` ganha o caso "exatamente no piso"; teste de
+`build_limites` sem indicador sem `dim_limite_legal`; teste do explicador com período
+histórico.
+
+**Evidências:** captura do cockpit antes/depois para o mesmo ente/indicador; diff de
+`GET /limites` (contagem de itens) antes/depois.
+
+**Prompt Claude Code:**
+```
+Implemente a Sprint A6 de backend_plataforma_fiscal/docs/evolucao_plataforma.md — três
+regressões de leitura crítica achadas na segunda rodada de auditoria (§12.1, A16/A17/A18).
+
+A16 — Cockpit/RadialMeter.tsx:59 recebe max=teto*1.1 (CockpitPage.tsx:298) como parâmetro
+"piso" de classifyFloor, que multiplica de novo por 1.05/1.10 em theme.ts:119-124. Um ente
+com saúde exatamente em 15,00% (que o backend classifica "adequado") aparece "Abaixo do
+mínimo" no cockpit. Corrija para que classifyFloor receba o piso real sem remultiplicação;
+adicione o caso "exatamente no mínimo" ao teste piso-vs-teto.test.tsx. Confira todos os
+consumidores de classifyFloor antes de mudar a assinatura.
+
+A17 — limits/service.py::build_limites (linhas 139-167) devolve todo gold.mart_indicador do
+período sem filtrar por dim_limite_legal. Indicadores gerenciais como rcl_per_capita (R$/hab,
+sem teto legal) herdam formatação de limite (LimitesPage.tsx:104,140): "teto 0%" e valor
+dividido por 1e6 (R$ 4.870,66/hab vira "R$ 0,0 M"). Filtre build_limites para indicadores com
+dim_limite_legal associado; para os gerenciais que devam continuar na tela, aplique a
+formatação per-capita que o Benchmarking já usa corretamente (formatBenchmarkValue).
+
+A18 — cockpit_service.py:640-645 usa sempre periodo_util.mais_recente(entregas_rgf) para o
+explicador de pessoal, ignorando o período RREO selecionado. Reaproveite o mapeamento
+bimestre→quadrimestre já correto em estadual_service.py:231 para buscar o RGF do mesmo ciclo
+do período RREO selecionado.
+
+Testes: regressão de piso no cockpit; build_limites sem indicador gerencial (ou formatado
+certo); explicador de pessoal com período histórico retornando o RGF do ciclo correto.
+make lint && make test; npm run test.
+```
+
+---
+
+#### Sprint F1 — `as_of` e memória de cálculo visíveis em toda tela
+
+**Objetivo:** toda página fiscal deve poder mostrar "como era" (`as_of`) e a memória de
+cálculo do número que exibe — hoje várias já aceitam `as_of` no backend e nunca o
+devolvem/consomem no frontend.
+
+**Problema:** Receita, Despesa, Linha Bruta, Pessoal, Resultado (5 endpoints), Patrimônio
+(Explorador/Matriz), Limites (`GET /limites`) e Cockpit (as 7 camadas) não carregam `as_of`
+no schema de resposta e/ou não enviam o parâmetro no fetcher, mesmo o router aceitando — ao
+contrário de Dívida, que já tem o padrão certo (schemas com `as_of`, sub-cards "pinados" no
+mesmo `as_of` do cabeçalho via `DividaPage.tsx:140-161`). Caixa tem o padrão certo em 2 de 3
+cards, mas não no herói.
+
+**Justificativa:** é a regra R3 do CLAUDE.md ("o frontend exibe a proveniência") — hoje só
+Dívida a cumpre de ponta a ponta.
+
+**Páginas afetadas:** Receita, Despesa, Linha Bruta, Pessoal, Resultado, Caixa, Patrimônio,
+Limites, Cockpit.
+
+**Tarefas:**
+- Adicionar `as_of: datetime | None` aos schemas que não têm; ecoar o parâmetro de query já
+  aceito.
+- Nos fetchers (`backend.ts`), enviar `as_of` e propagá-lo aos sub-cards de cada página
+  (padrão "pin" de Dívida).
+- Reusar o seletor "ver como era" (de Dívida/Pessoal) nas páginas que ainda não o têm.
+- `GET /limites`: aceitar `as_of` (hoje só o detalhe aceita).
+
+**Riscos:** mudança de contrato em ~8 schemas — manter o campo opcional, checar consumidores
+TS.
+
+**Critérios de aceite:** toda página fiscal lista tem `FonteChip`/`AuditLine` mostrando
+`as_of` quando presente; abrir uma retificação passada reproduz "como era" em cada página,
+com sub-cards pinados na mesma versão.
+
+**Testes:** contrato por endpoint (`as_of` no schema); reprodução histórica por página
+(estender o padrão já usado em Dívida/Pessoal); teste de "pin" (sub-cards não divergem de
+versão).
+
+**Evidências:** lista de endpoints antes/depois com presença de `as_of`; capturas do
+seletor "ver como era" em 3 páginas novas.
+
+**Prompt Claude Code:**
+```
+Implemente a Sprint F1 de backend_plataforma_fiscal/docs/evolucao_plataforma.md — fechar a
+regra R3 (bitemporalidade visível) nas páginas que ainda não a cumprem, achado consolidado
+da segunda rodada (§12).
+
+Backend: adicione as_of: datetime | None aos schemas que não têm (revenue:
+ReceitaDetalhe/similares; expense: DespesaDetalhe/EstagiosOut; personnel:
+PessoalDetalhe/MemoriaPessoal/PorPoderOut; result: ResultadoDetalhe/CascataOut/
+ReconciliacaoOut/MetaOut/MemoriaResultado; accounting: nós de drill/matriz; limits:
+GET /limites, que hoje só aceita as_of no detalhe). Todos os routers já aceitam o parâmetro
+de query — só falta ecoar no schema de resposta.
+
+Frontend: em cada fetcher afetado (services/backend.ts), envie as_of quando presente. Nas
+páginas com múltiplos sub-cards (Pessoal: PorPoderCard/ArvoreDrill/MemoriaPessoalDialog;
+Patrimônio: Explorador/Matriz; Cockpit: as 7 camadas), replique o padrão de "pin" já usado em
+DividaPage.tsx:140-161 — todos os sub-cards fixados no as_of resolvido pelo cabeçalho, para
+que uma retificação no meio do carregamento não misture versões na mesma tela. Adicione/reuse
+o seletor "ver como era" (mesmo componente de Dívida/Pessoal) nas páginas que ainda não o
+têm. Em Caixa, o FonteChip do herói da matriz de suficiência também precisa receber asOf (os
+outros 2 cards da mesma página já o fazem — CaixaPage.tsx:320,356).
+
+Testes: contrato (as_of presente em cada schema listado); reprodução histórica por página
+(adaptar o padrão já usado em test_debt.py/test_personnel.py); teste de "pin" garantindo que
+sub-cards da mesma página não divergem de versão. make lint && make test; npm run test.
+```
+
+---
+
+#### Sprint F2 — Legendas: fechar o que a B1 não terminou
+
+**Objetivo:** fechar os residuais de clareza que a B1 não cobriu — RPPS no ponto de leitura,
+ano-base×ICF da CAPAG, semântica de piso em Limites, e um conjunto de rótulos que ainda
+divergem do dado.
+
+**Problema:** achados U19–U34 (§12.2) — resumidamente: hierarquia de Receita/Despesa
+anunciada não bate com a entregue; deduções e transferências de capital escondidas; RPPS
+ainda só explicado numa nota recolhida, não no número principal; meta nominal descartada
+quando existe; CAPAG mistura 3 grandezas num rótulo "Metodologia"; "conciliado" aparece para
+entes sem MSC nenhuma; barra de piso/teto usa a mesma direção visual; `SeloCobertura`
+ausente em Despesa/Limites/Benchmarking.
+
+**Justificativa:** é a classe de achado que a B1 já provou valer a pena (dez rótulos
+corrigidos sem mudar nenhum número) — cobre os dois exemplos que o dono do produto deu nesta
+rodada (RPPS no Resultado, ano-base da CAPAG).
+
+**Páginas afetadas:** Receita, Despesa, Resultado, Dívida, Patrimônio, Limites,
+Benchmarking, Pessoal, Caixa, Saúde&Educação.
+
+**Tarefas** (uma por achado de §12.2): corrigir texto de hierarquia (Receita/Despesa);
+expor bruto×deduções na Receita; desdobrar transferência corrente×capital; mover
+"(com RPPS)"/"(sem RPPS)" para o `MetricHeader` do Resultado e para as fórmulas da memória;
+exibir `meta_nominal`/`realizado_nominal` quando presentes; separar `ano_base_fonte` de
+`metodologia_versao`/ICF na CAPAG com validação cruzada; rótulo condicional em Patrimônio
+quando `tem_msc=false`; inverter a barra de progresso para pisos em Limites; adicionar
+`SeloCobertura`/`SeloQualidadePagina` em Despesa/Limites/Benchmarking; rotular cadência RGF
+em Pessoal; exibir o quadrimestre avaliado no `Art42Panel`; replicar nota de expurgo de RPNP
+no card FUNDEB.
+
+**Riscos:** nenhum — mudança de rótulo/campo exibido, sem alterar cálculo (disciplina da
+B1: "não trocou nenhum número").
+
+**Critérios de aceite:** cada achado de §12.2 tem teste de regressão de UI correspondente;
+nenhum teste de cálculo muda de valor esperado.
+
+**Testes:** estender `clareza-conceitual.test.tsx` com um caso por achado; snapshot dos
+rótulos antes/depois.
+
+**Evidências:** tabela antes/depois igual à da B1 (o que o gestor lia × o que o dado dizia
+× correção).
+
+**Prompt Claude Code:**
+```
+Implemente a Sprint F2 de backend_plataforma_fiscal/docs/evolucao_plataforma.md —
+continuação direta da B1 ("a plataforma é honesta sobre ausência de dado; ainda não é
+honesta sobre significado"), fechando os achados U19-U34 da segunda rodada de auditoria
+(§12.2). Mesma disciplina da B1: NENHUM número muda, só rótulo, denominador exibido ou campo
+novo para permitir dizer a verdade completa.
+
+- Receita/Despesa: corrija o texto de hierarquia (ReceitaPage.tsx:193, DespesaPage.tsx:168)
+  para os níveis realmente derivados (natureza.py, classificacao.py::hierarquia_label);
+  exponha bruto×deduções na Receita; desdobre a barra "própria×transferida" em
+  corrente×capital.
+- Resultado: mova "(com RPPS)"/"(sem RPPS)" para o MetricHeader do primário/nominal (não só
+  na NotaMetodologica recolhida); inclua o regime em formula_primario/formula_nominal; exiba
+  meta_nominal/realizado_nominal quando result/schemas.py::MetaResumo os trouxer.
+- Dívida/CAPAG: separe ano_base_fonte (quando o layout traz Ano_Base) de
+  metodologia_versao/ICF — três campos, três rótulos, sem misturar; valide ano_base_fonte
+  contra ano_ref-1 quando ambos existirem.
+- Patrimônio: rótulo condicional em build_conciliacao quando tem_msc=false ("Balanço fecha"
+  em vez de "Conciliação MSC↔DCA"), com observacao descrevendo só os checks que rodaram.
+- Limites: inverta a direção visual da barra de progresso para indicadores de piso;
+  adicione SeloCobertura/SeloQualidadePagina (já registrado em coverage/service.py, só falta
+  consumir).
+- Benchmarking, Despesa: mesmo SeloCobertura/SeloQualidadePagina onde falta.
+- Pessoal: rotule a cadência RGF (quadrimestral/semestral) no PageHeader.
+- Caixa: Art42Panel exibe o quadrimestre avaliado, não só o booleano dentro/fora da janela.
+- Saúde&Educação: CardFundeb replica a nota de expurgo de RPNP sem lastro que a árvore
+  MDE/ASPS já tem.
+
+Testes: estenda clareza-conceitual.test.tsx com um caso de regressão por achado acima.
+Nenhum teste de cálculo deve mudar de valor esperado — se mudar, o achado era de cálculo,
+não de rótulo, e pertence a outra sprint. npm run test; make test.
+```
+
+---
+
+#### Sprint G1 — Cenários "E se?" em padrão de memorando técnico governamental
+
+**Objetivo:** o pedido explícito desta rodada — tornar o simulador de cenários robusto o
+bastante para sustentar uma decisão real de governo, com parâmetros de significado fiscal
+completo e CRUD de cenários salvos sem lacunas.
+
+**Problema:** (A19) a capacidade RBAC `"editar"` não existe no enum/constraint — renomear e
+arquivar cenário retornam 403 para todo mundo, sempre, desde o deploy da C2. (A20)
+`crescimento_rcl_pct` é *no-op* nas simulações de Pessoal e Dívida — exatamente os dois
+indicadores com teto mais severo. Além disso: os parâmetros aceitos são só 3 macro
+(IPCA/Selic/FPM) + 2 choques genéricos — não há FUNDEB separado de FPM, tributo específico,
+novo contrato de dívida estruturado (principal/prazo/carência) ou reajuste de folha;
+duplicar cenário e excluir definitivamente não existem; a comparação não exporta/imprime;
+`criado_por` é gravado e nunca exposto; o modelo de projeção nunca é escolhido pelo usuário;
+o aviso legal calculado (`memoria.observacao_minimos`) é descartado pela tela; o alerta
+preditivo não leva ao indicador de origem.
+
+**Justificativa:** é o pedido central desta rodada de auditoria — o simulador precisa sair
+de "protótipo" (diagnóstico da própria C1) para algo que resiste a ser citado num memorando
+técnico.
+
+**Páginas afetadas:** Previsões.
+
+**Tarefas:**
+- RBAC: adicionar a capacidade que falta (ou reusar `"exportar"`) ao enum +
+  `CheckConstraint`, com migration; corrigir `require_capability` de renomear/arquivar.
+- Propagar `crescimento_rcl_pct` também ao ramo `PCT_RCL` (Pessoal/Dívida) de
+  `_impacto_cenario`.
+- Novos parâmetros: FUNDEB separado de FPM; simulador estruturado de novo contrato de
+  dívida (principal, prazo, carência, taxa) com impacto no teto de 120%/200% RCL; variação
+  de folha/admissões distinta do choque genérico de pessoal.
+- CRUD: duplicar cenário; exclusão definitiva (distinta de arquivar) com confirmação;
+  exportar/imprimir a comparação; expor `criado_por`; seletor de modelo na simulação.
+- Renderizar `memoria.observacao_minimos` no `ScenarioPanel`; alerta preditivo passa o
+  indicador de origem via query param.
+
+**Riscos:** mudança de enum RBAC é sensível (constraint de banco) — testar em cópia antes;
+simulador de dívida estruturado começa com escopo mínimo (impacto no teto, sem persistir
+contrato hipotético).
+
+**Critérios de aceite:** renomear/arquivar cenário funciona para papel com a capacidade
+certa; simular Pessoal/Dívida com `crescimento_rcl_pct` diferente de zero produz resultado
+diferente; duplicar e excluir definitivamente funcionam; comparação exporta; `criado_por`
+visível; modelo escolhível; alerta preditivo abre no indicador certo.
+
+**Testes:** RBAC (papel sem a capacidade → 403, com ela → sucesso); ramo `PCT_RCL` de
+`_impacto_cenario` com `crescimento_rcl_pct != 0`; CRUD completo em `test_forecast.py`; E2E
+simular→salvar→reabrir→comparar→exportar.
+
+**Evidências:** antes/depois do resultado de uma simulação de Pessoal com RCL -10%; captura
+da comparação exportada; captura do 403 antes da correção.
+
+**Prompt Claude Code:**
+```
+Implemente a Sprint G1 de backend_plataforma_fiscal/docs/evolucao_plataforma.md —
+robustecer os "Controles de cenário · e se?" de Previsões para padrão de memorando técnico
+governamental. É o pedido central da segunda rodada de auditoria (§12), com dois defeitos
+críticos (A19, A20) e um conjunto de lacunas de robustez a fechar juntos, porque são a mesma
+tela.
+
+A19 — a capacidade RBAC "editar", exigida por PATCH/DELETE /cenarios/{id}
+(forecast/router.py:135,148), não existe no enum de tenancy/models.py:37-44 nem passaria o
+CheckConstraint (:112) — renomear/arquivar cenário retorna 403 para todo mundo, sempre,
+desde o deploy da C2. Adicione a capacidade ao enum (ou reutilize "exportar", que já é
+concedida onde faz sentido) com migration, e corrija os dois endpoints.
+
+A20 — crescimento_rcl_pct é no-op nas simulações de Pessoal/Dívida:
+forecast/service.py::_impacto_cenario (linhas 768-785) só usa essa premissa no ramo
+unidade==BRL; o ramo PCT_RCL (Pessoal, Dívida — os dois indicadores com teto mais severo)
+ignora silenciosamente o slider de RCL. Propague o choque também a esse ramo, com teste que
+prova resultado diferente para crescimento_rcl_pct != 0.
+
+Robustez do simulador: adicione parâmetro de FUNDEB separado do choque de FPM; um simulador
+de novo contrato de dívida (principal, prazo, carência, taxa) com impacto explícito no teto
+de 120%/200% RCL, escopo mínimo (calcula o impacto, não precisa persistir o contrato
+hipotético); parâmetro de reajuste de folha distinto do choque genérico de pessoal.
+
+CRUD de cenários salvos: duplicar (endpoint + UI); excluir definitivamente, distinto de
+arquivar, com confirmação; exportar/imprimir a comparação de cenários (reuse ExportButton já
+usado na comparação de modelos); exponha criado_por (já gravado em cenarios.py, nunca
+projetado em schema) no VersaoCenario/CenarioDetalhe e na tela; adicione seletor de modelo
+na simulação (hoje sempre "o melhor disponível").
+
+Renderize memoria.observacao_minimos no ScenarioPanel (calculado e descartado hoje). O link
+de alerta preditivo (engine.py:503, sempre "/previsoes" sem indicador) deve levar
+?indicador=X; PrevisoesPage.tsx lê useSearchParams para abrir já no indicador certo.
+
+Testes: RBAC (papel sem a capacidade → 403, com ela → sucesso); ramo PCT_RCL de
+_impacto_cenario com crescimento_rcl_pct != 0; CRUD completo (criar/duplicar/editar/
+excluir/arquivar) em test_forecast.py; E2E simular→salvar→reabrir→comparar→exportar.
+make lint && make test; npm run test && npx playwright test.
+```
+
+---
+
+#### Sprint D1 — Drill-down profundo (ficha detalhada, conforme prometido em §9)
+
+**Objetivo:** entregar a ficha que o plano já previa para D1 ("drill-down por órgão, fonte
+de recurso, programa/ação"), ampliada com o inventário concreto desta rodada — o maior
+número de "candidatas a página/drill nova" de toda a auditoria.
+
+**Problema:** o backend já tem drill/memória/série/simulador prontos e testados para
+Limites (`GET /limites/{indicador}`, `POST /limites/{indicador}/simular`) sem nenhum
+consumidor no frontend. A MSC desce até a conta PCASP folha, mas 90%+ das folhas mostram só
+código sem nome (a MSC do SICONFI não publica descrição por conta). Garantias e Operações de
+Crédito não têm cartão de posição vigente — só aparecem dentro do simulador, com base
+digitada manualmente. A Central de Dados tem lineage arquitetural (por tipo de nó), não por
+valor específico, e a aba Lineage não lê `?no=` da URL. O Cockpit não linka nenhum card
+(exceto Riscos) para a página de detalhe. A Carteira perde o indicador selecionado e não tem
+"voltar ao ranking" ao abrir um ente.
+
+**Justificativa:** em quase todo módulo, o backend já sustenta o próximo nível de
+profundidade — o gargalo é consumo no frontend, não cálculo novo. É o maior ganho por
+esforço da auditoria.
+
+**Páginas afetadas:** Limites, Patrimônio, Dívida, Central de Dados, Cockpit, Carteira,
+Relatórios, Alertas.
+
+**Tarefas:**
+- Painel expansível por linha em `/limites` consumindo `GET /limites/{indicador}` e
+  `POST /limites/{indicador}/simular`.
+- Glossário PCASP estático (~500 contas nível 6-7, portaria STN pública) como drawer no
+  Explorador MSC.
+- Cartão de posição vigente de Garantias e Operações de Crédito na Dívida.
+- Deep-link universal `?painel=lineage&no=` e `?painel=qualidade&ente=&periodo=` na Central
+  de Dados, consumido a partir dos cards de indicador/`FonteChip` e do
+  `SeloQualidade`.
+- Lineage por valor específico (`ente+período+indicador → job → bronze → versão →
+  checks`), acionável a partir do `FatoRow` do Assistente.
+- Crosslinks do Cockpit (Críticos, Tendências, Explicadores) para as páginas de detalhe.
+- Carteira: "voltar ao ranking de {indicador} — UF {sigla}" e preservação do indicador
+  selecionado ao trocar de ente.
+- Ligar as páginas fiscais como emissoras do deep-link `?modelo=` que `RelatoriosPage` já lê.
+- Candidatas a página nova (se o volume justificar sprint própria): Transferências (lista
+  completa, série mensal); execução por função ao longo do tempo; CDP como linha do tempo.
+
+**Riscos:** glossário PCASP estático precisa de manutenção quando a portaria mudar —
+documentar fonte e data da versão usada.
+
+**Critérios de aceite:** `/limites` abre memória/série/simulador sem sair da página; MSC
+mostra nome oficial nas folhas; Dívida mostra % vigente de garantias/operações de crédito
+sem exigir simulação; um clique a partir de qualquer selo/indicador leva à Central de Dados
+já filtrada; Cockpit e Carteira navegam sem perder contexto.
+
+**Testes:** contrato do painel expansível de Limites; snapshot do glossário PCASP; E2E de
+navegação Cockpit→detalhe→volta e Carteira→ente→volta preservando indicador.
+
+**Evidências:** antes/depois de 3 telas (Limites expandido, MSC com nomes, Dívida com
+cartão de garantias); vídeo do fluxo de navegação sem perda de contexto.
+
+**Prompt Claude Code:**
+```
+Implemente a Sprint D1 de backend_plataforma_fiscal/docs/evolucao_plataforma.md — ficha
+detalhada do drill-down profundo já previsto no plano (§9), ampliada com o inventário da
+segunda rodada de auditoria (§12) — o maior "ganho por esforço" da auditoria, porque a maior
+parte já existe no backend.
+
+1) /limites: crie o painel expansível por linha consumindo GET /limites/{indicador} e POST
+   /limites/{indicador}/simular — já testados no backend, sem consumidor no frontend hoje
+   (backend.ts não tem fetchLimiteDetail/fetchSimularLimite). Memória, série histórica,
+   providências (base legal por faixa) e simulador, tudo sem sair da página.
+2) Explorador MSC (Patrimônio): dicionário estático de nomes PCASP (portaria STN, ~500
+   contas nível 6-7) como drawer, substituindo "código · Subitem" — hoje 90%+ das folhas de
+   nível 6-7 não têm nome (a MSC do SICONFI não publica descrição por conta).
+3) Dívida: cartão de posição vigente de Garantias e Operações de Crédito (hoje só aparecem
+   dentro do simulador, com base digitada manualmente pelo usuário) — busque e exiba o %
+   atual sobre a RCL Ajustada.
+4) Central de Dados: deep-link universal ?painel=lineage&no= e
+   ?painel=qualidade&ente=&periodo= (a aba Lineage hoje começa sempre no mesmo nó fixo,
+   CentralDadosPage.tsx:1138, e nada linka para lá com parâmetro). Consuma esse deep-link a
+   partir dos cards de indicador/FonteChip das páginas fiscais e do link "ver a conta que
+   não fechou" do SeloQualidade.tsx. Se o tempo permitir, avance lineage por instância
+   (ente+período+indicador → job → bronze → versão → checks), não só por tipo de nó.
+5) Cockpit: crosslink de Críticos/Tendências/Explicadores para /limites?indicador=,
+   /receita, /despesa, /pessoal, /previsoes (hoje só Riscos linka).
+6) Carteira: "voltar ao ranking de {indicador} — UF {sigla}" e preservação do indicador
+   selecionado ao abrir um ente a partir do ranking/mapa.
+7) Ligue RelatoriosPage.tsx (que já lê ?modelo=, RelatoriosPage.tsx:63-64) como destino de
+   um botão "exportar esta análise" nas páginas fiscais — hoje nenhuma emite esse link.
+
+Testes: contrato do painel de Limites; snapshot do glossário PCASP contra uma amostra
+conhecida; E2E de navegação Cockpit→detalhe→volta e Carteira→ente→volta sem perder o
+indicador selecionado. make lint && make test; npm run test && npx playwright test.
+```
+
+---
+
+#### Sprint H1 — Governança: billing, control plane e licença visível
+
+**Objetivo:** consertar a cadeia de billing (hoje sempre R$ 0,00), dar ao control plane sua
+própria auditoria, e tornar a licença visível para quem a usa.
+
+**Problema:** `emitir_fatura` sempre calcula `preco=Decimal("0")` porque o único endpoint
+que grava `op.assinatura` está com 403 hardcoded e o control plane não tem equivalente —
+toda fatura emitida vale zero. Criar usuário, criar papel e alterar a matriz RBAC não gravam
+`op.audit_log`. A trilha de auditoria não mostra quem agiu e a UI não expõe os filtros de
+usuário/período que o backend já aceita. O superusuário nunca tem `org_id` de sessão e
+portanto nunca pode consultar `/admin/auditoria` — e não existe `/platform/auditoria` —
+logo nenhuma ação de licenciamento é auditável por ninguém. Badge de licença expirada mostra
+"ATIVA". O tenant nunca vê sua própria licença — só descobre por erro ao tentar adicionar um
+ente. Cobrança por população conta ente sem população como zero, silenciosamente.
+
+**Justificativa:** achados de governança e integridade comercial — fora do escopo fiscal,
+mas dentro do "não pode haver erro" quando o erro é uma fatura errada ou uma ação
+administrativa sem rastro.
+
+**Páginas afetadas:** Admin, Plataforma, Perfil.
+
+**Tarefas:** criar `POST/PATCH /platform/orgs/{id}/assinatura` e religar "Emitir fatura" a
+um preço real; `insert_audit_log` em `create_user`/`create_papel`/`update_papel_capacidades`;
+expor nome/e-mail do ator na trilha (join com `op.usuario`) e os filtros já suportados;
+criar `/platform/auditoria` com sessão bypass de RLS; corrigir o badge de vigência; expor
+`GET /me/licencas` e um badge de vigência na aba Organização/Perfil; expor o flag
+`sem_populacao` na UI da fatura; formulário de provisionamento passa a coletar
+`metrica_cobranca` e preço.
+
+**Riscos:** nenhum cálculo fiscal é tocado; risco é só de regressão em RBAC/billing —
+estender a suíte de isolamento RLS entre organizações da Sprint 28.
+
+**Critérios de aceite:** fatura com organização/assinatura configurada tem
+`valor_total > 0`; ação de RBAC aparece em `op.audit_log` com o nome do ator; superusuário
+consulta suas próprias ações; badge mostra "expirada" quando vencida; tenant vê sua licença
+sem precisar de um erro para descobrir.
+
+**Testes:** fatura com preço configurado; auditoria de RBAC (3 fluxos); `/platform/auditoria`
+isolado por sessão; badge com licença vencida.
+
+**Evidências:** fatura de teste com valor não-zero; entrada de auditoria mostrando quem
+alterou um papel; captura do badge "expirada".
+
+**Prompt Claude Code:**
+```
+Implemente a Sprint H1 de backend_plataforma_fiscal/docs/evolucao_plataforma.md —
+governança de billing, auditoria e licenciamento, achados da segunda rodada de auditoria
+(§12) nas páginas Admin/Plataforma/Perfil.
+
+1) Billing zerado: emitir_fatura (tenancy/service.py:377-384) sempre usa
+   preco=Decimal("0") porque POST /billing/assinatura está com 403 hardcoded
+   (admin_router.py:53-64) e modules/platform não tem endpoint equivalente. Crie
+   POST/PATCH /platform/orgs/{id}/assinatura no control plane (metrica_cobranca +
+   preco_unitario) e religue o botão "Emitir fatura" do AdminPage a um preço real.
+2) Auditoria de RBAC ausente: create_user, create_papel e update_papel_capacidades
+   (tenancy/service.py) não chamam insert_audit_log, diferente de
+   TROCAR_ORGANIZACAO/ALTERAR_SENHA. Adicione, com antes/depois das capacidades no payload.
+3) Trilha de auditoria sem autor: AuditoriaItem só carrega usuario_id; junte com
+   op.usuario para expor nome/e-mail. Exponha na UI os filtros usuario_id/de/ate que
+   admin_router.py já aceita e o AdminPage ainda não usa.
+4) Control plane sem auditoria própria: superusuário nunca tem org_id de sessão, então
+   nunca pode chamar /admin/auditoria (que filtra por org_id) — e não existe
+   /platform/auditoria. Crie o endpoint com sessão bypass de RLS (igual a
+   superuser_session), cobrindo inclusive ações com org_id=None (ex.: definir_brasao).
+5) Badge de licença: PainelLicencas (PlataformaPage.tsx:300-303) mostra "ATIVA" mesmo
+   vencida, porque não há transição automática de status. Corrija o label:
+   vigente ? 'vigente' : (hoje > vigencia_fim ? 'expirada' : status).
+6) Licença invisível ao tenant: crie GET /me/licencas (ou equivalente) e um badge de
+   vigência na aba Organização (Admin) ou Perfil — hoje só se descobre por erro ao adicionar
+   ente à carteira.
+7) Formulário de provisionamento de organização (PlataformaPage.tsx:397-507) passa a
+   coletar metrica_cobranca e preco — hoje toda org nasce com billing indefinido. Exponha
+   também o flag sem_populacao (já calculado, tenancy/service.py:400) na tabela de faturas.
+
+Testes: fatura com preço configurado (valor_total > 0); auditoria dos 3 fluxos de RBAC;
+/platform/auditoria isolado por sessão; badge com licença vencida. Estenda a suíte de
+isolamento RLS entre organizações da Sprint 28 para cobrir os novos endpoints.
+make lint && make test.
+```
+
+---
+
+#### Sprint B3 — Funcionalidades construídas e nunca ligadas
+
+**Objetivo:** fechar os itens já listados como "Planejado (B3)" na tabela de UX (U12-U17) e
+somar os achados equivalentes do Assistente encontrados nesta rodada — em todos os casos, a
+peça já existe no código e simplesmente não é chamada.
+
+**Problema:** infraestrutura de impressão completa (`@page`, `.no-print`) com zero
+gatilhos; 6 de 13 links "relatório completo" passam um modelo inexistente e caem
+silenciosamente em "Resumo Executivo"; `AccessibleChart` (205 linhas, com alternativa
+tabular) nunca é importado; escalas de gráfico inconsistentes entre `SerieChart` (ancora em
+zero) e `TendenciaChart` (trunca o eixo sem avisar); seletor de período inerte em 7 rotas. No
+Assistente: `dados_incompletos` é calculado e nunca lido pela tela; o número ancorado só vira
+link de fonte quando o texto do Gemini repete o valor formatado **exatamente**; quando o
+Gemini está indisponível, a resposta degrada sem aviso de "modo offline".
+
+**Justificativa:** é trabalho já pago (o componente existe) e não entregue ao gestor — o
+menor custo por item corrigido de toda a auditoria.
+
+**Páginas afetadas:** todas (impressão/gráficos), Relatórios, Assistente.
+
+**Tarefas:** botão/gatilho de impressão nas páginas fiscais principais; corrigir os 6 links
+de "relatório completo"; adotar `AccessibleChart` nos gráficos que ainda não o usam;
+padronizar a âncora de escala entre `SerieChart`/`TendenciaChart` (ou sinalizar o
+truncamento); ligar/remover o seletor de período inerte; Assistente: renderizar
+`dados_incompletos`; casar número por regex numérica tolerante; rótulo "modo offline (sem
+Gemini)".
+
+**Riscos:** nenhum — é ligar UI a funcionalidade já existente, sem tocar cálculo.
+
+**Critérios de aceite:** impressão produz página legível nas 5 páginas fiscais mais usadas;
+13/13 links de relatório abrem o modelo certo; gráficos com alternativa tabular acessível;
+Assistente sinaliza dado incompleto e modo offline na tela.
+
+**Testes:** teste de impressão (CSS aplicado); teste dos 13 links de relatório; axe-core nos
+gráficos convertidos; teste do Assistente com resposta parafraseada e com `GEMINI_API_KEY`
+ausente.
+
+**Evidências:** PDF/print preview de 2 páginas; captura do Assistente em modo offline com o
+aviso visível.
+
+**Prompt Claude Code:**
+```
+Implemente a Sprint B3 de backend_plataforma_fiscal/docs/evolucao_plataforma.md — itens já
+listados como "Planejado (B3)" na tabela de UX (§5.2, U12-U17), mais os achados equivalentes
+do Assistente encontrados na segunda rodada de auditoria (§12). Em todos os casos a peça já
+existe no código; falta ligá-la.
+
+- Impressão: @page/.no-print já existem em global.css:342-405; window.print() nunca é
+  chamado (grep = 0). Adicione o gatilho nas páginas fiscais principais.
+- Relatórios: 6 de 13 links "relatório completo" passam um modelo inexistente e caem em
+  "Resumo Executivo" (reports/models.py:26-32) — corrija os 6 para o modelo certo.
+- AccessibleChart.tsx (205 linhas, com figure/figcaption e alternativa tabular) tem zero
+  importações — adote-o nos gráficos SVG artesanais que ainda não o usam.
+- Escalas: SerieChart ancora em zero, TendenciaChart/PrevisoesPage truncam o eixo sem avisar
+  em série monetária (TendenciaChart.tsx:60-72) — padronize ou sinalize explicitamente o
+  truncamento.
+- Seletor de período do AppShell (AppShell.tsx:257) é inerte em 7 rotas — ligue-o ou
+  oculte-o nessas rotas.
+- Assistente: dados_incompletos é calculado (assistant/service.py:173-194,236) e nunca lido
+  em AssistentePage.tsx — replique o bloco que RelatoriosPage.tsx:349-352 já usa para o campo
+  irmão. O casamento de "número ancorado" (RespostaMarkdown.tsx:29-38) exige igualdade de
+  string exata com fato.valor_formatado — troque por regex numérica tolerante para não
+  perder o link em paráfrases. Quando use_gemini() degrada para LocalGroundedProvider
+  (llm.py:44-50), mostre "modo offline (sem Gemini)" na tela quando
+  uso.modelo === 'local-grounded'.
+
+Testes: impressão (CSS aplicado); 13/13 links de relatório corretos; axe-core nos gráficos
+convertidos; Assistente com resposta parafraseada (link de fonte preservado) e com chave
+ausente (aviso visível). npm run test && npx playwright test; make test.
+```
 
 ---
 
@@ -864,6 +1578,12 @@ tarefas, riscos, critérios de aceite, testes, evidências — quando entra em e
 
 | Data | Alteração |
 |---|---|
+| 2026-08-05 | **Sprint F1 concluída — `as_of` propagado às páginas que faltavam.** `as_of: datetime \| None` (ou `str \| null` no TS) adicionado aos schemas/interfaces de Receita, Despesa, Linha Bruta, Pessoal, Resultado, Patrimônio e Limites (`GET /limites`, que antes só aceitava `as_of` no detalhe); fetchers do frontend passam a enviá-lo; sub-cards de Pessoal/Patrimônio/Cockpit replicam o padrão de "pin" já usado em Dívida, para que uma retificação no meio do carregamento não misture versões na mesma tela. **Interrompida uma vez por limite de sessão da conta** (não erro de código) bem no meio dos edits de tipo do frontend — retomada do ponto exato onde parou, sem redigitar nada (o trabalho de backend, já commitável, sobreviveu no disco). Ao reabrir depois da retomada, o agente encerrou de novo sem relatório final; em vez de aceitar isso, os testes foram rodados **diretamente pelo orquestrador**, não por relato de agente: backend saiu limpo de cara (`ruff`, `mypy` em 235 arquivos, `pytest` completo, tudo verde); o frontend tinha `vitest` verde (207/207) mas `tsc --noEmit` acusava 9 erros reais — `as_of` virou campo obrigatório nas interfaces e 9 fixtures de teste em `linha-bruta.test.tsx` e `receita-despesa.test.tsx` (`LinhaBruta`, `ReceitaConciliacao/Realizacao/Dependencia/Memoria`, `DespesaEstagios/Execucao/Rigidez/Memoria`) não tinham sido atualizadas — `vitest` não faz checagem de tipo completa (usa esbuild), por isso os testes passavam e o `tsc` não. Corrigido diretamente (`as_of: null` nas 9 fixtures) por ser mecânico e bem localizado — sem abrir nova sprint/agente para isso. Reverificado: `tsc --noEmit` limpo, e os dois arquivos tocados rodados de novo isoladamente (22/22 testes, sem regressão). Suíte completa do frontend: 229 testes (207 + 22), `eslint` só com os 10 avisos pré-existentes (`react-refresh`/`exhaustive-deps`, nenhum novo). |
+| 2026-08-05 | **Sprint G1 concluída — RBAC morto (A19) e `crescimento_rcl_pct` no-op (A20) corrigidos; simulador de cenários robustecido.** **A19**: a capacidade `"editar"`, exigida por `PATCH`/`DELETE /cenarios/{id}` desde a Sprint C2, nunca existiu no enum (`tenancy/models.CAPACIDADES`) nem no `CheckConstraint` do banco — o código dos dois endpoints sempre esteve certo, mas **nenhum papel, de nenhuma organização, jamais conseguiu receber essa capacidade** (o `INSERT` em `op.papel_permissao` teria violado a constraint). Antes: qualquer usuário, mesmo com todas as demais capacidades, recebia 403 ao renomear ou arquivar um cenário salvo — permanentemente, não por falta de permissão configurada. Depois (migration `0040`, aditiva e testada com downgrade): um papel com `"editar"` renomeia/arquiva normalmente; um papel sem ela continua recebendo 403 — os dois lados provados em `test_forecast_g1.py`. **A20**: `_impacto_cenario` só usava `crescimento_rcl_pct` no ramo `BRL` (RCL/receita); o ramo `PCT_RCL` — exatamente Pessoal e Dívida, os dois indicadores com teto mais severo da LRF — ignorava o slider por inteiro. Antes: simular Dívida do Ceará (dado real) com RCL a -10% produzia o **mesmo** `pct_projetado` que simular com a premissa zerada — 26,50% da RCL nos dois casos, o slider era decoração. Depois: a RCL menor **dilui** o indicador (`pct_final = pct / (1 + crescimento_rcl_pct/100)`), então RCL a -10% eleva o mesmo cenário para **29,45%** — a mesma direção econômica que já valia para o ramo BRL, agora consistente nos dois (`test_impacto_cenario_service_prova_o_ramo_pct_rcl_isoladamente`, contra `service._impacto_cenario` direto). **Robustez**: FUNDEB (`fundeb_variacao_pct`) e reajuste de folha (`reajuste_folha_pct`) entraram como parâmetros próprios — compõem multiplicativamente com o choque genérico (não somam, mesmo cuidado da conversão anual→mensal da Sprint C1) e avisam em `memoria.avisos_premissas` quando informados para um indicador ao qual não se aplicam, para não repetir o silêncio que produziu o A20. Simulador estruturado de novo contrato de dívida (principal/prazo/carência/taxa) calcula o impacto no teto de 120%/200% da RCL sem persistir o contrato hipotético (escopo mínimo da ficha — a operação real continua nascendo no SADIPEM). CRUD completo de cenários: duplicar (`POST /cenarios/{id}/duplicar`, cabeçalho novo e independente) e excluir definitivamente (`DELETE /cenarios/{id}/definitivo`, distinto de arquivar, mesma capacidade `"editar"`, cascade via a FK de `op.cenario_versao` da Sprint C2). `criado_por` — gravado desde a C2 e nunca projetado em schema — agora aparece em `VersaoCenario`/`CenarioDetalhe` (e-mail resolvido via `tenancy.emails_por_usuario`, reuso do padrão já usado pelo histórico de alertas) e na tela. Seletor de modelo na simulação (o backend já aceitava `modelo` desde a Sprint 14; só a UI sempre usava "o melhor disponível"). `memoria.observacao_minimos` (calculada e descartada) passou a ser renderizada no `ScenarioPanel`. Comparação de cenários ganhou exportação (reuso do `ExportButton` já usado na comparação de modelos). Alerta preditivo (`alerts/engine.py::_alertas_preditivos`) passou a levar `/previsoes?indicador=X` em vez de sempre `/previsoes`; `PrevisoesPage` lê `?indicador=` via `useSearchParams` na montagem. Migration `0040` (aditiva, testada upgrade→downgrade→upgrade). Testes novos: `test_forecast_g1.py` (19 casos — RBAC nos dois sentidos, propagação do A20 por HTTP e direto na função, FUNDEB/folha/contrato de dívida, CRUD, `criado_por`, seletor de modelo, alerta preditivo ponta a ponta contra o motor real). **Achado operacional, não de código**: a suíte completa (`pytest -q`) ficou presa por ~35 minutos numa conexão TCP a `127.0.0.1:6379` em `SYN_SENT` — o Redis local (`redis-portable`, fora do docker-compose) não estava de pé; nenhum teste referencia Redis diretamente, mas algum caminho de RQ/worker o toca como efeito colateral. Subir o Redis destravou o processo (que era filho do próprio `pytest`, não uma segunda suíte concorrente — verificado por `ParentProcessId` antes de mexer em qualquer processo). Na mesma rodada, `test_cash_rap.py::test_suficiencia_por_fonte_semaforo` falhou uma vez por colisão de `cod_ibge` gerado aleatoriamente (`"2" + 6 dígitos`, espaço de só 1.000.000 valores, sobrepondo códigos IBGE reais de 9 estados) com `2800308` (Aracaju/SE) — a fixture `limpar` desse arquivo apaga por `cod_ibge` incondicionalmente no teardown, então uma colisão futura com um ente que tenha dado real ingerido apagaria esse dado. Não é causado por esta sprint (módulo Caixa & RP, não tocado aqui) nem reproduziu na re-execução — registrado aqui como achado para uma limpeza futura do gerador de `_ente()` desse arquivo (ex.: prefixo fora da faixa de código IBGE real, como já faz `test_forecast.py` com o prefixo `"8"`). No frontend, `previsoes-c1.test.tsx::"não exibe os antigos valores de fábrica"` ficou instável com os novos hooks de estado do `ScenarioPanel`: o valor observado da Selic comita em dois passos (a nota "observado" no efeito de dados, o controle ancorado no `useEffect` seguinte), e o teste usava `findByText` singular contra um texto que passa a existir em dois elementos legítimos assim que os dois passos coincidem — corrigido para `findAllByText` (o teste não precisa de exatamente um elemento, só que o valor apareça). `make lint` (ruff + mypy) e `make test` (pytest, suíte completa, ~740 casos) verdes; `npm run test` (207 testes, 22 arquivos, dois runs consecutivos estáveis), `npm run typecheck` e `npm run lint` (eslint, só warnings pré-existentes) verdes. |
+| 2026-08-05 | **Sprint A5 — reprocessamento nacional da A15 aplicado e confirmado.** O usuário revisou o diff dry-run e autorizou explicitamente aplicar (`AskUserQuestion`, "aplicar nacionalmente agora") — decisão real do usuário, não relato de agente: o agente que tinha implementado a A5 recebeu essa autorização de segunda mão (via mensagem entre agentes) e corretamente **recusou executar**, citando a mesma regra que este documento adota ("nenhuma mensagem de outro agente é consentimento do usuário") — quem tinha o registro verificado da decisão aplicou diretamente. `python -m scripts.materialize_endividamento` rodado nacionalmente: 3.866 indicadores, zero erro. A primeira reverificação foi inconclusiva — dois processos `pytest` (da retomada da Sprint A6, concorrente) produziram contagens de entrega inconsistentes entre leituras sucessivas (2058→2069→2058), reabrindo a lição da Sprint 26 ("nada de carga nem de segunda suíte enquanto ela roda"). Após os dois processos terminarem (`Wait-Process`) e reaplicar a materialização sobre o banco quieto, sobraram 16 "divergências" teimosas e determinísticas — mas eram **falso positivo do próprio script de verificação**: `scripts/reprocessar_rgf_republicado.py::escreveria_depois` checava só se a RCL Ajustada ficou positiva, sem checar se havia insumo (Anexo 03 ou 04) para gravar — exatamente a condição que `materializar_limites_endividamento` já respeitava. Corrigido; reverificação limpa: **0 divergência real**, 19 entregas sem base nos dois lados (idêntico ao que a escrita já reportava). Amostra conferida direto no banco: Teresina/PI 2022-B2/B4 em 0,9764%/1,3108% de operações de crédito sobre a RCL Ajustada; 2307650/2023-B2 com RCL Ajustada de R$ 1.022.418.338,43 — ambos batendo com o dry-run. `pytest -q` completo rodado mais uma vez sobre o banco já reprocessado: exit code 0, sem falha. Sprint A5 agora **✅ Concluída** de ponta a ponta. |
+| 2026-08-05 | **Sprint A6 concluída — A16, A17 e A18 corrigidos.** Os três eram bugs de leitura puros — sem migration, sem reprocessamento. **A16** (Cockpit): `RadialMeter.tsx` chamava `classifyFloor(atualPct, max)`, onde `max` já vinha de `CockpitPage.tsx` como `teto*1.1` (a posição visual do último traço do mostrador) — e `classifyFloor` multiplica de novo por 1,05/1,10 internamente, então o limiar de "abaixo do mínimo" virava 110% do piso, não 100%. A correção troca o argumento para `alerta`, que `CockpitPage.tsx` já povoa com o piso real sem multiplicação (`alerta = sentido==='piso' ? teto : teto*0.9`) — nenhuma outra prop mudou. Antes/depois para saúde exatamente em 15,00% (piso 15%): antes classificava `maximo` → "Abaixo do mínimo" (vermelho); depois classifica `prudencial` → "No limite do mínimo", igual ao que `/saude-educacao` já mostrava lendo o `abaixo_do_minimo` do backend. Teste novo em `piso-vs-teto.test.tsx` (unidade `classifyFloor(15,15)` + componente `RadialMeter` com as props exatas que o Cockpit monta). **Verificação dos outros consumidores** (risco listado na ficha): `classifyFloor` só é chamado de dentro de `RadialMeter.tsx`, e `RadialMeter` só é usado em `CockpitPage.tsx` e `PessoalPage.tsx` — `PessoalPage` nunca passa `sentido='piso'` (usa o padrão `'teto'`), então nunca chamava `classifyFloor`. Saúde&Educação e Benchmarking **não usam `RadialMeter` nem `classifyFloor`** — Saúde&Educação lê o booleano `abaixo_do_minimo` que o backend já calcula, e Benchmarking nunca corre risco/faixa (só `formatBenchmarkValue`). Ou seja: zero consumidores além do próprio Cockpit seriam afetados pela mudança de assinatura — o risco listado na ficha não se concretizou, mas valeu a checagem. **A17** (Limites): `limits/service.py::build_limites` listava todo `gold.mart_indicador` do período sem checar `dim_limite_legal`; indicadores gerenciais (`rcl_per_capita`, `investimento_rcl`, `resultado_primario_rcl` — registrados de propósito sem faixa/teto por `indicators/gerenciais.py`) herdavam a formatação de limite legal em `LimitesPage.tsx`: "teto 0%" e o valor dividido por 1e6 como se fosse moeda em milhões. Antes/depois para `rcl_per_capita` = R$ 4.870,66/hab: antes aparecia na lista com "piso 0%" e "R$ 0,0 M"; depois **não aparece mais na lista** — `build_limites` agora pula (`continue`) todo indicador sem `dim_limite_legal` associado, e a contagem de itens de `GET /limites` cai exatamente pelos gerenciais materializados no período (de N para N−k). Optei por filtrar em vez de formatar per-capita na própria tela: o Monitor de Limites é especificamente a tela de conformidade contra teto/piso legal (`SectionLabel`: "posição vs. teto/piso legal"), e esses três indicadores já têm o lugar certo — o Benchmarking, que os formata pela unidade real via `formatBenchmarkValue` (`brl_per_capita` → "R$ x/hab"). Bônus não pedido pela ficha: como `cockpit_service.py::_limites` reusa `limits_service.build_limites`, o bloco "críticos" do Cockpit também parou de poder listar um gerencial por engano. Teste novo em `test_dashboard_limits.py` (ente com `pessoal_executivo` E `rcl_per_capita` materializados no mesmo período: o primeiro continua na lista, o segundo não). **A18** (Cockpit): `cockpit_service.py::build_cockpit` calculava `periodo_rgf = periodo_util.mais_recente(entregas_rgf)` — o RGF mais recente que o ente **já teve**, ignorando por completo o período RREO (`periodo`) que o usuário pediu; abrir um período antigo do RREO misturava dois exercícios de RGF na mesma tela sem aviso. Corrigido para `periodo_rgf = rgf_periodo_de(periodo)`, reaproveitando o mapeamento B→Q que já existia (e já estava correto) em `estadual_service.py` — só precisou virar público (`_rgf_periodo_de` → `rgf_periodo_de`, 3 usos internos ajustados, zero mudança de comportamento lá). Antes/depois: ente com RGF em 2024-Q1/Q2/Q3, abrindo o Cockpit em `2024-B4` (ciclo de Q2) — antes o explicador de "Pessoal por poder" trazia sempre **2024-Q3** (o mais recente publicado, de outro ciclo); depois traz **2024-Q2**, o RGF do mesmo ciclo do período selecionado, com `2024-Q1` como período anterior da comparação. Teste novo em `test_sprint22_cockpit.py`: três quadrimestres materializados (Q3 com o maior valor de propósito, para não passar "por coincidência"), Cockpit pedido em `2024-B4`, `explicadores[dimensao=pessoal_poder].periodo_atual` confirmado em `2024-Q2`. **Achado incidental, não corrigido (fora do escopo da ficha)**: o mapeamento B→Q reaproveitado (`rgf_periodo_de`, ceil-based) assume cadência **quadrimestral** e não conhece a cadência **semestral** de município com menos de 50 mil habitantes (LRF art. 63, U25) — para esses entes, o explicador de pessoal do Cockpit passa a dizer corretamente "sem RGF vigente" em vez de mostrar o período errado (uma melhora sobre o bug), mas ainda não acha o RGF semestral que existe sob outro rótulo. Achei também que existe uma **terceira** implementação quase idêntica desse mapeamento em `cash_rap/service.py::rgf_periodo_de_rreo` (só bimestres pares, retorna `None` para ímpares) — não unifiquei as duas por estar fora do escopo desta sprint (a ficha pedia reuso do específico de `estadual_service.py`), mas fica registrado como candidato a uma limpeza futura (mover para `shared/periodo.py`, que já é a "fonte única" declarada para aritmética de período). `make lint` (ruff + mypy, 235 arquivos) e `make test` (pytest, suíte completa) verdes; `npm run test` (207 testes, 22 arquivos), `npm run typecheck` e `npm run lint` (eslint, só warnings pré-existentes) verdes. |
+| 2026-08-04 | **Sprint A5 implementada — parcialmente.** A14 e A21 fechados de ponta a ponta (código + teste + verificação contra dado real), sem migration: a vigência de FPM/FUNDEB/TRANSFERENCIA já vivia em `gold.dim_entrega` sob `cod_ibge='BR'` (a ingestão nacional roda o Brasil inteiro numa corrida só) e simplesmente não era consultada — bastou filtrar por ela (`ingestion/repository.py::resolve_versoes_por_mes`), sem coluna nova nas 3 tabelas silver. Fortaleza FPM 2024 confirmado em R$ 1.547.501.180,68 (não R$ 3.095.002.361,36); FUNDEB 2024 também tinha 1 versão duplicada (R$ 1.944.922.780,36 vigente). A21: `_alertas_limite` agora fecha (`status="resolvida"`, `resolvido_por=NULL`) o alerta cuja chave deixou de aparecer com faixa não-nula, sem tocar em alerta já tratado pelo gestor nem em ausência de dado (que não é resolução). A15 corrigido no **cálculo on-read**: `indicators/endividamento.py` ganhou `_valor_vigente`, que olha as entregas RGF subsequentes do mesmo exercício quando a conta publica coluna comparativa por quadrimestre ("Até o Nº Quadrimestre" — Anexos 02/03: RCL, RCL Ajustada, garantias) e usa a mais recentemente republicada; a reconciliação (`reconciliacao/rcl_rgf`) ganhou o mesmo tratamento. 2307650/2023-Q1 (RCL Ajustada) passou de R$ 152.100.786,24 (a 1ª entrega, presa) para R$ 1.022.418.338,43 (republicado na entrega seguinte) — e a divergência de +578% da reconciliação para esse ente zerou nas 12 entregas de 2022–2025. **Achado não previsto na ficha**: o Anexo 01 do RGF (Despesa com Pessoal) **não tem coluna comparativa por quadrimestre** — 4.168 linhas conferidas no acervo, todas com a coluna fixa "Valor" — então a RCL Ajustada específica do limite de pessoal (a que produziu o 324,49% em 2307650/2023-B2, citado no C1) **não tem correção recuperável** por este mecanismo; documentado em `personnel/service.py::_rcl_ajustada_publicada`. **Reprocessamento do gold ficou em dry-run** (`scripts/reprocessar_rgf_republicado.py`, somente leitura, 2.058 entregas RGF vigentes varridas): 86 linhas de garantias/operações de crédito mudariam de base no corte padrão (>2%) em todo o acervo nacional, a maioria com numerador zero (o impacto visível na tela é nulo — 0,00% continua 0,00%), mas com exceções materiais como Teresina/PI (operações de crédito: 0,86%→0,98% e 1,16%→1,31% da RCL Ajustada). Não aplicado — decisão do usuário, ver §12.3. A reconciliação nacional (Ceará) tem um efeito de dois gumes: 21 pares que divergiam por leitura presa no primeiro valor passaram a conferir, mas 51 pares que conferiam "por coincidência" com o primeiro valor passaram a divergir contra o número mais recente que o próprio ente publicou (a maioria diferenças de centavos; alguns materiais, ex. 2311900/2025-Q2: -33%) — taxa de conferência do CE foi de 94,3% para 92,8%, ainda acima do sentinela de 90%. **Achado adicional fora do escopo desta sprint**: `forecast/premissas.py::_premissa_fpm` (premissa de variação do FPM, Sprint C1) é um **terceiro** leitor de `silver.tesouro_fpm` que a ficha da A14 não listou — não soma todas as versões (não repete o A14), mas escolhe a vigente por `order_by(TesouroFpm.versao_entrega.desc())` (maior string), não por `gold.dim_entrega`; funciona por coincidência para Fortaleza 2024 (`'pag2024' > '20260722'` lexicograficamente) mas quebra se uma tag numérica mais recente for ingerida depois de uma tag `pagAAAA` (`'p' > qualquer dígito` em ASCII, sempre). Não alterado nesta sprint — não estava no alcance nem tinha caso real quebrado para provar. `make test` (`pytest` completo, todo o repositório) e `make lint` (`ruff check` + `mypy`, 235 arquivos) **verdes, sem exceção** — inclui os testes novos (A14: `test_sprint_a5_vigencia.py`, 4; A15: 3 em `test_limites_endividamento.py` + 2 em `test_reconciliacao.py`; A21: 2 em `test_alerts.py`) e a suíte pré-existente inteira, para confirmar zero regressão nos consumidores que já liam essas tabelas — `test_forecast.py`, `test_revenue.py` e `test_sprint25a_receita_despesa.py` precisaram de fixtures ajustadas (semear `gold.dim_entrega` sob `cod_ibge='BR'` para as versões sintéticas de FPM/FUNDEB/TRANSFERENCIA, já que a vigência dessas fontes é nacional, não por ente). |
+| 2026-08-04 | **Segunda rodada de auditoria (§12).** 8 frentes paralelas de leitura de código cobriram as 23 páginas de novo, com foco em profundidade, `as_of`/rastreabilidade e legendas — sem consulta ao banco (ver ressalva de método no início do §12). Achou 6 achados críticos novos: **A16** (regressão sobre a U1 — o medidor de piso do cockpit passou a exigir 110% do mínimo, não 100%), **A17** (indicador gerencial em Limites exibido com valor 1.000.000× menor), **A18** (explicador de pessoal do cockpit ignora o período RREO selecionado), **A19** (capacidade RBAC "editar" não existe — renomear/arquivar cenário morto desde a C2), **A20** (`crescimento_rcl_pct` é no-op nas simulações de Pessoal/Dívida) e **A21** (alerta não fecha quando a retificação resolve — mesma família de A14/A15). Mais 16 achados de clareza (**U19-U34**), incluindo os dois resíduos que o dono do produto apontou nesta rodada: RPPS ainda só na nota recolhida do Resultado (U27) e "Metodologia" da CAPAG ainda mistura três grandezas (U26). Produziu as 8 fichas de sprint que o plano (§9) previa e não detalhava: **A5** (estendida com A15+A21), **A6**, **F1**, **F2**, **G1**, **D1**, **H1**, **B3** — cada uma com objetivo, problema, justificativa, tarefas, riscos, critérios de aceite, testes, evidências e um prompt Claude Code dedicado. Nenhuma foi executada; A5 e A6 são as próximas por gravidade. |
 | 2026-08-04 | **Sprint C2 concluída.** Cenário salvo deixou de ser sobrescrito: cada salvamento cria versão, e cada versão grava **sobre qual entrega** foi calculada. Reabrir passa a mostrar o guardado e o recalculado lado a lado, com três estados distintos — continua valendo, mudou, ou não deu para comparar. Comparação de até 6 cenários pela interseção dos horizontes, exportação em CSV/JSON com as premissas junto, e arquivar no lugar de apagar. Migration 0039, reversível. |
 | 2026-08-04 | **Deploy do frontend estava quebrado em dois pontos, ambos meus.** O nginx serve de `/var/www/plataforma` e eu buildava em `/opt/plataforma/frontend/dist` sem copiar — B1, B2 e C1 nunca chegaram ao navegador. E o rebuild saiu sem `VITE_API_BASE_URL`, fazendo o bundle chamar `http://localhost:8000` (o "Failed to fetch" do login). Corrigidos, com a seção 3.1 do runbook documentando o `rsync`, a variável e a verificação certa: conferir o que o **servidor entrega**, não o que está em disco. O `index.html` passou a mandar `Cache-Control: no-cache`. |
 | 2026-08-04 | **Sprint C1 concluída.** A premissa de cenário deixou de ser número de fábrica: a Selic que a tela sugeria (10,5%) estava 3,8 pontos percentuais abaixo da observada (14,28%). A conversão anual→mensal passou a ser composta — dividir por 12 inflava a premissa em até 5,4% e o erro compunha no horizonte. E a série passa por saneamento antes do treino: o ente com 324,49% da RCL em pessoal projetava 2,29%, agora projeta 50,24%. Novo: **espaço fiscal** — Fortaleza tem R$ 826 milhões de margem até o teto de pessoal — e o cronograma de recondução do art. 23. |
