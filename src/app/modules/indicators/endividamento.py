@@ -39,6 +39,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.modules.ingestion import repository as ingestion_repo
 from app.modules.ingestion.models import SilverRgf
 
 #: Conta do total de garantias concedidas (RGF Anexo 03).
@@ -96,6 +97,68 @@ def _valor(
     return Decimal(bruto) if bruto is not None else None
 
 
+def _valor_vigente(
+    session: Session,
+    *,
+    cod_ibge: str,
+    periodo: str,
+    versao: str,
+    conta: str,
+    marca_anexo: str,
+    coluna: str | None,
+    republicavel: bool,
+    as_of: datetime | None = None,
+) -> Decimal | None:
+    """Valor de ``conta``, olhando as entregas subsequentes do exercício que o republicam.
+
+    O RGF republica os quadrimestres já decorridos a cada entrega nova — é assim que a
+    retificação chega, sem versão nova do mesmo período (§2 CLAUDE.md, regra 3 —
+    bitemporalidade: "retificação supera a versão anterior, não apaga"). Os Anexos 02/03
+    publicam esse comparativo por quadrimestre ("Até o Nº Quadrimestre"); a entrega do 2º
+    quadrimestre republica a coluna do 1º com o valor corrigido, e a do 3º repete a do 2º.
+    Ler só a entrega do próprio período trava no primeiro valor publicado (A15) — em
+    Fortaleza/vizinhos, isso produziu RCL subestimada e limites de endividamento errados.
+
+    ``republicavel=False`` (Anexo 01 — pessoal — e Anexo 04 — operações de crédito) pula
+    a busca: essas contas **não têm** coluna por quadrimestre — cada entrega publica só o
+    quadrimestre corrente, sem restatement —, e "olhar para frente" acharia o total de
+    OUTRO quadrimestre, não uma correção do mesmo. Verificado no acervo: 4.168 linhas de
+    ``ReceitaCorrenteLiquidaAjustada`` (Anexo 01) usam sempre a coluna "Valor", nunca
+    "Até o Nº Quadrimestre" — não há retificação recuperável ali.
+    """
+    if not republicavel or coluna is None or "-Q" not in periodo:
+        return _valor(
+            session, cod_ibge=cod_ibge, periodo=periodo, versao=versao,
+            conta=conta, marca_anexo=marca_anexo, coluna=coluna,
+        )
+    ano_str, _, quad_str = periodo.rpartition("-Q")
+    try:
+        ano, indice = int(ano_str), int(quad_str)
+    except ValueError:
+        return _valor(
+            session, cod_ibge=cod_ibge, periodo=periodo, versao=versao,
+            conta=conta, marca_anexo=marca_anexo, coluna=coluna,
+        )
+    encontrado: Decimal | None = None
+    for candidato_idx in range(indice, 4):
+        periodo_cand = f"{ano}-Q{candidato_idx}"
+        versao_cand = (
+            versao if periodo_cand == periodo
+            else ingestion_repo.resolve_versao(
+                session, cod_ibge=cod_ibge, relatorio="RGF", periodo=periodo_cand, as_of=as_of,
+            )
+        )
+        if versao_cand is None:
+            continue
+        valor = _valor(
+            session, cod_ibge=cod_ibge, periodo=periodo_cand, versao=versao_cand,
+            conta=conta, marca_anexo=marca_anexo, coluna=coluna,
+        )
+        if valor is not None:
+            encontrado = valor  # a entrega mais recente que publicar vence (retificação supera)
+    return encontrado
+
+
 def _anexo_entregue(
     session: Session, *, cod_ibge: str, periodo: str, versao: str, marca: str
 ) -> bool:
@@ -116,19 +179,21 @@ def _anexo_entregue(
 
 
 def rcl_ajustada(
-    session: Session, *, cod_ibge: str, periodo: str, versao: str
+    session: Session, *, cod_ibge: str, periodo: str, versao: str, as_of: datetime | None = None
 ) -> Decimal | None:
     """RCL Ajustada publicada pelo ente — o denominador legal destes limites.
 
     Procura no Anexo 02 e, na falta, no 03: os dois a publicam, e um ente pode entregar um
     sem o outro. Recalculá-la a partir da RCL exigiria reproduzir a dedução das emendas
-    individuais, quando o próprio ente já publicou o resultado.
+    individuais, quando o próprio ente já publicou o resultado. Republicação entre
+    entregas do mesmo exercício é considerada (A15) — ver :func:`_valor_vigente`.
     """
     coluna = coluna_acumulada(periodo)
     for marca in ("02", "03"):
-        valor = _valor(
+        valor = _valor_vigente(
             session, cod_ibge=cod_ibge, periodo=periodo, versao=versao,
             conta=CONTA_RCL_AJUSTADA, marca_anexo=marca, coluna=coluna,
+            republicavel=True, as_of=as_of,
         )
         if valor is not None and valor > 0:
             return valor
@@ -136,13 +201,17 @@ def rcl_ajustada(
 
 
 def _total_garantias(
-    session: Session, *, cod_ibge: str, periodo: str, versao: str
+    session: Session, *, cod_ibge: str, periodo: str, versao: str, as_of: datetime | None = None
 ) -> Decimal | None:
-    """Total de garantias concedidas. ``None`` = anexo não entregue; ``0`` = nenhuma."""
+    """Total de garantias concedidas. ``None`` = anexo não entregue; ``0`` = nenhuma.
+
+    Republicação entre entregas do mesmo exercício é considerada (A15).
+    """
     coluna = coluna_acumulada(periodo)
-    valor = _valor(
+    valor = _valor_vigente(
         session, cod_ibge=cod_ibge, periodo=periodo, versao=versao,
         conta=CONTA_GARANTIAS, marca_anexo="03", coluna=coluna,
+        republicavel=True, as_of=as_of,
     )
     if valor is not None:
         return valor
@@ -156,7 +225,12 @@ def _total_garantias(
 def total_operacoes_credito(
     session: Session, *, cod_ibge: str, periodo: str, versao: str
 ) -> Decimal | None:
-    """Operações de crédito contratadas no exercício, acumuladas até o quadrimestre."""
+    """Operações de crédito contratadas no exercício, acumuladas até o quadrimestre.
+
+    **Sem republicação (A15):** o Anexo 04 nomeia a coluna "de Referência" — publica só o
+    quadrimestre corrente, sem comparativo dos anteriores (ver docstring de
+    :func:`_valor_vigente`). Não há valor "mais recente" a recuperar aqui.
+    """
     coluna = coluna_acumulada(periodo, anexo="04")
     valor = _valor(
         session, cod_ibge=cod_ibge, periodo=periodo, versao=versao,
@@ -170,14 +244,16 @@ def total_operacoes_credito(
 
 
 def total_garantias(
-    session: Session, *, cod_ibge: str, periodo: str, versao: str
+    session: Session, *, cod_ibge: str, periodo: str, versao: str, as_of: datetime | None = None
 ) -> Decimal | None:
     """Fachada pública de :func:`_total_garantias`."""
-    return _total_garantias(session, cod_ibge=cod_ibge, periodo=periodo, versao=versao)
+    return _total_garantias(
+        session, cod_ibge=cod_ibge, periodo=periodo, versao=versao, as_of=as_of
+    )
 
 
 def percentual_publicado_garantias(
-    session: Session, *, cod_ibge: str, periodo: str, versao: str
+    session: Session, *, cod_ibge: str, periodo: str, versao: str, as_of: datetime | None = None
 ) -> Decimal | None:
     """O percentual que o ente publicou — contraprova do nosso cálculo, quando existe.
 
@@ -185,11 +261,13 @@ def percentual_publicado_garantias(
     EXERCÍCIO ANTERIOR" (0,43% no Ceará) e a comparação acusava divergência contra o nosso
     0,28% — que é exatamente o que o ente publica para o mesmo quadrimestre. Uma
     reconciliação que compara períodos diferentes produz alarme falso, e alarme falso gasta
-    a confiança que a verdadeira vai precisar.
+    a confiança que a verdadeira vai precisar. Republicação considerada (A15), para
+    continuar comparando a mesma coisa que :func:`_total_garantias`/:func:`rcl_ajustada`.
     """
-    return _valor(
+    return _valor_vigente(
         session, cod_ibge=cod_ibge, periodo=periodo, versao=versao,
         conta=CONTA_GARANTIAS_PCT, marca_anexo="03", coluna=coluna_acumulada(periodo),
+        republicavel=True, as_of=as_of,
     )
 
 
@@ -211,7 +289,9 @@ def materializar_limites_endividamento(
     from app.shared import periodo as periodo_util
     from app.shared.source_ref import SourceRef
 
-    base = rcl_ajustada(session, cod_ibge=cod_ibge, periodo=periodo_rgf, versao=versao)
+    base = rcl_ajustada(
+        session, cod_ibge=cod_ibge, periodo=periodo_rgf, versao=versao, as_of=as_of
+    )
     if base is None or base <= 0:
         return []
 
@@ -225,7 +305,9 @@ def materializar_limites_endividamento(
     for indicador, total, anexo in (
         (
             "garantias",
-            total_garantias(session, cod_ibge=cod_ibge, periodo=periodo_rgf, versao=versao),
+            total_garantias(
+                session, cod_ibge=cod_ibge, periodo=periodo_rgf, versao=versao, as_of=as_of
+            ),
             "Anexo 03",
         ),
         (

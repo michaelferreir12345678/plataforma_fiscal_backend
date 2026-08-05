@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.modules.debt.models import FatoDivida
@@ -28,6 +28,9 @@ from app.modules.ingestion.models import BcbIndice, TesouroFpm
 # Códigos SGS/BCB usados como exógenas.
 SERIE_IPCA = 433
 SERIE_SELIC = 4390
+
+#: Relatório do FPM em gold.dim_entrega — ingestão nacional batch (§6.7), não por ente.
+_RELATORIO_FPM = "FPM"
 
 UNIDADE_BRL = "BRL"
 UNIDADE_PCT_RCL = "PCT_RCL"
@@ -218,11 +221,26 @@ def _dedup_por_periodo(stmt: Select[Any], periodo_col: Any) -> Select[Any]:
 # Exógenas (silver) alinhadas aos períodos fiscais
 # --------------------------------------------------------------------------- #
 def _fpm_periodo(session: Session, cod_ibge: str, p: Periodo) -> float | None:
+    """Soma do FPM líquido nos meses do período — só a versão **vigente** por mês (A14).
+
+    ``silver.tesouro_fpm`` guarda ``versao_entrega`` sem coluna de vigência; somar tudo
+    dobra o valor sempre que a fonte foi reingerida (185/185 entes com versão duplicada em
+    2025). A vigência vem de ``gold.dim_entrega`` (ingestão nacional, ``cod_ibge='BR'``).
+    """
+    vigentes = ingestion_repo.resolve_versoes_por_mes(
+        session, relatorio=_RELATORIO_FPM, ano=p.ano, meses=p.meses()
+    )
+    if not vigentes:
+        return None
+    condicoes = [
+        and_(TesouroFpm.mes == mes, TesouroFpm.versao_entrega == versao)
+        for mes, versao in vigentes.items()
+    ]
     total = session.scalar(
         select(func.sum(TesouroFpm.valor_liquido)).where(
             TesouroFpm.cod_ibge == cod_ibge,
             TesouroFpm.ano == p.ano,
-            TesouroFpm.mes.in_(p.meses()),
+            or_(*condicoes),
         )
     )
     return float(total) if total is not None else None

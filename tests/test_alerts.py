@@ -9,6 +9,7 @@ motor: publicação, calendário por porte, limite, defasagem e agregação de c
 from __future__ import annotations
 
 import random
+import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -18,6 +19,7 @@ import pytest
 from sqlalchemy import delete
 
 from app.core.db import SessionLocal, admin_session
+from app.modules.alerts import service as alerts_service
 from app.modules.alerts.models import Alerta, CalendarioObrigacao
 from app.modules.catalog.models import DimEnte
 from app.modules.indicators.models import FatoRcl, MartIndicador
@@ -227,6 +229,97 @@ def test_patch_status_preservado_na_reavaliacao(client, make_org, alert_case: Al
     assert reencontrado["status"] == "reconhecida"
     ids = [a["id"] for a in fila2["alertas"]]
     assert len(ids) == len(set(ids))  # sem duplicatas
+
+
+def test_retificacao_que_resolve_fecha_o_alerta_orfao(
+    client, make_org, alert_case: AlertCase
+) -> None:
+    """A21 (Sprint A5): retificação que corrige o indicador para dentro do limite fecha
+    o alerta antigo — antes, ``_alertas_limite`` só gravava quando a faixa continuava
+    não-nula e nunca "revisitava" o que ficou órfão. Mesma família de A14/A15: versão
+    nova chega, vigência não se propaga.
+    """
+    cod = alert_case.cod_ibge
+    token = _token(client, make_org, cod)
+    fila = _fila_ente(client, cod, token).json()
+    alerta_limite = next(a for a in fila["alertas"] if a["categoria"] == "limite")
+    assert alerta_limite["status"] == "nova"
+    assert alerta_limite["indicador"] == "pessoal_executivo"
+
+    # Retificação: nova entrega RREO (versão v2), vigente, com pessoal dentro do limite
+    # (o seed original tinha 56% > teto de 54%; a retificação traz 40%).
+    with SessionLocal() as s:
+        s.execute(
+            DimEntrega.__table__.update()
+            .where(
+                DimEntrega.cod_ibge == cod,
+                DimEntrega.relatorio == "RREO",
+                DimEntrega.periodo == ANCORA_RREO,
+            )
+            .values(vigente=False)
+        )
+        s.add(
+            DimEntrega(
+                cod_ibge=cod, relatorio="RREO", periodo=ANCORA_RREO, versao_entrega="v2",
+                homologada_em=datetime(ANO + 1, 3, 15, tzinfo=UTC), vigente=True,
+            )
+        )
+        s.add(
+            MartIndicador(
+                cod_ibge=cod, periodo=ANCORA_RREO, indicador="pessoal_executivo",
+                valor_rs=Decimal("400000"), valor_pct_rcl=Decimal("40.0"),
+                faixa="normal", teto_pct=Decimal("54"), versao_entrega="v2",
+                source_ref={"relatorio": "RREO"},
+            )
+        )
+        s.commit()
+
+    # A avaliação on-read tem um TTL (30s) — sem esquecer, a reavaliação nem rodaria.
+    alerts_service.esquecer_avaliacoes()
+    fila2 = _fila_ente(client, cod, token).json()
+    assert not any(a["id"] == alerta_limite["id"] for a in fila2["alertas"]), (
+        "o alerta órfão continua na fila ativa depois da retificação resolver"
+    )
+
+    with admin_session() as s:
+        atualizado = s.get(Alerta, uuid.UUID(alerta_limite["id"]))
+        assert atualizado is not None
+        assert atualizado.status == "resolvida"
+        assert atualizado.resolvido_por is None, (
+            "ninguém decidiu — foi o dado que mudou (mesma regra de set_status)"
+        )
+        assert atualizado.resolvido_em is not None
+
+
+def test_alerta_ja_tratado_pelo_gestor_nao_e_reaberto_nem_retocado(
+    client, make_org, alert_case: AlertCase
+) -> None:
+    """Um alerta que o gestor já descartou continua descartado mesmo que a faixa
+    volte a ficar ruim de novo depois — fechar órfão não pode reabrir histórico tratado."""
+    cod = alert_case.cod_ibge
+    token = _token(client, make_org, cod)
+    fila = _fila_ente(client, cod, token).json()
+    alerta_limite = next(a for a in fila["alertas"] if a["categoria"] == "limite")
+    client.patch(
+        f"/alertas/{alerta_limite['id']}",
+        json={"status": "descartada"},
+        headers=auth_header(token),
+    )
+
+    chave = f"limite:{alerta_limite['indicador']}:{alerta_limite['periodo']}"
+    with admin_session() as s:
+        from app.modules.alerts import repository as alerts_repo
+
+        org_id = s.get(Alerta, uuid.UUID(alerta_limite["id"])).org_id
+        fechou = alerts_repo.fechar_alerta_orfao(
+            s, org_id=org_id, chave=chave, agora=datetime.now(UTC),
+        )
+        s.commit()
+    assert fechou is False, "alerta descartado não é tocado por fechar_alerta_orfao"
+
+    with admin_session() as s:
+        atual = s.get(Alerta, uuid.UUID(alerta_limite["id"]))
+        assert atual.status == "descartada"
 
 
 def test_alertas_403_fora_da_carteira(client, make_org) -> None:

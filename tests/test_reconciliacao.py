@@ -110,3 +110,32 @@ def test_a_metodologia_e_declarada_junto_do_resultado() -> None:
 def test_toda_comparacao_declara_fonte_e_metodologia(codigo: str) -> None:
     comp = service.COMPARACOES[codigo]
     assert comp.fonte_oficial and comp.metodologia and comp.titulo
+
+
+def test_a15_republicacao_deixa_de_divergir_por_falso_positivo() -> None:
+    """A15 (Sprint A5): a RCL "oficial" (Anexo 02) usava só a entrega do próprio
+    período. 2307650/2023-Q1 publicou R$ 152,1 mi na 1ª entrega e republicou R$ 1.031,3
+    mi (a mesma coluna "Até o 1º Quadrimestre") na entrega seguinte — a correção chegou
+    assim, sem versão nova do mesmo período. Usar só a 1ª entrega produzia uma
+    divergência de +578% contra o cálculo independente (RREO) que nunca existiu de
+    verdade: os dois lados sempre concordaram, só a leitura estava presa no número
+    velho.
+    """
+    with admin_session() as s:
+        r = service.build_reconciliacao(s, codigo="rcl_rgf", entes={"2307650"})
+    assert r.resumo.pares >= 12
+    assert r.resumo.divergem == 0, (
+        "2307650 tem 12 pares (2022–2025); depois da A15 todos batem à centavo "
+        f"— divergências restantes: {[(d.periodo, d.diferenca_pct) for d in r.divergencias]}"
+    )
+
+
+def test_a15_taxa_de_conferencia_do_ceara_continua_acima_do_sentinela() -> None:
+    """A republicação corta em dois sentidos: fecha divergências que eram só leitura
+    presa no primeiro valor (o caso comum), mas também troca, nalguns entes, um "confere
+    por coincidência com o primeiro número" por um "diverge contra o número mais recente
+    que o próprio ente publicou" — a reconciliação existe para mostrar isso, não para
+    escondê-lo. O sentinela dos 90% (não é meta de qualidade) continua de pé."""
+    with admin_session() as s:
+        r = service.build_reconciliacao(s, codigo="rcl_rgf", entes=_escopo_ce())
+    assert r.resumo.taxa_conferencia > 0.90

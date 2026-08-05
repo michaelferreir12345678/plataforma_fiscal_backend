@@ -181,6 +181,45 @@ def resolve_versoes(
     return resolved
 
 
+#: Fonte nacional (não por ente) das transferências batch — FPM, FUNDEB, "demais
+#: transferências" ingerem o Brasil inteiro numa corrida só (§6.7); a vigência vive em
+#: ``gold.dim_entrega`` sob este código, não sob o ente consultado (A14).
+COD_NACIONAL = "BR"
+
+
+def resolve_versoes_por_mes(
+    session: Session,
+    *,
+    relatorio: str,
+    ano: int,
+    meses: Iterable[int],
+    cod_ibge: str = COD_NACIONAL,
+    as_of: datetime | None = None,
+) -> dict[int, str]:
+    """Versão vigente por mês para fontes nacionais batch (A14).
+
+    ``silver.tesouro_fpm``, ``silver.fnde_fundeb_repasse`` e
+    ``silver.transferencia_generica`` guardam ``versao_entrega`` sem coluna de vigência
+    própria — mas ``gold.dim_entrega`` já a controla, sob ``cod_ibge='BR'`` (a ingestão
+    roda o Brasil inteiro de uma vez; não é por ente). Somar todas as versões dobra o
+    valor sempre que há mais de uma entrega para o mesmo mês (ex.: Fortaleza, FPM 2024:
+    R$ 3.095,00 mi lendo as duas versões, R$ 1.547,50 mi filtrando a vigente). Devolve
+    ``{mes: versao_entrega}`` só para os meses com entrega vigente.
+    """
+    meses_ordenados = sorted(dict.fromkeys(meses))
+    if not meses_ordenados:
+        return {}
+    periodos = [f"{ano}-M{mes:02d}" for mes in meses_ordenados]
+    por_periodo = resolve_versoes(
+        session, cod_ibge=cod_ibge, relatorio=relatorio, periodos=periodos, as_of=as_of
+    )
+    return {
+        mes: por_periodo[periodo]
+        for mes, periodo in zip(meses_ordenados, periodos, strict=True)
+        if periodo in por_periodo
+    }
+
+
 def version_identity_for_year(
     session: Session,
     *,
@@ -234,6 +273,34 @@ def entrega_homologada_em(
             DimEntrega.periodo == periodo,
             DimEntrega.versao_entrega == versao_entrega,
         )
+    )
+
+
+def effective_as_of(
+    session: Session,
+    *,
+    cod_ibge: str,
+    relatorio: str,
+    periodo: str,
+    versao_entrega: str,
+    requested: datetime | None,
+) -> datetime | None:
+    """``as_of`` efetivo a ecoar na resposta (§6.5) — mesmo padrão do módulo de Dívida.
+
+    Se a consulta já pediu um instante (``requested``), é ele mesmo. Sem pedido
+    explícito, resolve o ``homologada_em`` da entrega vigente escolhida — para que o
+    cabeçalho da página sempre devolva um ``as_of`` concreto, e os sub-cards possam
+    "pinar" nele (em vez de cada um resolver a vigência de novo e divergir se uma
+    retificação chegar no meio do carregamento).
+    """
+    if requested is not None:
+        return requested
+    return entrega_homologada_em(
+        session,
+        cod_ibge=cod_ibge,
+        relatorio=relatorio,
+        periodo=periodo,
+        versao_entrega=versao_entrega,
     )
 
 

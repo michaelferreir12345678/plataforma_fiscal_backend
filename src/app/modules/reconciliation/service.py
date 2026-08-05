@@ -72,32 +72,51 @@ _RCL = Comparacao(
     metodologia=(
         "A plataforma soma as receitas correntes dos 12 meses móveis do RREO Anexo 03 e "
         "subtrai as deduções. O ente publica, no RGF Anexo 02, a RCL que ele próprio "
-        "apurou para o mesmo fecho. São dois caminhos independentes para o mesmo fato: a "
-        "coincidência é evidência, a divergência é pergunta."
+        "apurou para o mesmo fecho — no formato comparativo do Anexo 02, cada entrega "
+        "republica os quadrimestres já decorridos (a correção chega assim, sem versão "
+        "nova do mesmo período — A15/Sprint A5); o valor oficial usado aqui é o mais "
+        "recentemente publicado para cada quadrimestre, não o da primeira entrega. São "
+        "dois caminhos independentes para o mesmo fato: a coincidência é evidência, a "
+        "divergência é pergunta."
     ),
     sql="""
-        with oficial as (
-          select r.cod_ibge, r.periodo,
-                 max(case when r.coluna like 'Até o 1%' then r.valor end) q1,
-                 max(case when r.coluna like 'Até o 2%' then r.valor end) q2,
-                 max(case when r.coluna like 'Até o 3%' then r.valor end) q3
+        with candidatos as (
+          select r.cod_ibge,
+                 left(r.periodo, 4) as ano,
+                 case
+                   when r.coluna like 'Até o 1%%' then '1'
+                   when r.coluna like 'Até o 2%%' then '2'
+                   when r.coluna like 'Até o 3%%' then '3'
+                 end as quad_alvo,
+                 r.periodo as periodo_publicador,
+                 r.valor
           from silver.siconfi_rgf r
+          join gold.dim_entrega e
+            on e.cod_ibge = r.cod_ibge and e.relatorio = 'RGF'
+           and e.periodo = r.periodo and e.versao_entrega = r.versao_entrega
+           and e.vigente = true
           where r.anexo like '%%02%%' and r.cod_conta = 'RGF2ReceitaCorrenteLiquida'
-          group by 1, 2
+        ),
+        -- A republicação supera: entre as entregas que publicam a coluna de um
+        -- quadrimestre, fica a mais recente (maior período de origem) — a mesma regra
+        -- de "retificação supera a versão anterior" aplicada entre períodos, não só
+        -- entre versões do mesmo período.
+        oficial as (
+          select distinct on (cod_ibge, ano, quad_alvo)
+                 cod_ibge, ano, quad_alvo, valor
+          from candidatos
+          where quad_alvo is not null
+          order by cod_ibge, ano, quad_alvo, periodo_publicador desc
         )
         select o.cod_ibge,
-               o.periodo,
-               case right(o.periodo, 1)
-                 when '1' then o.q1 when '2' then o.q2 else o.q3
-               end as valor_oficial,
+               (o.ano || '-Q' || o.quad_alvo) as periodo,
+               o.valor as valor_oficial,
                f.rcl_12m as valor_plataforma
         from oficial o
         join gold.fato_rcl f
           on f.cod_ibge = o.cod_ibge
-         and f.periodo_ref = left(o.periodo, 5) || 'B'
-             || (2 * cast(right(o.periodo, 1) as int))::text
-        where o.periodo like '%%-Q%%'
-          and o.cod_ibge = any(:entes)
+         and f.periodo_ref = o.ano || '-B' || (2 * cast(o.quad_alvo as int))::text
+        where o.cod_ibge = any(:entes)
     """,
 )
 

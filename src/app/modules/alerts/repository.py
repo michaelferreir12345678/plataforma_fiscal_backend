@@ -107,6 +107,36 @@ def set_status(
     return result.rowcount
 
 
+def fechar_alerta_orfao(
+    session: Session, *, org_id: uuid.UUID, chave: str, agora: datetime
+) -> bool:
+    """Fecha um alerta ativo cuja causa deixou de existir (A21/Sprint A5).
+
+    Uma retificação que corrige o indicador para dentro do limite não gera uma nova
+    escrita em ``_alertas_limite`` — a faixa some do que é avaliado, e sem isto o alerta
+    antigo ficava órfão, ativo para sempre. Só mexe em alertas ainda não tratados pelo
+    gestor (``nova``/``reconhecida``): um alerta já ``resolvida``/``descartada`` não é
+    reaberto nem re-tocado. ``resolvido_por`` fica nulo — foi o dado que mudou, não uma
+    decisão de alguém (mesma regra de "reabrir apaga assinatura" de :func:`set_status`).
+    Devolve ``True`` se fechou algo.
+    """
+    result = session.execute(
+        update(Alerta)
+        .where(
+            Alerta.org_id == org_id,
+            Alerta.chave == chave,
+            Alerta.status.in_(("nova", "reconhecida")),
+        )
+        .values(
+            status="resolvida",
+            atualizado_em=agora,
+            resolvido_em=agora,
+            resolvido_por=None,
+        )
+    )
+    return result.rowcount > 0
+
+
 def contar_por_severidade(
     session: Session, *, org_id: uuid.UUID, cods_ibge: Iterable[str] | None = None
 ) -> dict[str, int]:

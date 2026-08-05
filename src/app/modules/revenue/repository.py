@@ -6,10 +6,11 @@ from collections.abc import Iterable
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from app.modules.ingestion import repository as ingestion_repo
 from app.modules.ingestion.models import (
     FndeFundebRepasse,
     SilverRreo,
@@ -17,6 +18,12 @@ from app.modules.ingestion.models import (
     TransferenciaGenerica,
 )
 from app.modules.revenue.models import DimOrigemReceita, FatoReceita
+
+# Relatórios das transferências nacionais batch em gold.dim_entrega (§6.7) — a vigência
+# é por (cod_ibge='BR', relatorio, periodo), não por ente (A14).
+_REL_FPM = "FPM"
+_REL_FUNDEB = "FUNDEB"
+_REL_TRANSFERENCIA = "TRANSFERENCIA"
 
 
 # --- dim_origem_receita ---
@@ -116,7 +123,23 @@ def read_anexo01(
 def soma_fpm(
     session: Session, *, cod_ibge: str, ano: int, meses: list[int]
 ) -> Decimal | None:
-    """Soma do FPM líquido (fallback: bruto) nos meses; ``None`` se não há dado."""
+    """Soma do FPM líquido (fallback: bruto) nos meses vigentes; ``None`` se não há dado.
+
+    ``silver.tesouro_fpm`` não guarda vigência própria (A14): filtra por
+    ``versao_entrega`` vigente de cada mês em ``gold.dim_entrega`` (ingestão nacional
+    batch, ``cod_ibge='BR'``) para não somar entregas superadas — o que dobrava o FPM de
+    todo ente reingerido (ex.: Fortaleza 2024, R$ 3.095,00 mi lendo as duas versões contra
+    R$ 1.547,50 mi vigente).
+    """
+    vigentes = ingestion_repo.resolve_versoes_por_mes(
+        session, relatorio=_REL_FPM, ano=ano, meses=meses
+    )
+    if not vigentes:
+        return None
+    condicoes = [
+        and_(TesouroFpm.mes == mes, TesouroFpm.versao_entrega == versao)
+        for mes, versao in vigentes.items()
+    ]
     row = session.execute(
         select(
             func.count(TesouroFpm.id),
@@ -124,7 +147,7 @@ def soma_fpm(
         ).where(
             TesouroFpm.cod_ibge == cod_ibge,
             TesouroFpm.ano == ano,
-            TesouroFpm.mes.in_(meses),
+            or_(*condicoes),
         )
     ).one()
     if int(row[0] or 0) == 0:
@@ -135,6 +158,16 @@ def soma_fpm(
 def soma_fundeb(
     session: Session, *, cod_ibge: str, ano: int, meses: list[int]
 ) -> Decimal | None:
+    """Soma do FUNDEB repassado nos meses vigentes; ``None`` se não há dado (A14)."""
+    vigentes = ingestion_repo.resolve_versoes_por_mes(
+        session, relatorio=_REL_FUNDEB, ano=ano, meses=meses
+    )
+    if not vigentes:
+        return None
+    condicoes = [
+        and_(FndeFundebRepasse.mes == mes, FndeFundebRepasse.versao_entrega == versao)
+        for mes, versao in vigentes.items()
+    ]
     row = session.execute(
         select(
             func.count(FndeFundebRepasse.id),
@@ -142,7 +175,7 @@ def soma_fundeb(
         ).where(
             FndeFundebRepasse.cod_ibge == cod_ibge,
             FndeFundebRepasse.ano == ano,
-            FndeFundebRepasse.mes.in_(meses),
+            or_(*condicoes),
         )
     ).one()
     if int(row[0] or 0) == 0:
@@ -153,11 +186,20 @@ def soma_fundeb(
 def somas_transferencia_generica(
     session: Session, *, cod_ibge: str, ano: int, meses: list[int]
 ) -> list[tuple[str, Decimal, str | None]]:
-    """Somas por ``tipo`` de ``silver.transferencia_generica`` nos meses do período.
+    """Somas por ``tipo`` de ``silver.transferencia_generica`` nos meses vigentes (A14).
 
     Retorna também a ``fonte`` da linha: séries **derivadas do próprio RREO** (ICMS/IPVA
     cota-parte, Sprint 21) não são contraprova independente e a conciliação precisa dizê-lo.
     """
+    vigentes = ingestion_repo.resolve_versoes_por_mes(
+        session, relatorio=_REL_TRANSFERENCIA, ano=ano, meses=meses
+    )
+    if not vigentes:
+        return []
+    condicoes = [
+        and_(TransferenciaGenerica.mes == mes, TransferenciaGenerica.versao_entrega == versao)
+        for mes, versao in vigentes.items()
+    ]
     rows = session.execute(
         select(
             TransferenciaGenerica.tipo,
@@ -167,7 +209,7 @@ def somas_transferencia_generica(
         .where(
             TransferenciaGenerica.cod_ibge == cod_ibge,
             TransferenciaGenerica.ano == ano,
-            TransferenciaGenerica.mes.in_(meses),
+            or_(*condicoes),
         )
         .group_by(TransferenciaGenerica.tipo)
         .order_by(TransferenciaGenerica.tipo)

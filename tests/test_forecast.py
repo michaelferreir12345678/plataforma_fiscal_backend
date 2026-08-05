@@ -94,6 +94,19 @@ def _seed(case: ForecastCase) -> None:
                     versao_entrega=VERSAO,
                 )
             )
+            # A14 (Sprint A5): FPM não tem vigência própria — vem de gold.dim_entrega sob
+            # cod_ibge='BR' (ingestão nacional batch, §6.7). Sem isto, _fpm_periodo não
+            # encontra versão vigente para nenhum mês e a exógena é descartada por inteira.
+            s.add(
+                DimEntrega(
+                    cod_ibge="BR",
+                    relatorio="FPM",
+                    periodo=f"{ANO}-M{mes:02d}",
+                    versao_entrega=VERSAO,
+                    homologada_em=datetime(2092, 1, 1, tzinfo=UTC),
+                    vigente=True,
+                )
+            )
             s.add(
                 BcbIndice(
                     codigo_serie=433,  # IPCA
@@ -145,6 +158,15 @@ def forecast_case() -> Iterator[ForecastCase]:
         s.execute(delete(TesouroFpm).where(TesouroFpm.cod_ibge == cod))
         s.execute(delete(BcbIndice).where(BcbIndice.versao_entrega == VERSAO))
         s.execute(delete(DimEntrega).where(DimEntrega.cod_ibge == cod))
+        # Linha nacional (cod_ibge='BR') do FPM sintético — escopada por período (ANO=2091
+        # é fora de qualquer intervalo real) e versão, nunca toca a vigência real do FPM.
+        s.execute(
+            delete(DimEntrega).where(
+                DimEntrega.cod_ibge == "BR",
+                DimEntrega.relatorio == "FPM",
+                DimEntrega.versao_entrega == VERSAO,
+            )
+        )
         s.execute(delete(DimEnte).where(DimEnte.cod_ibge == cod))
         s.execute(delete(SilverEnte).where(SilverEnte.cod_ibge == cod))
         s.commit()

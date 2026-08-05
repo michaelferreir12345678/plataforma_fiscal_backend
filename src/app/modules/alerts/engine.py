@@ -325,6 +325,17 @@ def _alertas_limite(
     for item in limites.itens:
         severidade = rules.severidade_faixa(item.faixa)
         if severidade is None:
+            # A21 (Sprint A5): a faixa não pede alerta — "adequado"/"normal" (dado existe,
+            # ente em conformidade) **ou** ausência (item.faixa is None, indicador não
+            # apurado neste período). Só a primeira é retificação resolvendo: fechar por
+            # ausência de dado seria tratar "não sei" como "está bom", o inverso do que o
+            # produto promete. Sem isto, um indicador que voltava para dentro do limite
+            # numa retificação (ex.: RCL corrigida via A15) deixava o alerta antigo ativo
+            # para sempre — a materialização nunca "revisitava".
+            if item.faixa is not None and repository.fechar_alerta_orfao(
+                session, org_id=org_id, chave=f"limite:{item.indicador}:{anchor}", agora=agora
+            ):
+                n += 1
             continue
         provs = limits_repo.providencias(session, indicador=item.indicador, faixa=item.faixa or "")
         prov = provs[0] if provs else None
@@ -500,7 +511,10 @@ def _alertas_preditivos(
                     "de descumprimento (não é número fechado)."
                 ),
                 "prazo": None,
-                "link": "/previsoes",
+                # Sprint G1: antes sempre "/previsoes", sem indicador — quem abria o alerta
+                # caía numa tela de RCL genérica e tinha que reencontrar Pessoal/Dívida por
+                # conta própria. PrevisoesPage lê `?indicador=` via useSearchParams.
+                "link": f"/previsoes?indicador={indicador}",
                 "indicador": indicador,
                 "periodo": c.periodo_cruzamento,
                 "source_ref": proj.source_ref.model_dump(mode="json"),

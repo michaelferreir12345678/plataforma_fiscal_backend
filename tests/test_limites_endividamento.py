@@ -121,3 +121,77 @@ def test_sem_o_anexo_nao_se_inventa_zero() -> None:
 @pytest.mark.parametrize("periodo", ["2025", "2025-B6", "", "lixo"])
 def test_periodo_fora_do_padrao_rgf_nao_gera_coluna(periodo: str) -> None:
     assert e.coluna_acumulada(periodo) is None
+
+
+# --------------------------------------------------------------------------------- #
+# A15 (Sprint A5) — o RGF republica os quadrimestres já decorridos a cada entrega
+# nova, e a leitura travava no primeiro valor publicado.
+# --------------------------------------------------------------------------------- #
+
+#: 2307650 (Maracanaú/CE), RGF de 2023: a entrega do 1º quadrimestre publicou uma RCL
+#: Ajustada de R$ 152,1 mi; a entrega do 2º (repetida no 3º) republicou a MESMA coluna
+#: "Até o 1º Quadrimestre" corrigida para R$ 1.022,4 mi — mais de 6x. A materialização
+#: lia só a entrega do próprio período e travava no primeiro número.
+ENTE_REPUBLICACAO = "2307650"
+
+
+def _versao_rgf(cod_ibge: str, periodo: str) -> str | None:
+    with admin_session() as s:
+        return s.scalar(
+            text(
+                """select versao_entrega from gold.dim_entrega
+                   where cod_ibge = :e and relatorio = 'RGF' and periodo = :p
+                     and vigente is true limit 1"""
+            ),
+            {"e": cod_ibge, "p": periodo},
+        )
+
+
+def test_rcl_ajustada_usa_o_valor_mais_recentemente_republicado() -> None:
+    """A15: 1º quadrimestre de 2023 — R$ 152,1 mi (1ª entrega) vira R$ 1.022,4 mi.
+
+    A correção chegou como republicação na entrega do quadrimestre seguinte, não como
+    versão nova do mesmo período (CLAUDE.md §2, regra 3: bitemporalidade). Ler só a
+    entrega de 2023-Q1 nunca via essa correção.
+    """
+    versao = _versao_rgf(ENTE_REPUBLICACAO, "2023-Q1")
+    assert versao
+    with admin_session() as s:
+        ajustada = e.rcl_ajustada(
+            s, cod_ibge=ENTE_REPUBLICACAO, periodo="2023-Q1", versao=versao
+        )
+    assert ajustada == Decimal("1022418338.43")
+    assert ajustada != Decimal("152100786.24"), "não pode ter travado no primeiro valor"
+
+
+def test_valor_vigente_sem_republicacao_le_so_a_propria_entrega() -> None:
+    """Sem `republicavel`, o comportamento é idêntico ao de antes da Sprint A5 — usado
+    pelo Anexo 01 (pessoal) e pelo Anexo 04 (operações de crédito), que não têm coluna
+    comparativa por quadrimestre (ver docstring de `_valor_vigente`)."""
+    versao = _versao_rgf(ENTE_REPUBLICACAO, "2023-Q1")
+    assert versao
+    with admin_session() as s:
+        valor = e._valor_vigente(
+            s, cod_ibge=ENTE_REPUBLICACAO, periodo="2023-Q1", versao=versao,
+            conta=e.CONTA_RCL_AJUSTADA, marca_anexo="02",
+            coluna=e.coluna_acumulada("2023-Q1"), republicavel=False,
+        )
+    assert valor == Decimal("152100786.24"), "sem republicavel=True, lê só a própria entrega"
+
+
+def test_ultimo_quadrimestre_do_exercicio_nao_tem_para_onde_olhar() -> None:
+    """No 3º quadrimestre (terminal do exercício) não há entrega seguinte no mesmo ano —
+    a leitura republication-aware degenera para a leitura direta, sem efeito algum.
+    Prova que a Sprint A5 não alterou o resultado dos períodos já corretos (ver também
+    os testes pré-existentes deste arquivo, todos em PERIODO = "2025-Q3")."""
+    versao = _versao_rgf(ENTE_REPUBLICACAO, "2023-Q3")
+    assert versao
+    with admin_session() as s:
+        ajustada = e.rcl_ajustada(
+            s, cod_ibge=ENTE_REPUBLICACAO, periodo="2023-Q3", versao=versao
+        )
+        direta = e._valor(
+            s, cod_ibge=ENTE_REPUBLICACAO, periodo="2023-Q3", versao=versao,
+            conta=e.CONTA_RCL_AJUSTADA, marca_anexo="02", coluna="Até o 3º Quadrimestre",
+        )
+    assert ajustada == direta
