@@ -224,8 +224,14 @@ def assert_uf_in_scope(session: Session, principal: Principal, uf_prefixo: str) 
 
 
 # --- Períodos / limites ---
-def _rgf_periodo_de(periodo_rreo: str) -> str | None:
-    """Mapeia o período RREO (bimestral) ao RGF (quadrimestral): Q = teto(bimestre/2)."""
+def rgf_periodo_de(periodo_rreo: str) -> str | None:
+    """Mapeia o período RREO (bimestral) ao RGF (quadrimestral): Q = teto(bimestre/2).
+
+    Público (sem ``_``) porque a Sprint A6 (A18) passou a reusá-lo em
+    ``cockpit_service.py`` para ancorar o explicador de pessoal no RGF do **mesmo
+    ciclo** do período RREO selecionado — antes ele sempre usava o RGF mais recente do
+    ente, ignorando o período pedido.
+    """
     try:
         ano_s, bim_s = periodo_rreo.split("-B")
         return f"{ano_s}-Q{math.ceil(int(bim_s) / 2)}"
@@ -277,7 +283,7 @@ def _valores_por_ente(
         num = repo.rcl_uf(session, cods=cods, periodo=periodo)
         return num, {}
     if spec.codigo == "disponibilidade":
-        rgf = _rgf_periodo_de(periodo)
+        rgf = rgf_periodo_de(periodo)
         num = repo.disponibilidade_uf(session, cods=cods, periodo_rgf=rgf) if rgf else {}
         return num, {}
     # ratio (pessoal/dívida): numerador = valor_rs; denominador = RCL dos mesmos entes.
@@ -304,7 +310,7 @@ def _periodos_no_ano(
 def _fonte_periodo(spec: _IndicadorSpec, periodo: str) -> str:
     """O período da fonte de fato usado (RGF é quadrimestral)."""
     if spec.relatorio == "RGF":
-        return _rgf_periodo_de(periodo) or periodo
+        return rgf_periodo_de(periodo) or periodo
     return periodo
 
 
@@ -561,7 +567,7 @@ def build_ranking(
     if len(cods) >= _RANKING_CACHE_MIN_ENTES:
         identity_relatorio = "RGF" if spec.codigo == "disponibilidade" else "RREO"
         identity_periodo = (
-            _rgf_periodo_de(periodo) or periodo
+            rgf_periodo_de(periodo) or periodo
             if identity_relatorio == "RGF"
             else periodo
         )

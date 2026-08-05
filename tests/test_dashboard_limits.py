@@ -15,6 +15,7 @@ from app.modules.catalog.models import DimEnte
 from app.modules.indicators import service as indicators_service
 from app.modules.indicators.models import FatoRcl, MartIndicador
 from app.modules.ingestion.models import DimEntrega, SilverEnte, SilverRreo
+from app.shared.source_ref import SourceRef
 from tests.conftest import auth_header, login
 
 PERIODO = "2024-B6"
@@ -79,6 +80,41 @@ def test_limites_lista_faixa_e_distancia(client, make_org, limpar) -> None:
     assert float(item["valor_pct_rcl"]) == 50.0
     assert float(item["teto_pct"]) == 54.0
     assert float(item["distancia_teto"]) == 4.0  # 54 − 50
+
+
+def test_limites_exclui_indicador_gerencial_sem_dim_limite_legal(client, make_org, limpar) -> None:
+    """A17: build_limites listava todo mart_indicador do período, sem checar
+    dim_limite_legal. Indicadores gerenciais (rcl_per_capita, medido em R$/hab, sem
+    teto legal) herdavam a formatação de limite legal no front — "teto 0%" e o valor
+    dividido por 1e6 como se fosse moeda em milhões (Fortaleza: R$ 4.870,66/hab virava
+    "R$ 0,0 M"). O indicador gerencial não deve aparecer na lista; o de teto legal
+    continua aparecendo normalmente.
+    """
+    cod = _ente()
+    limpar.append(cod)
+    _setup_pessoal(cod, "M", 5_000_000)  # indicador com limite legal (pessoal_executivo)
+    with SessionLocal() as s:
+        indicators_service.registrar_indicador_gerencial(
+            s, cod, PERIODO, "rcl_per_capita",
+            valor_rs=Decimal("4870.66"),
+            valor_pct=None,
+            denominador="populacao",
+            base_valor=Decimal("300000"),
+            versao_entrega="1",
+            source_ref=SourceRef(
+                relatorio="RREO", anexo="Anexo 03 — RCL", periodo=PERIODO, versao_entrega="1"
+            ),
+        )
+        s.commit()
+    fx = make_org(capacidades=["ver"], entes=[cod])
+    token = login(client, fx.email, fx.senha)
+
+    body = client.get(
+        f"/entes/{cod}/limites", params={"periodo": PERIODO}, headers=auth_header(token)
+    ).json()
+    indicadores = {i["indicador"] for i in body["itens"]}
+    assert "pessoal_executivo" in indicadores
+    assert "rcl_per_capita" not in indicadores
 
 
 def test_limite_detail_providencias_da_faixa(client, make_org, limpar) -> None:

@@ -18,9 +18,11 @@ from sqlalchemy import delete
 from app.core.db import SessionLocal
 from app.modules.catalog.models import DimEnte
 from app.modules.dashboard import cockpit_service
+from app.modules.dashboard.estadual_service import rgf_periodo_de
 from app.modules.indicators import service as indicators_service
 from app.modules.indicators.models import FatoRcl, MartIndicador
-from app.modules.ingestion.models import DimEntrega, SilverEnte, SilverRreo
+from app.modules.ingestion.models import DimEntrega, SilverEnte, SilverRgf, SilverRreo
+from app.modules.personnel.models import FatoPessoal
 from app.shared import periodo as periodo_util
 from tests.conftest import auth_header, login
 
@@ -38,7 +40,10 @@ def limpar() -> Iterator[list[str]]:
     yield usados
     with SessionLocal() as s:
         for cod in usados:
-            for model in (MartIndicador, FatoRcl, SilverRreo, DimEntrega, DimEnte, SilverEnte):
+            for model in (
+                FatoPessoal, SilverRgf, MartIndicador, FatoRcl, SilverRreo,
+                DimEntrega, DimEnte, SilverEnte,
+            ):
                 s.execute(delete(model).where(model.cod_ibge == cod))
         s.commit()
 
@@ -218,3 +223,78 @@ def test_periodos_de_ente_fora_do_escopo_da_403(client, make_org, limpar) -> Non
     token = login(client, fx.email, fx.senha)
     resp = client.get(f"/entes/{cod}/periodos", headers=auth_header(token))
     assert resp.status_code == 403
+
+
+# ---------------- A18: explicador de pessoal ancorado no ciclo RGF certo -----------------
+def test_rgf_periodo_de_mapeia_bimestre_ao_quadrimestre() -> None:
+    """A mesma regra canônica (B→Q) que a Visão Estadual já usa (estadual_service.py),
+    reaproveitada pelo cockpit em vez de reimplementada."""
+    assert rgf_periodo_de("2024-B2") == "2024-Q1"
+    assert rgf_periodo_de("2024-B4") == "2024-Q2"
+    assert rgf_periodo_de("2024-B6") == "2024-Q3"
+    assert rgf_periodo_de("2024") is None
+
+
+def _seed_rgf(cod: str, periodo_rgf: str, despesa_executivo: str) -> None:
+    """RGF Anexo 1 (Executivo) de um quadrimestre, com entrega vigente."""
+    with SessionLocal() as s:
+        s.add(
+            DimEntrega(
+                cod_ibge=cod, relatorio="RGF", periodo=periodo_rgf, versao_entrega="1",
+                homologada_em=datetime(2025, 1, 10, tzinfo=UTC), vigente=True,
+            )
+        )
+        s.add(
+            SilverRgf(
+                cod_ibge=cod, periodo=periodo_rgf, anexo="RGF-Anexo 01", poder="E",
+                conta="DESPESA LÍQUIDA COM PESSOAL (III) = (I - II)",
+                coluna="DESPESAS LIQUIDADAS (a)", valor=Decimal(despesa_executivo),
+                versao_entrega="1",
+            )
+        )
+        s.commit()
+
+
+def test_explicador_pessoal_usa_rgf_do_ciclo_do_periodo_rreo_selecionado(
+    client, make_org, limpar
+) -> None:
+    """A18: cockpit_service usava sempre o RGF **mais recente que o ente já teve**, não o
+    correspondente ao período RREO selecionado — abrir um período antigo misturava dois
+    exercícios na mesma tela sem aviso. Um ente com RGF em Q1/Q2/Q3 de 2024, ao abrir o
+    cockpit em ``2024-B4`` (ciclo de Q2), deve ver o explicador de pessoal ancorado em
+    ``2024-Q2`` — nunca em ``2024-Q3``, mesmo sendo o RGF mais recente já publicado.
+    """
+    cod = _ente()
+    limpar.append(cod)
+    with SessionLocal() as s:
+        s.merge(SilverEnte(cod_ibge=cod, nome="Ente Pessoal Ciclo", uf="CE", esfera="M"))
+        s.commit()
+
+    # RREO dos três bimestres que fecham os quadrimestres (RCL, base do cálculo).
+    _seed_periodo(cod, "2024-B2", 10_000_000, 0)
+    _seed_periodo(cod, "2024-B4", 11_000_000, 0)
+    _seed_periodo(cod, "2024-B6", 12_000_000, 0)
+
+    # RGF em Q1, Q2 e Q3 — Q3 tem o maior valor de propósito, para provar que o
+    # explicador não pega "o mais recente que existe" e sim o do ciclo pedido.
+    _seed_rgf(cod, "2024-Q1", "3000")
+    _seed_rgf(cod, "2024-Q2", "3500")
+    _seed_rgf(cod, "2024-Q3", "9999999")
+
+    fx = make_org(entes=[cod])
+    token = login(client, fx.email, fx.senha)
+
+    # Materializa fato_pessoal nos três quadrimestres (efeito colateral do GET, como o
+    # resto da plataforma já depende).
+    for periodo_rgf in ("2024-Q1", "2024-Q2", "2024-Q3"):
+        r = client.get(
+            f"/entes/{cod}/pessoal", params={"periodo": periodo_rgf}, headers=auth_header(token)
+        )
+        assert r.status_code == 200, r.text
+
+    body = client.get(
+        f"/entes/{cod}/cockpit", params={"periodo": "2024-B4"}, headers=auth_header(token)
+    ).json()
+    explicador = next(e for e in body["explicadores"] if e["dimensao"] == "pessoal_poder")
+    assert explicador["periodo_atual"] == "2024-Q2"
+    assert explicador["periodo_anterior"] == "2024-Q1"
