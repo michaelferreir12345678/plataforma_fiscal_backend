@@ -4,11 +4,13 @@
 > **Vive em `backend_plataforma_fiscal/docs/`** e é versionado com o código. Ficou
 > fora do git de 2026-08-03 a 2026-08-04, na raiz do projeto, onde nenhum dos dois
 > repositórios o rastreava.
-> **Iniciado em:** 2026-08-03 · **Última atualização:** 2026-08-04
-> **Estado:** auditoria em andamento. Sprints concluídas: **B0, A1, A2, A3, A3a, A3b, B1,
-> B2, C1, C2**; **A4 parcial** (mínimos bloqueados na fonte). Aberto e crítico: **A14** e
-> **A15** — a mesma família, *versão que existe, vigência que não se declara*. Três frentes
-> de diagnóstico interrompidas por limite de sessão, a reexecutar (§20, P2–P4).
+> **Iniciado em:** 2026-08-03 · **Última atualização:** 2026-08-05
+> **Estado:** auditoria em andamento. Sprints concluídas: **B0, A1, A2, A3, A3a, A3b, A5,
+> A6, B1, B2, C1, C2, F1, F2, G1** e, agora, **A0R**; **A4 parcial** (mínimos bloqueados na
+> fonte). As três frentes de diagnóstico interrompidas (§20, P2–P4) foram **reexecutadas e
+> têm relatório em §5.1.2**, com seis achados novos (**A22–A27**) e a **P5/DTP
+> rediagnosticada** — todos por leitura de código, sem banco nesta rodada: leia a ressalva
+> de método no início da §5.1.2 antes de agir sobre qualquer um deles.
 > **Segunda rodada (2026-08-04, §12):** 8 frentes paralelas de leitura de código cobriram as
 > 23 páginas de novo, com foco em profundidade/drill-down, rastreabilidade (`as_of`) e
 > legendas — achou 6 achados críticos novos (**A16–A21**, um deles regressão sobre a U1) e
@@ -83,6 +85,11 @@ por um teste escrito para provar que a correção anterior tinha funcionado.
 | A4 | **SIOPS e SIOPE com 1 ente, só 2024** | `mart_cobertura_fonte` | Alta — a contraprova dos mínimos não existe na prática |
 | **A14** | **Versões de ingestão somando umas às outras** nas transferências | Fortaleza: FPM 2024 lido como R$ 3,095 bi contra R$ 1,547 bi reais. 185 de 185 entes com versão duplicada em 2025 | **Crítica** — números dobrados na previsão e na conciliação da Receita. **Aberto** |
 | A5 | **FPM e FUNDEB com 4 e 1 registros** | `mart_cobertura_fonte` | Alta — a conciliação de transferências é nominal |
+
+> Os achados **A22–A27**, da retomada das frentes interrompidas (A0R), estão em §5.1.2 e
+> **não** nesta tabela de propósito: aqui só entra o que foi confirmado **contra o dado**.
+> Aqueles foram confirmados **no código**, e a distinção é a única coisa que impede uma
+> hipótese bem escrita de virar fato por repetição.
 
 ---
 
@@ -239,19 +246,231 @@ dump do banco local, e eu não verifiquei o conteúdo operacional antes de trans
 dado fiscal (gold/silver) não é afetado — o resíduo está só em `op.organizacao` e
 `op.carteira_ente`.
 
-### 5.1.2 Frentes de auditoria interrompidas
+### 5.1.2 Frentes de auditoria interrompidas — reexecutadas (Sprint A0R, 2026-08-05)
 
 As frentes **fiscal/contábil**, **dados/rastreabilidade** e **arquitetura/segurança**
-foram interrompidas por limite de sessão antes de produzirem relatório. O que cada uma
-alcançou antes de parar está registrado como pendência em §20, com o ponto exato em que
-estavam:
+foram interrompidas por limite de sessão antes de produzirem relatório, e ficaram como
+P2, P3 e P4 no §20. Esta subseção é o relatório que faltava. Cada frente tem status
+próprio, e o que não coube nesta rodada está dito como pendência, não como conclusão.
 
-- fiscal: ia validar os achados invocando os serviços de ponta a ponta;
-- dados: ainda na leitura de contexto e docs;
-- arquitetura: ia testar empiricamente exposição de recurso entre organizações (404 × 403).
+> **Ressalva de método — leia antes de agir sobre qualquer achado abaixo.** A sessão que
+> produziu este relatório rodou num ambiente **sem shell e sem banco**: nenhuma consulta
+> SQL, nenhum `pytest` e nenhum comando foram executados aqui. Tudo abaixo é **leitura de
+> código com evidência `arquivo:linha`**, mais a consulta ou o comando exato para
+> confirmar contra o dado. "Confirmado" nesta seção significa **confirmado no código** —
+> a afirmação é sobre o que o programa faz, não sobre quantos entes ele afeta. Onde o
+> alcance depende do dado, o item está marcado **hipótese**, com a consulta que a decide.
+> É a mesma régua do §12, e ela existe porque a A14 nasceu de uma contagem que só o banco
+> sabia. **Nenhuma correção foi aplicada:** sprint de diagnóstico.
 
-**Nenhuma conclusão dessas três frentes foi incorporada** — relatório não produzido não é
-relatório parcial, é ausência. Serão reexecutadas.
+#### P2 — frente fiscal/contábil · **relatório concluído** (execução contra o dado pendente)
+
+Escopo pedido: RCL × RCL Ajustada, exclusões do art. 19 §1º, DTP como composição ×
+subtração, resultado acima × abaixo da linha.
+
+| Item | Achado | Evidência | Status |
+|---|---|---|---|
+| RCL × RCL Ajustada — pessoal | O denominador do art. 20 é a **RCL Ajustada publicada no próprio Anexo 01**, com queda para a RCL cheia só quando o ente não a publica — e a linha guarda `rcl_ajustada = NULL` para dizer qual base foi usada. O mart usa **a mesma** base do detalhe, de propósito | `personnel/service.py:134-170,231-248,395-403` | ✅ Correto — e a razão está escrita no código |
+| RCL × RCL Ajustada — endividamento | Garantias, operações de crédito e DCL sobre a **RCL Ajustada** (Res. 43/2001), com `denominador='rcl_ajustada'` viajando na linha | Sprint B2, §5.1.4 | ✅ Correto |
+| **Leitura da RCL Ajustada** | A consulta que lê o denominador **não filtra a coluna** e usa `limit(1)` **sem `order by`**: casa `conta ilike '%RECEITA CORRENTE L%' and conta ilike '%LIMITES DA DESPESA COM PESSOAL%'` e aceita qualquer linha que volte primeiro. O Anexo 01 publica, para a mesma conta, `Valor` **e** `% sobre a RCL Ajustada` — a contraprova da B2 já usa `coluna like 'Valor'` explicitamente, sinal de que a coluna importa | `personnel/service.py:157-169` × `scripts/validacao_fiscal.py:218-238` (que filtra) | ⚠️ **A24 — confirmado no código**; alcance a medir (consulta em *Como confirmar*) |
+| Exclusões do art. 19 §1º | As quatro parcelas estão mapeadas (indenização/incentivo à demissão, decisão judicial de período anterior, exercícios anteriores, inativos com recursos vinculados) e a de inativos é **condicional ao RPPS** | `personnel/pessoal.py:50-57,155-187` | ✅ Correto |
+| Exclusões × valor publicado | Havendo DTP (VI) ou Líquida (III) publicadas, elas mandam, e as exclusões viram `bruta − líquida`; a condicionalidade de RPPS **não se aplica** nesse ramo | `personnel/pessoal.py:164-178` | ✅ **Decisão de domínio, não defeito** — ver *falsos positivos* |
+| **DTP como composição × subtração** | O MDF define `DTP (VI) = (IIIa + IIIb)` — liquidadas + inscritas em RP não processados —, isto é, a DTP **é** a líquida repartida por estágio, não uma terceira grandeza. A plataforma trata a linha da DTP como o valor oficial da líquida, o que é consistente com o MDF. A P5 não é, portanto, "composição em vez de subtração" no código de hoje | `personnel/pessoal.py:47,127-128,168-173`; rótulo oficial em `scripts/validacao_fiscal.py:209` | 🔎 **P5 rediagnosticada** — ver §20 |
+| Resultado acima × abaixo da linha | As duas apurações convivem com identidade verificada (`primário = receitas − despesas primárias`; `nominal abaixo = −Δ DCL`), ajustes metodológicos declarados e tolerância explícita de R$ 100 | `result/service.py:53-60,183-198,319-360,370-412` | ✅ Correto |
+| Assimetria RPPS no resultado | O primário usa uma apuração e o nominal outra; a tela explica (U8/B1, U27/F2) | §5.1.5, §12.2 | ✅ Fechado |
+
+#### P3 — frente de dados/rastreabilidade · **relatório concluído** (nove checks **não executados**)
+
+Escopo pedido: `source_ref` endpoint a endpoint, varredura de valores fixos, execução dos
+nove checks de qualidade.
+
+**`source_ref`, endpoint a endpoint.** São **160 rotas** em 27 roteadores; **22 módulos de
+contrato** declaram `source_ref` (122 ocorrências). O inventário virou catraca executável
+em `tests/test_auditoria_a0r.py::test_nenhum_contrato_perde_o_source_ref_que_ja_tinha` —
+perder o que já se tem passa a quebrar a suíte. Duas lacunas reais e uma dispensa:
+
+| Contrato | Números que devolve | Traz `source_ref`? | Leitura |
+|---|---|---|---|
+| `reconciliation/schemas.py` (`GET /reconciliacao/rcl_rgf`) | `valor_plataforma`, `valor_oficial`, `diferenca` | ❌ — traz `fonte_oficial` e `metodologia`, **não** a `versao_entrega` de cada lado | **A26** — é a tela que existe para dizer "confere ou diverge"; sem a versão dos dois lados, a divergência não é reproduzível depois de uma retificação |
+| `quality/schemas.py::CheckOut` | `esquerda`, `direita`, `diferenca` | ❌ — e `gold.data_quality_check` **não guarda `versao_entrega`**: a chave única é `(check, fonte, cod_ibge, periodo)` | **A26** — o check roda sobre uma versão vigente (`quality/service.py:72-80`) e o resultado sobrevive à retificação sem dizer sobre qual versão foi apurado |
+| `coverage/schemas.py` | contagens de entes/períodos | ❌ | **Dispensado** — cobertura mede o *produto*, não é número lido de demonstrativo; exigir `source_ref` aqui seria ritual |
+
+**Varredura de valores fixos.** Nenhum teto da LRF aparece codificado no backend: a busca
+por `54|49|120|200|16|22|15|25|70` como literal de limite não retorna **nenhuma**
+ocorrência em `src/app` — os tetos vêm de `gold.dim_limite_legal`, como a §2 exige. As
+faixas 90%/95% são derivadas em um único lugar, com override do banco
+(`indicators/limites.py:36-48`). Duas ocorrências merecem registro, nenhuma delas defeito:
+
+- `ingestion/connectors/siconfi_rreo_minimos_pdf.py:486` divide por `0.70` para
+  reconstruir a base do FUNDEB a partir do mínimo publicado no PDF. É regra legal
+  embutida em conector — aceitável enquanto for a única forma de recuperar a base, mas
+  **é o único percentual legal fora de `dim_limite_legal`** e deve ser citado como tal.
+- IPCA 4,5% / Selic 10,5% de fábrica no frontend — o valor fixo mais caro já encontrado —
+  já foi corrigido na C1 (§5.1.6); a varredura confirma que não voltou.
+
+**Os nove checks de qualidade.** Inventariados e auditados por código; **não executados**
+(sem banco nesta sessão). São nove códigos por ente/período — `receita_soma_filhos`,
+`despesa_estagios_monotonicos`, `rcl_calculada_vs_publicada`, `minimo_saude_recalculado`,
+`minimo_educacao_recalculado`, `dcl_a6_vs_rgf`, `mart_vs_detalhe_pessoal`, `msc_vs_dca` e
+`freshness_*` (que se desdobra em 4 SLAs, totalizando 12 linhas por execução), mais
+`contrato_layout` e `execucao_agendada`, que são registrados por evento e não por varredura
+(`quality/service.py:100-136`, `checks.py`). A auditoria do código encontrou um defeito:
+
+> **A23 — o check de pessoal reconcilia contra um denominador que o produto não usa.**
+> `mart_vs_detalhe_pessoal` recalcula `despesa_liquida ÷ fato_rcl.rcl_12m × 100` e compara
+> com `mart_indicador.valor_pct_rcl`, que é apurado sobre a **RCL Ajustada** publicada
+> (`checks.py:486-510` × `personnel/service.py:395-402`). Onde o ente publica RCL Ajustada
+> diferente da RCL cheia — que é o caso normal, e é a razão de a B2 existir — os dois lados
+> **têm** de divergir. Com `TOL_PONTOS = 0,01` e falha acima de 0,1 p.p., isso vira `falha`,
+> e falha vira alerta na fila da organização (`quality/service.py:205-268`). É ruído
+> estrutural produzido pelo próprio verificador, exatamente sobre o indicador mais sensível
+> do produto. Confirmado no código; o número de entes afetados sai da consulta abaixo.
+
+#### P4 — frente de arquitetura/segurança · **relatório concluído** (execução empírica pendente)
+
+Escopo pedido: isolamento entre organizações (404 × 403), regras fiscais duplicadas,
+endpoints sem `assert_ente_in_scope`.
+
+**Isolamento entre organizações.** A convenção está certa e é coerente onde existe:
+recurso de outra organização **não vaza pelo código de status** porque o repositório já
+filtra por `org_id` e o serviço devolve **404** — o registro simplesmente não existe para
+quem pergunta (`forecast/service.py:951-958`, `forecast/cenarios.py:169-174,306-310`,
+`alerts/repository.py:52,63,97,126,145`). Ente fora da carteira dá **403** com causa
+distinta de "sem licença" (`shared/scope.py:150-174`), que é a distinção certa: uma se
+resolve no cadastro do cliente, a outra no comercial. **O que falta é a régua ser
+exigida:** `tests/test_sprint28_seguranca.py:248` aceita `403 ou 404` para identificador
+de outra organização. Com essa asserção, no dia em que uma rota passar a responder 403 —
+vazando a existência do recurso alheio — a suíte continua verde. É o primeiro critério
+objetivo da E1.
+
+**Endpoints sem gate de escopo.** Varredura dos 27 roteadores: 19 recebem ente na URL
+(`{cod_ibge}`) ou na query (`ente=`). Destes, **17 validam** escopo no roteador ou no
+serviço; **2 não**:
+
+| Rota | Situação | Leitura |
+|---|---|---|
+| `GET /ingestao/data?fonte=&ente=&periodo=` | Exige só a capacidade `administrar`; **nenhuma** chamada a `assert_ente_in_scope` no roteador (`ingestion/router.py:185-197`) nem no serviço (`ingestion/service.py:377-407`) | **A22 — confirmado no código.** O dado é público (SICONFI), então não é vazamento de dado de tenant; o que ele fura é o **gate de licença**, que vive dentro do `assert_ente_in_scope`. Uma organização licenciada para um município lê o silver de qualquer um dos 5.598 |
+| `modules/platform/*` | Control plane, sessão de superusuário, sem carteira a respeitar | ✅ Exceção legítima — registrada para que a catraca não a confunda com defeito |
+
+Verificados e **limpos** no mesmo varredor (eram os candidatos óbvios): `POST /relatorios`
+em lote valida cada ente contra o escopo antes de gerar (`reports/service.py:147-157`);
+`POST /estadual/{uf}/consolidado/refresh` chama `assert_uf_in_scope` antes de materializar
+(`estadual_router.py:116`); `/ingestao/run` e `/ingestao/replay` passam por
+`_validar_entes_no_escopo` (`ingestion/jobs_service.py:115-123,231-239`); o painel de
+qualidade filtra por escopo em vez de confiar no parâmetro (`quality/service.py:334-350`).
+
+**Regras fiscais duplicadas.** Uma, grave pela repetição:
+
+> **A25 — a tradução "bimestre do RREO → quadrimestre do RGF" existe seis vezes, em duas
+> semânticas diferentes.** `quality/service.py:83-90`, `cash_rap/service.py:96-102` e
+> `result/service.py:95-101` devolvem `None` para bimestre ímpar; `benchmark/service.py:817-826`,
+> `dashboard/estadual_service.py:227-237` e `reports/service.py:391` devolvem o quadrimestre
+> por teto, inclusive para ímpar. Ou seja: **para o mesmo período, metade da plataforma diz
+> "não há RGF correspondente" e a outra metade aponta um.** Nenhuma das seis conhece o RGF
+> **semestral** do município com menos de 50 mil habitantes (LRF art. 63) — a mesma lacuna
+> que a A6 já registrou de passagem e que `shared/periodo.py::em_bimestre` resolve na direção
+> inversa. A fonte única declarada (§6.6) não tem a conversão neste sentido: é por isso que
+> cada módulo escreveu a sua.
+
+A duplicação de vocabulário de faixa (faixa legal → farol/severidade) também sobrevive em
+quatro mapas no backend — `dashboard/service.py:24-32`, `cockpit_service.py:78,187-188`,
+`carteira_service.py:49-61`, `estadual_service.py:810-811` —, com dois nomes para o mesmo
+estado (`conforme` × `normal`). A U11 unificou o lado do frontend; o backend ainda não.
+Gravidade baixa (é apresentação), registrada para não ser redescoberta uma terceira vez.
+
+#### Falsos positivos verificados e descartados
+
+Registrar o que **não** é defeito custa pouco e evita que a próxima rodada gaste a mesma
+hora: cada linha abaixo parecia achado e não é.
+
+| Suspeita | Por que não é |
+|---|---|
+| "A DTP ignora a condicionalidade de RPPS quando há valor publicado" | É a decisão certa: publicada a DTP, o limite é medido sobre o número do **ente**. Recalcular pelos componentes trocaria o oficial por uma reconstrução nossa. Coberto por teste de caracterização |
+| "A linha de percentual do Anexo 01 entra no numerador" | Não entra: `classificar_valor_coluna` recusa coluna com `%`/`PERCENTUAL`/`SALDO` (`pessoal.py:102-117`), e o percentual do Anexo 01 é **coluna**, não conta (`% sobre a RCL Ajustada`) |
+| "A soma por papel dupla-conta colunas (12 meses + RP inscritos)" | O somatório em `personnel/service.py:193` de fato aceita mais de uma coluna de valor, mas as 4.168 linhas de Anexo 01 do acervo usam só `Valor` (medido na A5) — **risco latente, não defeito ativo**. A consulta que o vigia está no bloco *Como confirmar*, e a regra está travada por teste |
+| "Relatório em lote gera para ente fora da carteira" | Valida ente a ente (`reports/service.py:155-157`) |
+| "Refresh do consolidado estadual roda para UF alheia" | Valida antes (`estadual_router.py:116`) |
+| "O painel de qualidade aceita `?ente=` fora do escopo" | Aceita o parâmetro e **filtra pelo escopo**, devolvendo vazio em vez de 403 — não vaza |
+| "A varredura da carteira é N+1 na leitura" | A leitura é por conjunto (`carteira_repo.list_mart_by_scope`); o N+1 está na **materialização**, e é outro problema (ver E1) |
+
+#### Achados novos desta rodada
+
+| # | Achado | Evidência | Gravidade | Status |
+|---|---|---|---|---|
+| **A22** | `GET /ingestao/data?ente=` sem gate de escopo/licença | `ingestion/router.py:185-197`, `ingestion/service.py:377-407` | Alta (comercial/conformidade; o dado é público) | Confirmado no código · **E1** |
+| **A23** | Check `mart_vs_detalhe_pessoal` compara o mart (RCL Ajustada) com um recálculo pela RCL cheia — falha falsa que vira alerta | `quality/checks.py:486-510` × `personnel/service.py:395-402` | Alta | Confirmado no código · alcance a medir |
+| **A24** | Leitura da RCL Ajustada do Anexo 01 sem filtro de coluna e com `limit(1)` sem ordenação | `personnel/service.py:157-169` | Alta se materializar (denominador do limite de pessoal) | Confirmado no código · **hipótese** de alcance |
+| **A25** | Conversão bimestre→quadrimestre reimplementada 6× em 2 semânticas; nenhuma cobre RGF semestral | `quality/service.py:83`, `cash_rap/service.py:96`, `result/service.py:95`, `benchmark/service.py:817`, `estadual_service.py:227`, `reports/service.py:391` | Média | Confirmado no código |
+| **A26** | Reconciliação e checks de qualidade devolvem número fiscal sem `source_ref`, e o check não guarda a `versao_entrega` conferida | `reconciliation/schemas.py`, `quality/schemas.py:15-29`, `quality/models.py:38-48` | Média | Confirmado no código |
+| **A27** | Gate de escopo faz N+1 por requisição em conta estadual: `_estado_prefixes` percorre a carteira e consulta `dim_ente` ente a ente, **sem** o cache de sessão que a cobertura de licença já usa | `shared/scope.py:126-142` × `:96-117` | Média (desempenho na rota mais quente) | Confirmado no código · **E1** |
+
+#### Como confirmar cada item contra o dado (nada disto foi executado aqui)
+
+```sql
+-- A24: o Anexo 01 publica a linha da RCL Ajustada em mais de uma coluna?
+--      Mais de uma linha por (ente, período, versão) ⇒ o limit(1) sem order by escolhe.
+select cod_ibge, periodo, versao_entrega, count(*) as linhas,
+       array_agg(distinct coluna) as colunas
+  from silver.siconfi_rgf
+ where anexo like 'RGF-Anexo 01%'
+   and conta ilike '%RECEITA CORRENTE L%'
+   and conta ilike '%LIMITES DA DESPESA COM PESSOAL%'
+ group by 1,2,3 having count(*) > 1
+ order by linhas desc limit 50;
+
+-- Falso positivo "dupla contagem de coluna": alguma conta do Anexo 01 publica
+-- mais de uma coluna de valor na mesma entrega?
+select coluna, count(*) from silver.siconfi_rgf
+ where anexo like 'RGF-Anexo 01%' group by 1 order by 2 desc;
+
+-- A23: quantos pares o check reprovaria só por causa do denominador? (aproxima o que
+--      mart_vs_detalhe_pessoal faz: o apurado usa a RCL Ajustada, o check refaz na cheia)
+select count(*) as pares,
+       count(*) filter (
+         where abs(f.pct_rcl - f.despesa_liquida / r.rcl_12m * 100) > 0.1
+       ) as reprovariam_so_pelo_denominador
+  from gold.fato_pessoal f
+  join gold.fato_rcl r
+    on r.cod_ibge = f.cod_ibge
+   and r.periodo_ref = left(f.periodo, 4) || '-B' ||
+       (2 * cast(right(f.periodo, 1) as int))::text
+ where f.poder_codigo = 'ENTE.EXEC'
+   and f.periodo like '%-Q%'
+   and f.rcl_ajustada is not null
+   and r.rcl_12m > 0;
+
+-- P5/DTP: divergências entre o nosso percentual e o publicado pelo próprio ente.
+select f.cod_ibge, f.periodo, f.pct_rcl, s.valor as pct_publicado,
+       f.pct_rcl - s.valor as diferenca
+  from gold.fato_pessoal f
+  join silver.siconfi_rgf s
+    on s.cod_ibge = f.cod_ibge and s.periodo = f.periodo
+   and s.anexo like 'RGF-Anexo 01%'
+   and s.conta = 'DESPESA TOTAL COM PESSOAL - DTP (VI) = (IIIa + IIIb)'
+   and s.coluna = '% sobre a RCL Ajustada'
+ where f.poder_codigo = 'ENTE.EXEC' and abs(f.pct_rcl - s.valor) > 0.01
+ order by abs(f.pct_rcl - s.valor) desc;
+```
+
+```bash
+# P2/P5 — validação contra o publicado, amostra estratificada (7 entes, 6 indicadores)
+python -m scripts.validacao_fiscal --exercicios 2024 2025 --saida docs/validacao_a0r.md
+
+# P3 — os nove checks, sobre um ente/período com dado real
+python - <<'PY'
+from app.core.db import admin_session
+from app.modules.quality import service as q
+with admin_session() as s:
+    for r in q.executar_para_ente(s, "2304400", "2024-B6"):
+        print(r.check_codigo, r.status, r.diferenca, r.detalhe.get("motivo", ""))
+PY
+
+# P4 — isolamento entre organizações, empírico
+pytest tests/test_sprint28_seguranca.py tests/test_scope.py tests/test_rls.py -q
+
+# Catracas desta auditoria (não precisam de dado, só do schema da suíte)
+pytest tests/test_auditoria_a0r.py -q
+```
 
 ### 5.1.3 Sprints A3 e A4 — invariantes e lacunas de ingestão
 
@@ -815,7 +1034,8 @@ Prioridade conforme a ordem pedida: correção dos dados → fórmulas e regras 
 
 | Sprint | Objetivo | Agentes | Dependências | Status |
 |---|---|---|---|---|
-| **A0** | Diagnóstico completo e este documento | fiscal, dados, UX, arquitetura | — | ⏳ **Em andamento** — frentes de UX e de dados concluídas; fiscal, rastreabilidade e arquitetura interrompidas por limite de sessão (§20, P2–P4) |
+| **A0** | Diagnóstico completo e este documento | fiscal, dados, UX, arquitetura | — | ✅ **Concluído na A0R** — as três frentes interrompidas (P2, P3, P4) têm relatório em §5.1.2, com status individual e 6 achados novos (A22–A27). Resta a execução contra o banco, listada em §20 |
+| **A0R** | Retomada das frentes interrompidas: fiscal/contábil, dados/rastreabilidade, arquitetura/segurança | fiscal, dados, arquitetura | A0 | ✅ **Concluída** (diagnóstico) — §5.1.2; P5 rediagnosticada; ficha da E1 escrita; catracas em `tests/test_auditoria_a0r.py`. **Nenhuma correção aplicada, por desenho** |
 | **B0** | Correções de sentido já verificadas (U1, U2) | UX | A0 | ✅ **Concluída** |
 | **A3a** | Invariante da esfera verificada por dado (A1) | fiscal, testes | A0 | ✅ **Concluída** |
 | **A3b** | Completude do catálogo de entes (A9, A10) | dados, testes | A3a | ✅ **Concluída** |
@@ -835,7 +1055,7 @@ Prioridade conforme a ordem pedida: correção dos dados → fórmulas e regras 
 | **D1** | Drill-down por órgão, fonte de recurso, programa/ação | dados, UX | A4 | Ficha detalhada em §12.3 — maior parte já pronta no backend |
 | **H1** | Governança: billing zerado, auditoria de RBAC, control plane sem auditoria própria, licença invisível ao tenant | arquitetura, billing | A0 | Planejada. Ficha em §12.3 |
 | **B3** | Funcionalidades construídas e nunca ligadas: impressão, links de relatório, gráficos acessíveis, sinalização do Assistente | UX | B1 | Planejada. Ficha em §12.3 |
-| **E1** | Segurança, isolamento entre organizações e desempenho | arquitetura, segurança | A0 | Planejada |
+| **E1** | Segurança, isolamento entre organizações e desempenho | arquitetura, segurança | A0R | Planejada — **ficha detalhada em §12.3**, alimentada pelos achados confirmados da A0R (A22, A25, A26, A27 e a asserção frouxa de 404 × 403) |
 
 *(Cada sprint recebe ficha detalhada — objetivo, problema, justificativa, páginas afetadas,
 tarefas, riscos, critérios de aceite, testes, evidências — quando entra em execução.)*
@@ -1544,6 +1764,165 @@ ausente (aviso visível). npm run test && npx playwright test; make test.
 
 ---
 
+#### Sprint E1 — Segurança, isolamento entre organizações e desempenho
+
+**Objetivo:** transformar em regra exigida por teste o que hoje só está certo por hábito
+(o 404 que não vaza existência), fechar a única rota por ente sem gate de escopo e tirar do
+caminho quente o N+1 que o próprio gate introduz.
+
+**Origem:** todos os itens abaixo são **achados confirmados no código** pela frente P4 da
+A0R (§5.1.2), com `arquivo:linha`. O que ainda é hipótese — o alcance da A24, o número de
+entes afetados pela A23 — **não entra nesta ficha**: é fiscal e depende de medição prévia.
+
+**Problema:**
+1. **A22** — `GET /ingestao/data?fonte=&ente=&periodo=` exige a capacidade `administrar` e
+   não chama `assert_ente_in_scope` (`ingestion/router.py:185-197`, `service.py:377-407`).
+   O dado é público, então não há vazamento entre tenants; o que é furado é o **gate de
+   licença**, que só existe dentro daquele `assert`. Uma organização licenciada para um
+   município lê o silver de qualquer um dos 5.598.
+2. **404 × 403 sem régua** — a convenção certa (recurso de outra organização não existe
+   para quem pergunta) está implementada em cenários, alertas e relatórios, mas o teste que
+   deveria protegê-la aceita os dois códigos (`test_sprint28_seguranca.py:248`). Uma
+   regressão que passe a responder 403 — vazando a existência do recurso alheio — não
+   quebraria nada.
+3. **A27** — `shared/scope.py::_estado_prefixes` (linhas 126-142) percorre a carteira e
+   consulta `dim_ente` **ente a ente**, sem cache de sessão, dentro de
+   `assert_ente_in_scope` e de `carteira_scope_ibges`. Para conta estadual com 184
+   municípios, é até 184 consultas **por requisição**, em toda rota fiscal. O padrão certo
+   está dois blocos acima, na `cobertura_licenca` (`:96-117`), que memoriza em
+   `session.info`.
+4. **Materialização síncrona no request** — `POST /carteira/refresh` percorre o escopo
+   inteiro chamando `refresh_mart_carteira` ente a ente dentro da requisição
+   (`carteira_service.py:178-183`, `carteira_router.py:72-79`). Para uma licença global são
+   5.598 iterações num handler HTTP.
+5. **A26** — `GET /reconciliacao/rcl_rgf` e `GET /qualidade` devolvem número fiscal sem
+   `source_ref`, e `gold.data_quality_check` não guarda a `versao_entrega` conferida
+   (`quality/models.py:38-48`): depois de uma retificação, ninguém sabe sobre qual versão o
+   check passou ou falhou.
+6. **A25** — a conversão bimestre→quadrimestre existe seis vezes, em duas semânticas
+   (ímpar → `None` × ímpar → teto), e nenhuma cobre o RGF semestral (LRF art. 63).
+
+**Justificativa:** os itens 1 e 2 são de conformidade e de contrato comercial — a licença é
+o que separa "cliente de um município" de "acesso ao país inteiro". Os itens 3 e 4 são o
+custo por requisição da rota mais quente do produto, e crescem com o tamanho do cliente:
+pioram exatamente no cliente que paga mais. O 5 e o 6 são dívidas de coerência que já
+produziram defeito em outra família (A14/A15: *versão que existe, vigência que não se
+declara*).
+
+**Páginas afetadas:** todas as rotas por ente (gate de escopo), Central de Dados
+(`/ingestao/data`, painel de qualidade), Carteira (refresh), Reconciliação.
+
+**Tarefas:**
+- `assert_ente_in_scope` em `GET /ingestao/data` (roteador **e** serviço, para que o
+  caminho programático não fique aberto).
+- Memorizar `_estado_prefixes` e `_is_estado` em `session.info`, no mesmo padrão de
+  `cobertura_licenca`, com invalidação junto de `invalidar_cobertura`.
+- `POST /carteira/refresh` passa a enfileirar job (padrão `POST /carteira/lote/{acao}`, que
+  já devolve 202) ou a recusar acima de um teto declarado de entes.
+- Endurecer a asserção de isolamento: **404** (não 403) para identificador de outra
+  organização, cobrindo relatório, cenário, alerta, agendamento e job de ingestão.
+- `source_ref` + `versao_entrega` em `ReconciliacaoResultado`/`DivergenciaItem` e em
+  `CheckOut`; coluna `versao_entrega` em `gold.data_quality_check` (migration aditiva,
+  reversível; sem apagar histórico).
+- Consolidar a conversão bimestre→quadrimestre em `shared/periodo.py`, com a semântica
+  decidida explicitamente (e o RGF semestral), substituindo as seis cópias.
+
+**Riscos:**
+- Mudar 403→404 numa rota que hoje devolve 403 **altera contrato** para o frontend: checar
+  cada consumidor em `services/backend.ts` antes (o `AsyncState` trata os dois, mas a
+  mensagem muda).
+- Fechar a A22 pode quebrar rotina operacional que hoje lê silver de ente fora da carteira
+  (uso interno, conferência) — se houver, a saída é a sessão de superusuário do control
+  plane, não afrouxar o gate.
+- Consolidar a regra de período **muda números** onde as duas semânticas divergiam
+  (bimestre ímpar): medir antes, com a mesma disciplina de dry-run da A5, e tratar como
+  correção fiscal, não refatoração.
+- Cache de escopo em `session.info` erra se a carteira mudar dentro da mesma requisição:
+  invalidar no mesmo ponto em que a licença já invalida.
+
+**Critérios de aceite (objetivos):**
+1. `GET /ingestao/data?ente=X` com `X` fora da carteira devolve **403**; com `X` na carteira
+   e fora da licença, **403 `ente-nao-licenciado`**; dentro dos dois, **200**.
+2. Para relatório, cenário, alerta, agendamento e job de ingestão de outra organização, o
+   status é **exatamente 404** (`assert == 404`, não `in {403, 404}`) e o corpo não contém o
+   `cod_ibge` nem o nome do outro tenant.
+3. Requisição a `/entes/{ibge}/dashboard` com conta estadual de 184 municípios na carteira
+   emite **≤ 5 consultas** no gate de escopo (hoje: 1 + até 184), medido por contador de
+   eventos do SQLAlchemy no teste — e o `x-performance-p95-ms` da rota permanece dentro do
+   orçamento de 500 ms já declarado pelo middleware da Sprint 27.
+4. `POST /carteira/refresh` responde **202 com job** (ou 422 declarando o teto) e não
+   percorre o escopo dentro do request.
+5. `GET /reconciliacao/rcl_rgf` e `GET /qualidade` devolvem `source_ref` com
+   `versao_entrega` nos dois lados comparados; `gold.data_quality_check` grava a versão, e
+   reexecutar o check sobre uma retificação **cria linha nova** em vez de sobrescrever a
+   anterior sem rastro.
+6. `pytest tests/test_auditoria_a0r.py` continua verde com o conjunto de rotas sem gate
+   **reduzido** (a catraca aceita a redução; `ingestion` sai da lista de conhecidos).
+7. `make lint && make test` verdes, sem exceção.
+
+**Testes:**
+- `test_sprint28_seguranca.py`: asserção estrita de 404 por recurso, um caso por família.
+- Novo: `/ingestao/data` nos três estados (fora da carteira, sem licença, ok).
+- Novo: contador de consultas do gate de escopo para conta estadual (evento
+  `before_cursor_execute`), com o número máximo declarado no próprio teste.
+- Novo: `/carteira/refresh` devolve job e não bloqueia; job materializa o mesmo total.
+- Contrato: `source_ref` presente nos dois contratos que hoje não o têm.
+- Regressão de período: para cada bimestre 1–6 e para RGF semestral, a função única
+  devolve o que a decisão registrada mandar — e as seis cópias deixam de existir.
+
+**Evidências:** captura do 403 antes/depois em `/ingestao/data` para um ente fora da
+licença; contagem de consultas por requisição antes/depois (log do contador); tempo de
+resposta de `POST /carteira/refresh` antes/depois; diff do contrato de reconciliação com o
+`source_ref` novo.
+
+**Prompt Claude Code:**
+```
+Implemente a Sprint E1 de backend_plataforma_fiscal/docs/evolucao_plataforma.md —
+segurança, isolamento entre organizações e desempenho. Todos os itens são achados
+CONFIRMADOS NO CÓDIGO pela frente P4 da auditoria A0R (§5.1.2); nenhum depende de medição
+prévia. Não amplie o escopo para os achados fiscais (A23/A24), que são de outra sprint.
+
+1) A22 — GET /ingestao/data (ingestion/router.py:185-197, service.py:377-407) exige só a
+capacidade "administrar" e nunca chama assert_ente_in_scope: a licença, que vive dentro
+desse gate, não é conferida. Adicione o gate no roteador e no serviço. Teste os três
+estados: ente fora da carteira (403 de escopo), ente na carteira e fora da licença (403
+ente-nao-licenciado), ente ok (200).
+
+2) 404 × 403 — tests/test_sprint28_seguranca.py:248 aceita "403 ou 404" para identificador
+de outra organização. Endureça para == 404 e estenda a cobertura a relatório, cenário,
+alerta, agendamento e job de ingestão: existência alheia não pode vazar nem pelo status.
+Se alguma rota hoje devolver 403, corrija a rota, não o teste.
+
+3) A27 — shared/scope.py::_estado_prefixes (126-142) consulta dim_ente ente a ente dentro
+do gate, sem cache, em toda requisição de conta estadual. Memorize em session.info no mesmo
+padrão de cobertura_licenca (:96-117), invalidando junto com invalidar_cobertura. Prove com
+um contador de consultas (before_cursor_execute): ≤ 5 consultas no gate para uma carteira
+de 184 municípios.
+
+4) POST /carteira/refresh (carteira_router.py:72-79 → carteira_service.py:178-183) percorre
+o escopo inteiro dentro do request. Passe a enfileirar job (o padrão de /carteira/lote já
+devolve 202) ou recuse acima de um teto declarado.
+
+5) A26 — reconciliation/schemas.py e quality/schemas.py::CheckOut devolvem número fiscal
+sem source_ref, e gold.data_quality_check não guarda versao_entrega (models.py:38-48).
+Adicione o source_ref nos dois contratos e a coluna na tabela (migration aditiva e
+reversível), de modo que reexecutar um check depois de uma retificação não sobrescreva o
+resultado da versão anterior sem rastro.
+
+6) A25 — a conversão bimestre→quadrimestre existe seis vezes (quality/service.py:83,
+cash_rap/service.py:96, result/service.py:95, benchmark/service.py:817,
+dashboard/estadual_service.py:227, reports/service.py:391) em DUAS semânticas: bimestre
+ímpar vira None em três e vira quadrimestre por teto nas outras três; nenhuma conhece o RGF
+semestral (LRF art. 63). Consolide em shared/periodo.py, DECIDINDO a semântica de forma
+explícita e registrando a decisão no §10 do documento. Atenção: isto MUDA número onde as
+duas divergiam — meça antes com dry-run, no padrão da A5, e trate como correção fiscal.
+
+A catraca tests/test_auditoria_a0r.py deve continuar verde: ela aceita que o conjunto de
+rotas sem gate e o de cópias da regra de período ENCOLHAM. make lint && make test.
+```
+
+---
+
 ## 10. Decisões técnicas e metodológicas registradas
 
 | Data | Decisão | Motivo |
@@ -1566,10 +1945,10 @@ ausente (aviso visível). npm run test && npx playwright test; make test.
 | # | Item | Situação | O que falta | Como desbloquear |
 |---|---|---|---|---|
 | P1 | **A8 — resíduo de teste em produção** | Aguardando decisão | 3 organizações `Org <hex>` e 6 entes sintéticos em `op.organizacao`/`op.carteira_ente`. Apagar é destrutivo e irreversível sem backup | Decisão do responsável. Recomendo: verificar se alguma tem usuário real associado, fazer dump só do schema `op`, e então remover |
-| P2 | **Frente fiscal/contábil** | Interrompida (limite de sessão) | Auditoria de fórmulas: RCL × RCL Ajustada, exclusões do art. 19 §1º, DTP como composição × subtração, resultado acima × abaixo da linha | Reexecutar quando o limite renovar |
-| P3 | **Frente de dados/rastreabilidade** | Interrompida | Levantamento de `source_ref` endpoint a endpoint; varredura de valores fixos; execução dos 9 checks de qualidade | Reexecutar |
-| P4 | **Frente de arquitetura/segurança** | Interrompida | Teste empírico de exposição entre organizações (404 × 403); regra fiscal duplicada; endpoints sem `assert_ente_in_scope` | Reexecutar |
-| P5 | **Divergência conhecida do DTP** | Pendente desde antes desta auditoria | `DTP (VI) = (IIIa + IIIb)` tratado como composição em vez de `bruta − exclusões`; 6 divergências em 2024 e 18 em 2025 | Depende de P2 |
+| P2 | **Frente fiscal/contábil** | ✅ **Relatório concluído** (A0R, §5.1.2) — execução contra o dado pendente | RCL × RCL Ajustada, exclusões do art. 19 §1º e acima × abaixo da linha auditados e **corretos**; a leitura da RCL Ajustada tem defeito de consulta (**A24**). Falta rodar `scripts/validacao_fiscal.py` e as consultas do §5.1.2 contra o banco | Uma sessão com banco de desenvolvimento. Comandos já escritos |
+| P3 | **Frente de dados/rastreabilidade** | ✅ **Relatório concluído** (A0R, §5.1.2) — nove checks **não executados** | Inventário de `source_ref` fechado (160 rotas, 22 contratos, 2 lacunas reais = **A26**); varredura de valores fixos **limpa** (nenhum teto da LRF hardcoded); os nove checks auditados por código, com um defeito achado (**A23**), e ainda **não executados** | Mesma sessão com banco. `pytest tests/test_auditoria_a0r.py` já roda sem dado |
+| P4 | **Frente de arquitetura/segurança** | ✅ **Relatório concluído** (A0R, §5.1.2) — execução empírica pendente | Convenção 404 × 403 **correta no código** e frouxa no teste (`test_sprint28_seguranca.py:248` aceita os dois); 1 rota sem gate de escopo (**A22**); regra de período duplicada 6× (**A25**); N+1 no gate (**A27**) | Rodar a suíte de isolamento; o resto virou ficha **E1** |
+| P5 | **Divergência do DTP** | 🔎 **Rediagnosticada — permanece aberta, com causa provável e correção especificada** | O enunciado antigo ("`DTP (VI) = (IIIa + IIIb)` tratado como composição em vez de `bruta − exclusões`") **não descreve o código de hoje**: a DTP publicada *é* a líquida repartida por estágio no MDF, e é assim que `pessoal.apurar` a usa (`pessoal.py:164-178`) — tratá-la como valor oficial está certo. A causa provável das divergências residuais é o **denominador**, não o numerador: **A24** (leitura da RCL Ajustada sem filtro de coluna e com `limit(1)` sem ordenação) explica um conjunto pequeno e específico de entes, que é a forma dos 6/2024 e 18/2025 registrados. **Decisão:** permanece aberta nesta sprint (diagnóstico) porque a confirmação exige o banco; a correção é de baixo risco e está especificada — filtrar `coluna = 'Valor'` e ordenar deterministicamente, sem migration e sem reprocessar. Motivo de não corrigir agora: mexer no denominador do limite de pessoal sem antes medir quantas linhas mudam repetiria o erro que a B2-c e a A5 já custaram | Rodar a 1ª e a 4ª consulta do §5.1.2. Se a 1ª voltar linhas, a correção da A24 entra na próxima sprint fiscal com reprocessamento medido antes |
 | P6 | ~~Contagem de `dim_ente` não explicada~~ | ✅ **Resolvido** | A investigação levou a A9/A10: o catálogo estava incompleto em 8 municípios e o silver de entes em 1. Após reingestão e conformação, o catálogo bate **exatamente** com a fonte: 5.570 municipais + 27 estaduais (26 + DF) + 1 federal = **5.598**, o total publicado pelo SICONFI | — |
 
 ---
@@ -1578,6 +1957,7 @@ ausente (aviso visível). npm run test && npx playwright test; make test.
 
 | Data | Alteração |
 |---|---|
+| 2026-08-05 | **Sprint A0R concluída — as três frentes interrompidas voltaram com relatório (§5.1.2).** P2, P3 e P4 têm agora status individual, evidência `arquivo:linha` e a consulta/comando de confirmação para cada item. **Ressalva de método declarada no topo da seção, e ela vale para tudo que a A0R afirma:** esta rodada correu **sem shell e sem banco** — nenhuma consulta SQL, nenhum `pytest` e nenhum comando foram executados aqui; "confirmado" significa *confirmado no código*, e o que depende de dado está marcado **hipótese** com a consulta que a decide. **P2 (fiscal):** RCL × RCL Ajustada corretas (o denominador do art. 20 é a Ajustada publicada, com a RCL cheia só como queda declarada por `rcl_ajustada = NULL`), exclusões do art. 19 §1º completas e condicionais ao RPPS, acima × abaixo da linha com identidade verificada e tolerância explícita. **P3 (dados):** inventário de `source_ref` fechado — 160 rotas, 22 contratos com `source_ref`, duas lacunas reais (reconciliação e checks de qualidade) e uma dispensa justificada (cobertura mede o produto, não é número de demonstrativo); varredura de valores fixos **limpa** — nenhum teto da LRF hardcoded no backend, as faixas 90/95% derivadas num lugar só com override do banco, e a única exceção é o `0.70` do FUNDEB dentro do conector de PDF, registrado como tal; os nove checks foram **inventariados e auditados**, e **não executados**. **P4 (arquitetura):** a convenção 404 × 403 está certa no código (repositório filtra por `org_id`, serviço devolve 404 — existência alheia não vaza) e **frouxa no teste** (`test_sprint28_seguranca.py:248` aceita os dois); das 19 rotas que recebem ente, 17 validam escopo, 1 é exceção legítima (control plane) e **1 não valida** (A22). **Seis achados novos:** **A22** (`GET /ingestao/data?ente=` sem gate — fura a licença, não o dado, que é público), **A23** (o check `mart_vs_detalhe_pessoal` compara o mart, apurado sobre a RCL Ajustada, com um recálculo pela RCL cheia — falha estrutural falsa que vira alerta na fila do cliente), **A24** (a leitura da RCL Ajustada do Anexo 01 não filtra a coluna e usa `limit(1)` sem `order by` — mesma família do B2-b), **A25** (a conversão bimestre→quadrimestre existe **seis vezes em duas semânticas**: para o bimestre ímpar, metade da plataforma diz "não há RGF" e a outra metade aponta um; nenhuma cobre o RGF semestral), **A26** (reconciliação e checks devolvem número fiscal sem `source_ref`, e o check não guarda a `versao_entrega` conferida) e **A27** (o gate de escopo faz N+1 por requisição em conta estadual, sem o cache de sessão que a licença ao lado já usa). **P5/DTP rediagnosticada:** o enunciado antigo não descreve o código atual — no MDF a `DTP (VI) = (IIIa + IIIb)` **é** a líquida repartida por estágio, e usá-la como valor oficial está certo; a causa provável das divergências residuais é o denominador (A24), não o numerador. **Decisão registrada: permanece aberta**, com a correção especificada (filtrar `coluna = 'Valor'` e ordenar) e o motivo de não aplicá-la agora — mexer no denominador do limite de pessoal sem medir antes quantas linhas mudam repetiria o custo da B2-c e da A5. **Sete falsos positivos** foram verificados e descartados com o motivo de cada um (relatório em lote, refresh estadual, painel de qualidade e a própria condicionalidade de RPPS na DTP), para que a próxima rodada não gaste a mesma hora. A ficha da **E1** foi escrita a partir dos achados confirmados, com critérios objetivos e mensuráveis (403 nos três estados de `/ingestao/data`; `== 404` no lugar de `in {403,404}`; ≤ 5 consultas no gate de escopo para carteira de 184 municípios; `/carteira/refresh` em 202 com job). **Testes:** `tests/test_auditoria_a0r.py` — 9 casos, nenhum dependente de dado: regra pura do Anexo 01 (DTP publicada manda; exclusão de inativos condicional ao RPPS; coluna de percentual nunca entra no numerador; contas do layout oficial reconhecidas) e três **catracas** de inventário (contrato que tem `source_ref` não pode perdê-lo; rota por ente sem gate não pode crescer; a regra de período não pode ganhar uma sétima cópia). As catracas são deliberadamente unilaterais: aceitam a melhora e falham na piora — uma que travasse o defeito no lugar deixaria a suíte vermelha para quem corrigisse. Os 9 casos foram **escritos e não executados** nesta rodada (mesmo motivo: sem shell); rodar `pytest tests/test_auditoria_a0r.py` é o primeiro item da retomada, antes de qualquer conclusão sobre eles. **Nenhuma correção foi aplicada e nenhuma ação de produção foi executada**, por desenho da sprint. |
 | 2026-08-05 | **Sprint F2 em produção — deploy verificado.** Backend em `8364c7b`, migration sem pendência nova (F2 não adiciona nenhuma), `/api/health` respondendo `200`. Frontend em `afb7811`, bundle `index-ByIkPdEf.js` — hash servido = publicado = build, os três conferidos, diferente do anterior (`index-z3fGw81Y.js`). |
 | 2026-08-05 | **Sprint F2 concluída — 15 de 16 achados de clareza fechados (U19–U34), continuação direta da B1.** Mesma disciplina: nenhum número mudou, só rótulo, denominador exibido ou campo novo. Três exemplos concretos (o que o gestor lia × o que o dado dizia × a correção), no formato da tabela da B1 (§5.1.5): **(1) Receita/Despesa (U19)** — lia "Categoria → Origem → Espécie → Rubrica → Alínea" (5 níveis) sobre a árvore de Receita e "Categoria → Grupo → Modalidade → Elemento" (4 níveis) sobre a de Despesa/natureza; o dado só deriva 3 e 2 níveis respectivamente (`natureza.construir_arvore`, `classificacao.NATUREZA_PARENT` — o SICONFI não expõe código numérico pontuado, logo não há Rubrica/Alínea/Modalidade/Elemento a mostrar); corrigido para "Categoria → Origem → Espécie" e "Categoria Econômica → Grupo de Natureza" nos dois lugares onde o texto estava hardcoded (`ReceitaPage.tsx`, `DespesaPage.tsx`, e o `hierarquia` da memória de Receita em `revenue/service.py`, que tinha o mesmo erro). **(2) Limites — barra de progresso para pisos (U32)** — um ente em 27% de aplicação em saúde (piso 15%, cumprindo com folga) desenhava uma barra **quase cheia**, a mesma leitura visual que um ente prestes a estourar um teto; a razão valor/piso satura em 100% assim que o piso é superado, então "cumprir com folga" e "estar exatamente no limite" ficavam indistinguíveis pelo preenchimento. Corrigido invertendo o preenchimento visual só para `sentido=piso` (`ratioVisual = 100 − ratio`): agora a barra fica **vazia** para quem cumpre com folga e **cheia** para quem está bem abaixo do mínimo — a mesma convenção "mais cheia = mais perto de violar" que já valia para teto. O valor real na árvore de acessibilidade (`aria-valuenow`) não mudou — só o pixel. **(3) CAPAG — três grandezas sob um rótulo (U26)** — o card de Dívida mostrava "Metodologia 2022" para um ente cujo layout de origem (municipal histórico) publica a coluna `Ano_Base`, não uma metodologia — 2022 era o ano-base real da planilha, não uma versão de método; e um município (layout oficial, ICF) e um estado (layout estadual, texto de metodologia) apareciam com o mesmo rótulo "Metodologia" apesar de serem publicações e conectores diferentes do Tesouro. Corrigido com dois campos novos, sem migration e sem reprocessar CAPAG: `ano_base_fonte` (`debt/service.py::_parse_ano_base_fonte`, extraído só quando o valor bruto é um ano plausível de 4 dígitos) exibido como "Ano-base da fonte", com validação cruzada contra `ano_ref − 1` sinalizada (nunca corrigida em silêncio) quando diverge; e `metodologia_rotulo` ("ICF" para município, "Metodologia" para estado — resolvido pelo mesmo `len(cod_ibge)` que já escolhe entre as entregas `CAPAG`/`CAPAG-EST`, sem precisar de coluna nova para saber a origem). `metodologia_versao` deixou de repetir o mesmo número sob o rótulo errado quando era na verdade um ano-base — as três grandezas agora têm três rótulos, sem se misturar. Demais achados fechados: **Resultado (U27/U28)** — "(com RPPS)"/"(sem RPPS)" movidos para o `MetricHeader` do primário/nominal (antes só na `NotaRpps` recolhida) e para as fórmulas da memória de cálculo; `meta_nominal`/`realizado_nominal` passam a aparecer quando o ente publica só a meta nominal (antes lia "Meta de resultado primário —", indistinguível de não ter meta nenhuma). **Patrimônio (U33)** — "✓ Conciliado — Conciliação MSC ↔ DCA" aparecia para entes sem MSC nenhuma (só 1 dos 3 checks roda); `build_conciliacao` ganhou um `titulo` condicional ("Balanço fecha" sem MSC) e a `observacao` passou a descrever só os checks que de fato rodaram. **Receita (U20/U21/U22)** — `deducoes` (materializada, nunca exibida) exposta como bruto×deduções quando a fonte publica a coluna (achado à parte: nenhum RREO Anexo 01 real no acervo tem essa coluna hoje — confirmado por consulta direta ao banco; o campo aparece pronto para quando/se existir); a barra "própria×transferida" desdobrada em corrente×capital (`DependenciaResumo` ganhou `transferida_corrente`/`transferida_capital`, calculados pela raiz categórica do nó — sem mudar a soma). **Despesa (U21/U22/U23)** — `SeloCobertura` que só existia em Receita agora também aparece aqui (já registrada em `registry.py::FONTE_META`, só faltava consumir); aviso novo quando o eixo natureza está selecionado avisando que cabeçalho/série continuam no eixo função (Anexo 02), evitando a leitura de bug. **Pessoal (U25)** — cabeçalho passa a dizer a cadência do RGF do ente (quadrimestral/semestral, LRF art. 63, II), reusando `alerts/rules.py::cadencia_rgf` (campo novo `PessoalDetalhe.cadencia_rgf`). **Caixa (U29)** — `Art42Panel` mostra o quadrimestre avaliado (ex.: "2024-Q3"), não só o booleano dentro/fora da janela. **Limites/Benchmarking (U31/U34)** — `SeloCobertura`/`SeloQualidadePagina` adicionados nas duas páginas (indicadores já registrados em `coverage/service.py::INDICADORES_POR_PAGINA`, só faltava consumir). **Achado revisado na investigação, não fechado como a ficha propunha (U29/U30, parte do FUNDEB):** a ficha pedia replicar no card FUNDEB a nota de expurgo de RPNP sem lastro que a árvore MDE/ASPS já tem — mas a investigação (`health_edu/service.py::_apurar_educacao`) mostrou que o indicador `fundeb_profissionais` **não é expurgado** de RPNP sem lastro (só o total combinado de MDE é: `aplicada = despesa_bruta − deducoes − rpnp`; o `FUNDEB_PROFISSIONAIS` do Anexo 8 entra bruto, sem a subtração). Replicar a nota como paridade teria sido uma **falsa clareza** — exatamente o defeito que esta sprint existe para consertar, só que ao contrário. Em vez de replicar, `CardFundeb` ganhou uma nota que diz a assimetria real ("não expurga… diferente do ASPS/MDE acima"), sem tocar em nenhum cálculo; se o expurgo do FUNDEB for de fato exigido, é um achado de **cálculo**, não de rótulo, e pertence a outra sprint. **Testes:** backend — extensões em `test_debt.py` (+5, incluindo o caso estadual "Metodologia" × municipal "ICF"), `test_accounting.py` (+2 asserções), `test_revenue.py` (+2), `test_personnel.py` (+2) e `test_result.py` (+2) sobre a suíte já existente, tudo verde (`ruff`, `mypy` 235 arquivos, `pytest` completo, sem falha — inclusive reexecutado depois de corrigir uma colisão de `versao_entrega` fixo entre corridas no teste estadual, mesma lição de higiene de dado de teste já registrada em sprints anteriores). Frontend — arquivo novo `divida-capag.test.tsx` (4 testes) + extensões em `receita-despesa.test.tsx`, `sprint25b.test.tsx`, `sprint25c.test.tsx`, `sprint25d.test.tsx`, `sprint25e.test.tsx` e um índice de rastreabilidade em `clareza-conceitual.test.tsx`: suíte de 207 para **228 testes**, `tsc --noEmit` limpo, `eslint` só com os 10 avisos pré-existentes. |
 | 2026-08-05 | **A5, A6, G1 e F1 em produção — deploy real, verificado de ponta a ponta, não apenas relatado.** Backend: `git pull` (commit `2908326`) → `docker compose build` → migration `0040` isolada (exit 0, aplicou exatamente `0039→0040`) → restart `api`/`ingest-worker`/`scheduler`. Frontend: `git pull` (commit `9b7d301`) → build com `node:20-alpine` → `rsync` para `/var/www/plataforma`. **Dois achados de infraestrutura, reais, corrigidos no processo — nenhum dos dois é bug de código das sprints, são lacunas de processo de deploy:** (1) `docker compose -f docker-compose.prod.yml up -d api ...` sozinho **não publica a porta 8000** — o compose versionado deixa em `expose` de propósito; existe um `docker-compose.ec2.yml` **não versionado**, específico desta instância, que adiciona `ports: 127.0.0.1:8000:8000`. Sem ele, a API sobe saudável mas o nginx (que roda no host, fora do Docker) não a alcança — 502 silencioso. Comando correto: `docker compose -f docker-compose.prod.yml -f docker-compose.ec2.yml up -d api ingest-worker scheduler`. Verificado que os dados reais (5.598 entes, tabelas com milhões de linhas) nunca saíram do lugar — só o nome/identidade do container mudou (volume nomeado `backend_pgdata`, persistente, independente do nome do container). (2) Não existe `.env` real na instância (só `.env.example`) — `src/services/api.ts` cai em `http://localhost:8000` fixo se `VITE_API_BASE_URL` não for passado no build, repetindo o incidente que este runbook já tinha documentado uma vez. O bundle publicado antes deste deploy já usava `/api` (caminho relativo, batendo com `location /api/ { proxy_pass http://127.0.0.1:8000/; }` do nginx) — usado o mesmo valor no build novo (`-e VITE_API_BASE_URL=/api`). **Verificação real, não relato**: `/api/health` responde `200 {"status":"ok",...}`; hash do bundle servido = publicado = build novo (`index-z3fGw81Y.js`, diferente do anterior `index-DBhkueEj.js`) — os três lados do teste que o runbook §3.1 pede. **Reprocessamento de PRODUÇÃO da A15 aplicado** (autorizado pelo usuário explicitamente, mesmo padrão do dev): dry-run mostrou 70 linhas afetadas (2074 entregas vigentes, mais que o dev por cobrir mais exercícios/entes), `materialize_endividamento.py` aplicado — 3.898 indicadores, zero erro — reverificação limpa em **0 divergência residual**, amostra conferida direto no banco de produção: `2307650/2023-B2` com `base_valor = R$ 1.022.418.338,43`, idêntico ao valor corrigido já validado no dev. |
