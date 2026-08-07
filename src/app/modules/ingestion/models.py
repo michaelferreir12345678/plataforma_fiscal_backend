@@ -46,6 +46,7 @@ FONTE_SADIPEM_CDP = "sadipem_cdp"
 FONTE_BCB = "bcb"
 FONTE_IBGE_POPULACAO = "ibge_populacao"
 FONTE_IBGE_PIB = "ibge_pib"
+FONTE_IBGE_MALHA = "ibge_malha"
 
 # Fontes baseadas em arquivo (planilhas) — Sprint 1B.
 FONTE_FPM = "tesouro_fpm"

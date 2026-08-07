@@ -83,8 +83,8 @@ class LineageEdge(Base):
     __tablename__ = "lineage_edge"
     __table_args__ = (
         CheckConstraint(
-            "tipo IN ('fonte_bronze', 'bronze_silver', 'silver_gold', 'gold_endpoint', "
-            "'endpoint_pagina')",
+            "tipo IN ('fonte_bronze', 'bronze_silver', 'bronze_gold', 'silver_gold', "
+            "'gold_endpoint', 'endpoint_pagina')",
             name="ck_lineage_edge_tipo",
         ),
         UniqueConstraint("origem", "destino", "tipo", name="uq_lineage_edge_chave"),

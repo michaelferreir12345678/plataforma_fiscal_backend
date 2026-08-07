@@ -508,6 +508,21 @@ def test_lineage_seed_cobre_todas_as_paginas_do_produto() -> None:
     assert not faltando, f"páginas fora do mapa de linhagem: {sorted(faltando)}"
 
 
+def test_lineage_da_malha_reflete_o_fluxo_real_sem_silver_ficticio() -> None:
+    arestas = {(a.origem, a.destino, a.tipo) for a in lineage_seed.arestas()}
+
+    assert {
+        ("IBGE/malhas", "bronze.ibge_malha", "fonte_bronze"),
+        ("bronze.ibge_malha", "gold.geo_malha_uf", "bronze_gold"),
+        ("gold.geo_malha_uf", "GET /geo/malha/{uf}", "gold_endpoint"),
+        ("GET /geo/malha/{uf}", "/carteira", "endpoint_pagina"),
+    } <= arestas
+    nos = {no for aresta in arestas for no in aresta[:2]}
+    assert "silver.ibge_malha" not in nos
+    assert "gold.dim_malha" not in nos
+    assert "GET /uf/{uf}/malha" not in nos
+
+
 def test_lineage_responde_nos_dois_sentidos(client, make_org, ente) -> None:
     _, headers = _headers(client, make_org, ente)
     with SessionLocal() as s:

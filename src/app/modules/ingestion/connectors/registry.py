@@ -54,6 +54,8 @@ class FonteMeta:
         "requer_configuracao",
         "consulta_por_ente",
         "entrega_agregada",
+        "agrupar_por_uf",
+        "ano_fixo",
     )
 
     def __init__(
@@ -71,6 +73,8 @@ class FonteMeta:
         requer_configuracao: str | None = None,
         consulta_por_ente: bool | None = None,
         entrega_agregada: bool = False,
+        agrupar_por_uf: bool = False,
+        ano_fixo: int | None = None,
     ) -> None:
         self.familia = familia
         self.cadencia = cadencia
@@ -100,6 +104,11 @@ class FonteMeta:
         #: versão)`` e só a primeira entraria — as demais seriam puladas como "já
         #: ingerido", e o dado dos outros entes sumiria em silêncio.
         self.entrega_agregada = entrega_agregada
+        #: Documento territorial compartilhado: aceita UF ou município, mas executa
+        #: uma única unidade por prefixo de UF.
+        self.agrupar_por_uf = agrupar_por_uf
+        #: Ano de referência fixo para recursos cuja URL não varia por exercício.
+        self.ano_fixo = ano_fixo
 
 
 _STN = "Tesouro Nacional (STN)"
@@ -234,6 +243,17 @@ FONTE_META: dict[str, FonteMeta] = {
         url_origem="https://servicodados.ibge.gov.br/api/",
         descricao="PIB municipal",
         paginas_impactadas=("benchmarking",),
+    ),
+    "ibge_malha": FonteMeta(
+        familia="ibge",
+        cadencia="eventual",
+        orgao="IBGE",
+        url_origem="https://servicodados.ibge.gov.br/api/",
+        escopo="por_uf",
+        descricao="Malha geográfica municipal em GeoJSON, consolidada por UF",
+        paginas_impactadas=("carteira",),
+        agrupar_por_uf=True,
+        ano_fixo=2022,
     ),
     "tesouro_fpm": FonteMeta(
         entrega_agregada=True,

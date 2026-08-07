@@ -18,13 +18,21 @@ from sqlalchemy import delete, func, select
 from app.core.db import SessionLocal
 from app.main import app
 from app.modules.catalog.models import DimEnte
-from app.modules.ingestion.connectors.ibge import IbgePibConnector, IbgePopulacaoConnector
+from app.modules.dashboard.estadual_models import GeoMalhaUf
+from app.modules.ingestion import cobertura as cobertura_mod
+from app.modules.ingestion.connectors.ibge import (
+    IbgeMalhaConnector,
+    IbgePibConnector,
+    IbgePopulacaoConnector,
+)
 from app.modules.ingestion.models import (
+    FONTE_IBGE_MALHA,
     BcbIndice,
     DimEntrega,
     IbgePib,
     IbgePopulacao,
     IngestionLog,
+    MartCoberturaFonte,
     RawPayload,
     SadipemCronogramaPgto,
     SadipemOpContratada,
@@ -48,6 +56,7 @@ class FakeRecordsClient:
         self.records_by_request: dict[
             tuple[str, tuple[tuple[str, str], ...]], list[dict[str, Any]]
         ] = {}
+        self.documents_by_request: dict[tuple[str, tuple[tuple[str, str], ...]], Any] = {}
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     def get(self, fonte: str) -> FakeRecordsClient:
@@ -62,6 +71,14 @@ class FakeRecordsClient:
     def set_records(self, path: str, params: dict[str, Any], records: list[dict[str, Any]]) -> None:
         """Registra resposta exata; necessário para cronogramas por ``id_pleito``."""
         self.records_by_request[self._request_key(path, params)] = records
+
+    def set_document(self, path: str, params: dict[str, Any], document: Any) -> None:
+        """Registra um documento cru, sem o flatten usado pelas tabelas do IBGE."""
+        self.documents_by_request[self._request_key(path, params)] = document
+
+    def get_document(self, path: str, params: dict[str, Any]) -> Any:
+        self.calls.append((path, dict(params)))
+        return self.documents_by_request[self._request_key(path, params)]
 
     def get_records(self, path: str, params: dict[str, Any]) -> list[dict[str, Any]]:
         self.calls.append((path, dict(params)))
@@ -99,6 +116,33 @@ def cleanup() -> Iterator[list[str]]:
     yield used
     with SessionLocal() as s:
         for cod in used:
+            if len(cod) == 2:
+                s.execute(
+                    delete(IngestionLog).where(
+                        IngestionLog.fonte == FONTE_IBGE_MALHA,
+                        IngestionLog.cod_ibge == cod,
+                    )
+                )
+                s.execute(
+                    delete(DimEntrega).where(
+                        DimEntrega.relatorio == "IBGE-MALHA",
+                        DimEntrega.cod_ibge == cod,
+                    )
+                )
+                s.execute(
+                    delete(MartCoberturaFonte).where(
+                        MartCoberturaFonte.fonte == FONTE_IBGE_MALHA,
+                        MartCoberturaFonte.cod_ibge == cod,
+                    )
+                )
+                s.execute(
+                    delete(RawPayload).where(
+                        RawPayload.fonte == FONTE_IBGE_MALHA,
+                        RawPayload.cod_ibge == cod,
+                    )
+                )
+                s.execute(delete(GeoMalhaUf).where(GeoMalhaUf.uf == cod))
+                continue
             s.execute(delete(IngestionLog).where(IngestionLog.cod_ibge == cod))
             s.execute(delete(DimEntrega).where(DimEntrega.cod_ibge == cod))
             for model in (
@@ -133,6 +177,33 @@ def _count(model: type, **filtros: Any) -> int:
         for col, val in filtros.items():
             stmt = stmt.where(getattr(model, col) == val)
         return s.scalar(stmt) or 0
+
+
+def _malha_geojson(uf: str = "99", *, n_areas: int = 2) -> dict[str, Any]:
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {
+                    "codarea": f"{uf}{indice:05d}",
+                    "nomearea": f"Município {indice}",
+                },
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [
+                            [float(indice), 0.0],
+                            [float(indice), 1.0],
+                            [float(indice + 1), 1.0],
+                            [float(indice), 0.0],
+                        ]
+                    ],
+                },
+            }
+            for indice in range(1, n_areas + 1)
+        ],
+    }
 
 
 # ---------------- SADIPEM ----------------
@@ -471,6 +542,255 @@ def test_ibge_flatten_pesquisa_leaf_pib_per_capita() -> None:
             "valor": "27165.05",
         }
     ]
+
+
+def test_ibge_cliente_preserva_documento_geojson(monkeypatch) -> None:
+    payload = _malha_geojson("21")
+    client = IbgeAgregadosClient()
+    monkeypatch.setattr(client, "_get_json", lambda path, params: payload)
+    try:
+        assert client.get_document("v3/malhas/estados/21", {}) is payload
+    finally:
+        client.close()
+
+
+def test_ibge_malha_deduplica_uf_e_usa_endpoint_geojson_exato(
+    fake_client: FakeRecordsClient,
+) -> None:
+    connector = IbgeMalhaConnector(fake_client, cast(Any, None))
+    jobs = connector.discover(
+        {
+            "entes": ["21", "2111300", "2111201", "23", "2304400"],
+            "anos": [2021, 2022, 2026],
+            "versao": "teste",
+        }
+    )
+
+    assert [(job.cod_ibge, job.ano, job.periodo) for job in jobs] == [
+        ("21", 2022, "2022"),
+        ("23", 2022, "2022"),
+    ]
+
+    payload = _malha_geojson("21")
+    params = {
+        "periodo": "2022",
+        "intrarregiao": "municipio",
+        "formato": "application/vnd.geo+json",
+        "qualidade": "minima",
+    }
+    fake_client.set_document("v3/malhas/estados/21", params, payload)
+
+    assert connector.extract(jobs[0]) == {"geojson": payload, "qualidade": "minima"}
+    assert fake_client.calls == [("v3/malhas/estados/21", params)]
+
+
+@pytest.mark.parametrize(
+    ("payload", "mensagem"),
+    [
+        ({"type": "FeatureCollection", "features": []}, "não contém polígonos"),
+        (
+            {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"codarea": "2300001"},
+                        "geometry": {"type": "Polygon", "coordinates": [[[0, 0]]]},
+                    }
+                ],
+            },
+            "código municipal incompatível",
+        ),
+        (
+            {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"codarea": "2100001"},
+                        "geometry": None,
+                    }
+                ],
+            },
+            "geometria municipal inválida",
+        ),
+    ],
+)
+def test_ibge_malha_rejeita_geojson_invalido(
+    fake_client: FakeRecordsClient, payload: dict[str, Any], mensagem: str
+) -> None:
+    connector = IbgeMalhaConnector(fake_client, cast(Any, None))
+    params = {
+        "periodo": "2022",
+        "intrarregiao": "municipio",
+        "formato": "application/vnd.geo+json",
+        "qualidade": "minima",
+    }
+    fake_client.set_document("v3/malhas/estados/21", params, payload)
+    job = connector.discover({"entes": ["21"], "anos": [2022], "versao": "teste"})[0]
+
+    with pytest.raises(ValueError, match=mensagem):
+        connector.extract(job)
+
+
+def test_ibge_malha_job_normaliza_persiste_e_protege_vigencia(
+    client, make_org, fake_client, cleanup
+) -> None:
+    uf = "98"
+    municipios = ["9800001", "9800002"]
+    cleanup.extend([uf, *municipios])
+    payload_vigente = _malha_geojson(uf, n_areas=2)
+    params = {
+        "periodo": "2022",
+        "intrarregiao": "municipio",
+        "formato": "application/vnd.geo+json",
+        "qualidade": "minima",
+    }
+
+    with SessionLocal() as s:
+        for cod_ibge in municipios:
+            s.merge(
+                DimEnte(
+                    cod_ibge=cod_ibge,
+                    nome=f"Município {cod_ibge}",
+                    esfera="municipal",
+                    uf=uf,
+                )
+            )
+        s.commit()
+    path = f"v3/malhas/estados/{uf}"
+    fake_client.set_document(path, params, payload_vigente)
+    org = make_org(tipo_conta="estado", entes=[uf, "9800001", "9800002"])
+    token = login(client, org.email, org.senha)
+    body = {
+        "fonte": FONTE_IBGE_MALHA,
+        "entes": ["9800001", "9800002"],
+        "anos": [2021, 2022, 2026],
+        "versao": "malha-vigente",
+    }
+
+    primeira = client.post("/admin/ingestion/run", json=body, headers=auth_header(token))
+
+    assert primeira.status_code == 202, primeira.text
+    primeiro_job = primeira.json()["job"]
+    assert primeiro_job["status"] == "concluido"
+    assert primeiro_job["entes"] == [uf]
+    assert primeiro_job["periodos"] == ["2022"]
+    assert primeiro_job["itens_total"] == 1
+    assert primeiro_job["resultado"]["resumo_execucao"]["silver_rows"] == 1
+    assert fake_client.calls == [(path, params)]
+
+    # Mesma chave é idempotente: consulta novamente a origem, mas não duplica bronze/gold.
+    repetida = client.post("/admin/ingestion/run", json=body, headers=auth_header(token))
+    assert repetida.status_code == 202, repetida.text
+    assert repetida.json()["job"]["resultado"]["resumo_execucao"]["pulados"] == 1
+
+    # Uma entrega histórica pode ser preservada no bronze sem rebaixar o mapa servido.
+    fake_client.set_document(path, params, _malha_geojson(uf, n_areas=1))
+    historica = client.post(
+        "/admin/ingestion/run",
+        json={
+            **body,
+            "versao": "malha-historica",
+            "homologada_em": "2000-01-01T00:00:00Z",
+        },
+        headers=auth_header(token),
+    )
+    assert historica.status_code == 202, historica.text
+    resumo_historico = historica.json()["job"]["resultado"]["resumo_execucao"]
+    assert resumo_historico["silver_rows"] == 0
+    assert resumo_historico["versoes_vigentes"] == []
+
+    replay = client.post(
+        "/admin/ingestion/replay",
+        params={"ente": uf, "periodo": "2022", "fonte": FONTE_IBGE_MALHA},
+        headers=auth_header(token),
+    )
+    assert replay.status_code == 202, replay.text
+    assert replay.json()["job"]["status"] == "concluido"
+    resumo_replay = replay.json()["job"]["resultado"]["resumo_execucao"]
+    assert resumo_replay["silver_rows"] == 1
+    assert resumo_replay["versoes_vigentes"] == ["malha-vigente"]
+
+    # ``force`` reprocessa o bronze já guardado; uma resposta nova sob a mesma versão
+    # não pode sobrescrever gold e criar divergência com um replay posterior.
+    fake_client.set_document(path, params, _malha_geojson(uf, n_areas=3))
+    forcada = client.post(
+        "/admin/ingestion/run",
+        json={**body, "force": True},
+        headers=auth_header(token),
+    )
+    assert forcada.status_code == 202, forcada.text
+    job_forcado = forcada.json()["job"]
+    assert job_forcado["status"] == "concluido"
+    assert job_forcado["resultado"]["resumo_execucao"]["silver_rows"] == 1
+
+    # Uma versão realmente nova e incompleta continua sendo recusada, sem rebaixar a
+    # entrega vigente que já passou pela validação de catálogo.
+    fake_client.set_document(path, params, _malha_geojson(uf, n_areas=1))
+    incompleta = client.post(
+        "/admin/ingestion/run",
+        json={**body, "versao": "malha-incompleta"},
+        headers=auth_header(token),
+    )
+    assert incompleta.status_code == 202, incompleta.text
+    job_incompleto = incompleta.json()["job"]
+    assert job_incompleto["status"] == "falhou"
+    assert "faltam 1 município" in job_incompleto["resultado"]["itens"][0]["erro"]
+
+    resposta_malha = client.get(f"/geo/malha/{uf}", headers=auth_header(token))
+    assert resposta_malha.status_code == 200, resposta_malha.text
+    assert resposta_malha.json() == {
+        "uf": uf,
+        "formato": "geojson",
+        "fonte": "IBGE — API de malhas v3",
+        "ano": 2022,
+        "n_areas": 2,
+        "simplificacao": "minima",
+        "malha": payload_vigente,
+    }
+
+    status = client.get(
+        "/admin/ingestion/status",
+        params={"fonte": FONTE_IBGE_MALHA},
+        headers=auth_header(token),
+    )
+    assert status.status_code == 200, status.text
+    versoes = [row for row in status.json() if row["cod_ibge"] == uf]
+    assert {row["versao_entrega"] for row in versoes} == {
+        "malha-vigente",
+        "malha-historica",
+    }
+    assert [row["versao_entrega"] for row in versoes if row["vigente"]] == ["malha-vigente"]
+
+    with SessionLocal() as s:
+        malha = s.get(GeoMalhaUf, uf)
+        vigente = s.scalar(
+            select(DimEntrega).where(
+                DimEntrega.cod_ibge == uf,
+                DimEntrega.relatorio == "IBGE-MALHA",
+                DimEntrega.periodo == "2022",
+                DimEntrega.vigente.is_(True),
+            )
+        )
+        cobertura_mod.refresh_cobertura(s)
+        cobertura = s.get(MartCoberturaFonte, (FONTE_IBGE_MALHA, uf, "2022"))
+        assert malha is not None
+        assert malha.formato == "geojson"
+        assert malha.simplificacao == "minima"
+        assert malha.fonte == "IBGE — API de malhas v3"
+        assert malha.ano == 2022
+        assert malha.n_areas == 2
+        assert malha.malha == payload_vigente
+        assert vigente is not None
+        assert vigente.versao_entrega == "malha-vigente"
+        assert cobertura is not None
+        assert cobertura.n_registros == 2
+        assert cobertura.versao_entrega_vigente == "malha-vigente"
+        assert cobertura.defasagem_periodos == 0
+        s.rollback()
+
+    assert _count(RawPayload, fonte=FONTE_IBGE_MALHA, cod_ibge=uf) == 2
 
 
 @pytest.mark.parametrize(

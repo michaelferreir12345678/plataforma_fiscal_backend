@@ -23,6 +23,7 @@ from app.modules.ingestion.models import (
     FONTE_EXTRATOS,
     FONTE_FPM,
     FONTE_FUNDEB,
+    FONTE_IBGE_MALHA,
     FONTE_IBGE_PIB,
     FONTE_IBGE_POPULACAO,
     FONTE_MSC,
@@ -77,10 +78,10 @@ FAMILIES: list[dict[str, Any]] = [
     },
     {
         "codigo": "IBGE",
-        "nome": "IBGE — População e PIB",
+        "nome": "IBGE — População, PIB e malhas",
         "categoria": "complementar",
-        "descricao": "População e PIB municipal (enriquecimento de dim_ente e coortes).",
-        "fontes": [FONTE_IBGE_POPULACAO, FONTE_IBGE_PIB],
+        "descricao": "População, PIB e malha geográfica municipal por UF.",
+        "fontes": [FONTE_IBGE_POPULACAO, FONTE_IBGE_PIB, FONTE_IBGE_MALHA],
     },
     {
         "codigo": "FPM",

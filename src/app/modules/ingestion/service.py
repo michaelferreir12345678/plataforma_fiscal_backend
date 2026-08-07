@@ -155,7 +155,8 @@ def run(session: Session, resolver: ClientResolver, req: RunRequest) -> RunResul
         else:
             pulados += 1
         silver_rows += result.silver_rows
-        versoes.add(result.versao_entrega)
+        if result.vigente:
+            versoes.add(result.versao_entrega)
 
     return RunResult(
         fonte=req.fonte,
@@ -303,9 +304,10 @@ def replay(
         connector = _connector(f, resolver.get(f))
         for bronze in repository.list_bronze(session, fonte=f, cod_ibge=ente, periodo=periodo):
             job = _job_from_bronze(f, bronze)
-            repo.register_entrega(session, job, bronze.hash_payload)
+            entrega = repo.register_entrega(session, job, bronze.hash_payload)
             silver_rows += connector.to_silver(session, job, bronze.payload, bronze.versao)
-            versoes.add(bronze.versao)
+            if entrega.vigente:
+                versoes.add(entrega.versao_entrega)
             total += 1
     return RunResult(
         fonte=fonte or "todas",

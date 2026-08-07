@@ -294,13 +294,17 @@ class TesouroTransferenciasClient(JsonEnvelopeRecordsClient):
 
 
 class IbgeAgregadosClient(_BaseHttpClient):
-    """Cliente IBGE: achata agregados v3 e indicadores leaf da API de Pesquisas v1."""
+    """Cliente IBGE: documentos crus, agregados v3 e indicadores da API de Pesquisas v1."""
 
     def __init__(self, base_url: str = IBGE_BASE_URL, **kwargs: Any) -> None:
         super().__init__(base_url, **kwargs)
 
+    def get_document(self, path: str, params: dict[str, Any]) -> Any:
+        """Preserva documentos JSON que não são tabelas, como o GeoJSON das malhas."""
+        return self._get_json(path, params)
+
     def get_records(self, path: str, params: dict[str, Any]) -> list[dict[str, Any]]:
-        data = self._get_json(path, params)
+        data = self.get_document(path, params)
         return self.flatten(data)
 
     @staticmethod

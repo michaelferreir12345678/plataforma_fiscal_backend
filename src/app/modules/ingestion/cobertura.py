@@ -20,11 +20,13 @@ from sqlalchemy import Integer, String, cast, delete, extract, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from app.modules.dashboard.estadual_models import GeoMalhaUf
 from app.modules.ingestion.connectors.registry import (
     FONTE_META,
     FONTE_RELATORIO,
 )  # noqa: F401  (FONTE_RELATORIO reexportado p/ conveniência de callers/testes)
 from app.modules.ingestion.models import (
+    FONTE_IBGE_MALHA,
     BcbIndice,
     CatalogoFonte,
     DimEntrega,
@@ -293,7 +295,9 @@ def refresh_cobertura(session: Session, *, hoje: date | None = None) -> int:
     # Rematerialização completa: uma cobertura que sumiu (fonte retirou o período) deve
     # deixar de existir como linha, não persistir como zumbi de um refresh anterior.
     session.execute(delete(MartCoberturaFonte))
-    ingestion_times = _ingestion_times(session, _SILVER_ENTREGA_MODEL)
+    ingestion_times = _ingestion_times(
+        session, [*_SILVER_ENTREGA_MODEL, FONTE_IBGE_MALHA]
+    )
 
     # (1) Fontes por-ente registradas em dim_entrega (SICONFI/IBGE): cobertura da versão vigente.
     for fonte, (model, periodo_col) in _SILVER_ENTREGA_MODEL.items():
@@ -346,7 +350,53 @@ def refresh_cobertura(session: Session, *, hoje: date | None = None) -> int:
                 },
             )
 
-    # (2) Fontes nacionais ('BR' em dim_entrega) cujo dado por-ente vive no silver.
+    # (2) Malha territorial: a unidade de cobertura é a UF e o dado útil é a quantidade
+    # de polígonos, não uma contagem artificial de uma linha silver. O LEFT JOIN também
+    # preserva malhas legadas sem dim_entrega; o primeiro job novo passa a versioná-las.
+    relatorio_malha = FONTE_RELATORIO[FONTE_IBGE_MALHA]
+    rows_malha = session.execute(
+        select(
+            GeoMalhaUf.uf,
+            GeoMalhaUf.ano,
+            GeoMalhaUf.n_areas,
+            DimEntrega.periodo,
+            DimEntrega.versao_entrega,
+        ).outerjoin(
+            DimEntrega,
+            (DimEntrega.cod_ibge == GeoMalhaUf.uf)
+            & (DimEntrega.relatorio == relatorio_malha)
+            & DimEntrega.vigente.is_(True),
+        )
+    ).all()
+    for uf, ano_malha, n_areas, periodo_entrega, versao in rows_malha:
+        periodo = str(periodo_entrega or ano_malha or 0)
+        ingerido_em = (
+            _resolve_ingestion_time(
+                ingestion_times,
+                fonte=FONTE_IBGE_MALHA,
+                cod_ibge=str(uf),
+                periodo=periodo,
+                versao=str(versao),
+            )
+            if versao is not None
+            else None
+        )
+        valores_cobertura.append(
+            {
+                "fonte": FONTE_IBGE_MALHA,
+                "cod_ibge": uf,
+                "periodo": periodo,
+                "uf": uf,
+                "ano": int(ano_malha or 0),
+                "n_registros": int(n_areas or 0),
+                "versao_entrega_vigente": versao,
+                "ingerido_em": ingerido_em,
+                "defasagem_periodos": 0,
+                "atualizado_em": agora,
+            }
+        )
+
+    # (3) Fontes nacionais ('BR' em dim_entrega) cujo dado por-ente vive no silver.
     # A entrega dessas fontes é 'BR' (arquivo/API nacional); a versão corrente é a última
     # materializada no próprio silver (replace por versão), não uma linha de dim_entrega.
     for fonte, spec in _SILVER_POR_ENTE.items():
@@ -375,7 +425,7 @@ def refresh_cobertura(session: Session, *, hoje: date | None = None) -> int:
                 },
             )
 
-    # (3) BCB (séries nacionais, sem ente): uma linha por série.
+    # (4) BCB (séries nacionais, sem ente): uma linha por série.
     bcb_vigente = session.scalar(
         select(DimEntrega.versao_entrega)
         .where(DimEntrega.relatorio == "BCB", DimEntrega.vigente.is_(True))

@@ -960,6 +960,38 @@ def _recalcular(session: Session, job: IngestJob, entes_ok: list[str]) -> dict[s
         }
 
     from app.modules.ingestion import cobertura as cobertura_mod
+    from app.modules.ingestion.models import FONTE_IBGE_MALHA
+
+    if job.fonte == FONTE_IBGE_MALHA:
+        # O conector já atualiza a projeção geográfica vigente. Malha não alimenta
+        # fatos fiscais nem checks de RREO/RGF; aqui resta apenas publicar sua cobertura.
+        session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _COVERAGE_LOCK})
+        antes = _cobertura_count(session, job)
+        cobertura_mod.refresh_cobertura(session)
+        depois = _cobertura_count(session, job)
+        itens = (job.resultado or {}).get("itens", [])
+        atualizou_malha = any(
+            item.get("ok") and int(item.get("silver_rows", 0) or 0) > 0
+            for item in itens
+            if isinstance(item, dict)
+        )
+        recalculados_malha = ["gold.mart_cobertura_fonte"]
+        if atualizou_malha:
+            recalculados_malha.insert(0, "gold.geo_malha_uf")
+        return {
+            "qualidade": {
+                "entes": 0,
+                "falha": 0,
+                "aviso": 0,
+                "alertas": 0,
+                "codigos_falha": [],
+            },
+            "indicadores_recalculados": recalculados_malha,
+            "cobertura_antes": antes,
+            "cobertura_depois": depois,
+            "delta_cobertura": depois - antes,
+        }
+
     from app.workers import materialize
 
     stats = materialize.materialize_scope(entes) if entes else {}

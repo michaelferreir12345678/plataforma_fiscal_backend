@@ -559,6 +559,52 @@ PROCEDENCIA: dict[str, Procedencia] = {
             ),
         ),
     ),
+    "ibge_malha": Procedencia(
+        acesso="api_rest",
+        portal="https://www.ibge.gov.br/geociencias/organizacao-do-territorio/malhas-territoriais.html",
+        documentacao="https://servicodados.ibge.gov.br/api/docs/malhas",
+        como_funciona=(
+            "Uma chamada por UF devolve uma FeatureCollection GeoJSON com os polígonos "
+            "de todos os seus municípios. Estado e códigos municipais são normalizados "
+            "para o mesmo prefixo de dois dígitos antes do job, por isso vários anos ou "
+            "municípios da mesma UF nunca repetem o download."
+        ),
+        endpoints=(
+            Endpoint(
+                metodo="GET",
+                url=f"{IBGE}v3/malhas/estados/{{uf}}",
+                formato="GeoJSON (FeatureCollection)",
+                o_que_traz="Polígonos municipais usados no mapa coroplético da visão estadual.",
+                parametros=(
+                    Parametro("uf", "21", "Código IBGE da Unidade da Federação."),
+                    Parametro(
+                        "periodo",
+                        "2022",
+                        "Fixo: edição territorial persistida e servida pelo mapa.",
+                    ),
+                    Parametro(
+                        "intrarregiao",
+                        "municipio",
+                        "Fixo: divide a malha estadual em polígonos municipais.",
+                    ),
+                    Parametro(
+                        "formato",
+                        "application/vnd.geo+json",
+                        "Solicita GeoJSON diretamente à API.",
+                    ),
+                    Parametro(
+                        "qualidade",
+                        "minima",
+                        "Simplificação adequada à renderização web do mapa.",
+                    ),
+                ),
+                exemplo=(
+                    f"{IBGE}v3/malhas/estados/21?periodo=2022&intrarregiao=municipio"
+                    "&formato=application%2Fvnd.geo%2Bjson&qualidade=minima"
+                ),
+            ),
+        ),
+    ),
     # ====================== Transferências constitucionais ======================
     "tesouro_fpm": Procedencia(
         acesso="api_rest",

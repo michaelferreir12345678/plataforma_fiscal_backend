@@ -66,6 +66,16 @@ class TestLeque:
         for fonte in ("bcb", "tesouro_capag"):
             assert FONTE_META[fonte].consulta_por_ente is False
 
+    def test_malha_entra_no_leque_uma_vez_por_uf(self) -> None:
+        from app.modules.ingestion.integracoes import FAMILIES
+
+        meta = FONTE_META["ibge_malha"]
+        familia_ibge = next(familia for familia in FAMILIES if familia["codigo"] == "IBGE")
+        assert "ibge_malha" in familia_ibge["fontes"]
+        assert meta.consulta_por_ente is True
+        assert meta.agrupar_por_uf is True
+        assert meta.ano_fixo == 2022
+
 
 class TestTransferenciasPelaApi:
     def test_fpm_e_genericas_deixaram_de_ser_planilha(self) -> None:

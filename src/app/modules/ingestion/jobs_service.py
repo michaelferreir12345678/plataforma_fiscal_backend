@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -60,6 +60,23 @@ def _fonte_nacional(fonte: str) -> bool:
 
 def _normalizar_entes(fonte: str, entes: list[str]) -> list[str]:
     normalizados = list(dict.fromkeys(str(e).strip() for e in entes if str(e).strip()))
+    meta = FONTE_META.get(fonte)
+    if meta is not None and meta.agrupar_por_uf:
+        ufs: list[str] = []
+        for codigo in normalizados:
+            if not codigo.isdigit() or len(codigo) not in (2, 7):
+                raise AppError(
+                    status=422,
+                    title="Código IBGE inválido",
+                    detail=(
+                        f"'{codigo}' não identifica UF nem município. "
+                        "Use 2 dígitos para UF ou 7 para município."
+                    ),
+                )
+            uf = codigo if len(codigo) == 2 else codigo[:2]
+            if uf not in ufs:
+                ufs.append(uf)
+        return ufs
     if not normalizados and _fonte_nacional(fonte):
         return ["BR"]
     return normalizados
@@ -81,12 +98,16 @@ def estimar(
         return len(entes) * len(create.periodos) * n_fontes
 
     payload = run_payload or {}
-    anos = list(payload.get("anos") or create.anos)
+    meta = FONTE_META.get(create.fonte)
+    anos = (
+        [meta.ano_fixo]
+        if meta is not None and meta.ano_fixo is not None
+        else list(payload.get("anos") or create.anos)
+    )
     periodos = list(payload.get("periodos") or [])
     if create.fonte == "bcb":
         return len(payload.get("series") or (11, 189, 433))
 
-    meta = FONTE_META.get(create.fonte)
     multiplicador = (
         len(periodos)
         if periodos
@@ -115,9 +136,19 @@ def _validar_assinatura(session: Session, principal: Principal) -> None:
 def _validar_entes_no_escopo(
     session: Session,
     principal: Principal,
+    fonte: str,
     entes: list[str],
 ) -> None:
     permitidos = scope.carteira_scope_ibges(session, principal)
+    meta = FONTE_META.get(fonte)
+    if meta is not None and meta.agrupar_por_uf:
+        ufs_permitidas = {
+            codigo[:2] for codigo in permitidos if codigo.isdigit() and len(codigo) in (2, 7)
+        }
+        for uf in entes:
+            if uf not in ufs_permitidas:
+                raise ScopeForbiddenError(uf)
+        return
     for ente in entes:
         if ente != "BR" and ente not in permitidos:
             raise ScopeForbiddenError(ente)
@@ -145,11 +176,17 @@ def _validar(
         raise AppError(status=422, title="Sem entes", detail="Selecione ao menos um ente.")
     if tipo == "replay" and not periodos:
         raise AppError(status=422, title="Sem períodos", detail="Replay exige períodos.")
-    if tipo != "replay" and not anos and not _fonte_nacional(fonte):
+    meta = FONTE_META.get(fonte)
+    if (
+        tipo != "replay"
+        and not anos
+        and not _fonte_nacional(fonte)
+        and not (meta is not None and meta.ano_fixo is not None)
+    ):
         raise AppError(status=422, title="Sem exercícios", detail="Informe ao menos um ano.")
 
     _validar_assinatura(session, principal)
-    _validar_entes_no_escopo(session, principal, entes)
+    _validar_entes_no_escopo(session, principal, fonte, entes)
 
 
 def _audit_json(
@@ -209,11 +246,17 @@ def audit_job_result(session: Session, job: IngestJob) -> None:
 def _run_payload_from_create(create: IngestJobCreate, entes: list[str]) -> dict[str, Any]:
     extras = dict(create.parametros)
     extras.pop("confirmar", None)
+    meta = FONTE_META.get(create.fonte)
+    anos = (
+        [meta.ano_fixo]
+        if meta is not None and meta.ano_fixo is not None
+        else list(create.anos)
+    )
     payload = {
         **extras,
         "fonte": create.fonte,
         "entes": [] if entes == ["BR"] and _fonte_nacional(create.fonte) else entes,
-        "anos": list(create.anos),
+        "anos": anos,
         "versao": create.versao,
     }
     return RunRequest.model_validate(payload).model_dump(mode="json", exclude={"confirmar"})
@@ -239,16 +282,34 @@ def _criar(
     )
     if run_payload is None and create.tipo != "replay":
         run_payload = _run_payload_from_create(create, entes)
+    if run_payload is not None and create.tipo != "replay":
+        # O endpoint legado entrega seu payload pronto; normalize-o também, para que o
+        # worker use exatamente as mesmas unidades persistidas no job durável.
+        run_payload = {
+            **run_payload,
+            "entes": [] if entes == ["BR"] and _fonte_nacional(create.fonte) else entes,
+        }
+        meta = FONTE_META.get(create.fonte)
+        if meta is not None and meta.ano_fixo is not None:
+            run_payload["anos"] = [meta.ano_fixo]
+        if meta is not None and meta.agrupar_por_uf and not run_payload.get("versao"):
+            # Persiste uma captura única no job: todas as UFs e eventuais retries usam
+            # a mesma versão, mas uma nova execução pode reativar conteúdo já visto.
+            run_payload["versao"] = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     estimativa = estimar(create, run_payload=run_payload)
+    chaves_planejadas = (
+        list(create.periodos)
+        if create.tipo == "replay"
+        else [str(a) for a in ((run_payload or {}).get("anos") or create.anos)]
+    )
 
     audit_base = {
         "job_id": None,
         "fonte": create.fonte,
         "tipo": create.tipo,
         "entes": entes,
-        "periodos": list(create.periodos)
-        if create.tipo == "replay"
-        else [str(a) for a in create.anos],
+        "entes_solicitados": list(create.entes),
+        "periodos": chaves_planejadas,
         "parametros": run_payload if create.tipo != "replay" else dict(create.parametros),
         "confirmar": create.confirmar,
         "estimativa_itens": estimativa,
@@ -267,9 +328,7 @@ def _criar(
             limiar=LIMIAR_CONFIRMACAO,
         )
 
-    periodos_display = (
-        list(create.periodos) if create.tipo == "replay" else [str(a) for a in create.anos]
-    )
+    periodos_display = chaves_planejadas
     parametros = (
         {
             **dict(create.parametros),
@@ -293,11 +352,7 @@ def _criar(
             "parametros": parametros,
             "status": STATUS_NA_FILA,
             "itens_total": max(
-                len(entes)
-                * max(
-                    len(create.periodos if create.tipo == "replay" else create.anos),
-                    1,
-                ),
+                len(entes) * max(len(chaves_planejadas), 1),
                 1,
             ),
         },
@@ -477,7 +532,7 @@ def retry(session: Session, principal: Principal, job_id: uuid.UUID) -> IngestJo
         raise AppError(status=404, title="Job inexistente", detail=str(job_id))
     # O escopo pode ter sido reduzido desde a criação (carteira ou membership_escopo).
     # Retry é uma nova ação privilegiada e deve revalidar o estado de autorização atual.
-    _validar_entes_no_escopo(session, principal, list(atual.entes))
+    _validar_entes_no_escopo(session, principal, atual.fonte, list(atual.entes))
     if atual.status != STATUS_FALHOU:
         raise AppError(
             status=409,

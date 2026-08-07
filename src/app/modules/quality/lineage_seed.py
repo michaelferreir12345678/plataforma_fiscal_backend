@@ -21,6 +21,7 @@ from dataclasses import dataclass
 
 TIPO_FONTE_BRONZE = "fonte_bronze"
 TIPO_BRONZE_SILVER = "bronze_silver"
+TIPO_BRONZE_GOLD = "bronze_gold"
 TIPO_SILVER_GOLD = "silver_gold"
 TIPO_GOLD_ENDPOINT = "gold_endpoint"
 TIPO_ENDPOINT_PAGINA = "endpoint_pagina"
@@ -60,8 +61,13 @@ _FONTE_BRONZE: tuple[tuple[str, str, str], ...] = (
 # --- bronze → silver (mesma família, normalizada) --------------------------- #
 _BRONZE_SILVER: tuple[str, ...] = (
     "siconfi_rreo", "siconfi_rgf", "siconfi_dca", "siconfi_msc", "siconfi_entes",
-    "sadipem_pvl", "bcb_indice", "ibge_populacao", "ibge_pib", "ibge_malha",
+    "sadipem_pvl", "bcb_indice", "ibge_populacao", "ibge_pib",
     "tesouro_fpm", "tesouro_capag", "fnde_fundeb_repasse", "siops_saude", "siope_educacao",
+)
+
+# --- bronze → gold (projeção direta de documentos não tabulares) ----------------- #
+_BRONZE_GOLD: tuple[tuple[str, str, str], ...] = (
+    ("bronze.ibge_malha", "gold.geo_malha_uf", "GeoJSON municipal vigente por UF"),
 )
 
 # --- silver → gold ---------------------------------------------------------- #
@@ -86,7 +92,6 @@ _SILVER_GOLD: tuple[tuple[str, str, str], ...] = (
     ("silver.bcb_indice", "gold.fato_projecao", "exógenas das projeções"),
     ("silver.ibge_populacao", "gold.dim_ente", "população conformada"),
     ("silver.ibge_pib", "gold.dim_coorte", "faixa de PIB das coortes"),
-    ("silver.ibge_malha", "gold.dim_malha", "geometria por UF"),
     ("silver.tesouro_fpm", "gold.fato_receita", "conciliação de transferências"),
     ("silver.tesouro_capag", "gold.fato_capag", "nota A–D"),
     ("silver.fnde_fundeb_repasse", "gold.fato_educacao", "enriquecimento FUNDEB"),
@@ -126,7 +131,7 @@ _GOLD_ENDPOINT: tuple[tuple[str, str], ...] = (
     ("gold.mart_carteira", "GET /carteira/resumo"),
     ("gold.mart_consolidado_uf", "GET /uf/{uf}/consolidado"),
     ("gold.dim_ente", "GET /entes"),
-    ("gold.dim_malha", "GET /uf/{uf}/malha"),
+    ("gold.geo_malha_uf", "GET /geo/malha/{uf}"),
     ("gold.calendario_obrigacao", "GET /entes/{ibge}/calendario"),
     ("gold.norma_chunk", "POST /assistant/perguntar"),
     ("gold.data_quality_check", "GET /admin/qualidade"),
@@ -159,7 +164,7 @@ _ENDPOINT_PAGINA: tuple[tuple[str, str], ...] = (
     ("GET /entes/{ibge}/calendario", "/alertas"),
     ("GET /carteira/resumo", "/carteira"),
     ("GET /uf/{uf}/consolidado", "/carteira"),
-    ("GET /uf/{uf}/malha", "/carteira"),
+    ("GET /geo/malha/{uf}", "/carteira"),
     ("POST /assistant/perguntar", "/assistente"),
     ("GET /admin/qualidade", "/central-dados"),
     ("GET /admin/lineage", "/central-dados"),
@@ -187,6 +192,8 @@ def arestas() -> list[Aresta]:
             Aresta(f"bronze.{nome}", f"silver.{nome}", TIPO_BRONZE_SILVER,
                    {"nota": "normalização e tipagem; idempotente por versão de entrega"})
         )
+    for origem, destino, nota in _BRONZE_GOLD:
+        resultado.append(Aresta(origem, destino, TIPO_BRONZE_GOLD, {"nota": nota}))
     for origem, destino, nota in _SILVER_GOLD:
         resultado.append(Aresta(origem, destino, TIPO_SILVER_GOLD, {"nota": nota}))
     for origem, destino in _GOLD_ENDPOINT:

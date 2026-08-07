@@ -338,6 +338,84 @@ def test_pos_job_nacional_atualiza_cobertura(
     assert "qualidade" in resultado
 
 
+def test_pos_job_malha_atualiza_so_cobertura_sem_materializacao_fiscal(
+    monkeypatch,
+) -> None:
+    from app.modules.ingestion import cobertura as cobertura_mod
+    from app.modules.ingestion.models import FONTE_IBGE_MALHA
+    from app.workers import materialize
+
+    job = SimpleNamespace(
+        fonte=FONTE_IBGE_MALHA,
+        entes=["21"],
+        periodos=["2022"],
+        resultado={"itens": [{"ok": True, "silver_rows": 1}]},
+    )
+    contagens = iter([0, 1])
+    refresh_calls: list[bool] = []
+    monkeypatch.setattr(
+        ingest_jobs,
+        "_cobertura_count",
+        lambda session, current_job: next(contagens),
+    )
+    monkeypatch.setattr(
+        cobertura_mod,
+        "refresh_cobertura",
+        lambda session: refresh_calls.append(True) or 1,
+    )
+    monkeypatch.setattr(
+        materialize,
+        "materialize_scope",
+        lambda entes: pytest.fail(f"malha não materializa fatos fiscais: {entes}"),
+    )
+    monkeypatch.setattr(
+        ingest_jobs,
+        "_rodar_checks_pos_carga",
+        lambda session, current_job, entes: pytest.fail(
+            f"malha não roda checks de RREO/RGF: {entes}"
+        ),
+    )
+
+    with admin_session() as session:
+        resultado = ingest_jobs._recalcular(session, job, ["21"])
+
+    assert refresh_calls == [True]
+    assert resultado == {
+        "qualidade": {
+            "entes": 0,
+            "falha": 0,
+            "aviso": 0,
+            "alertas": 0,
+            "codigos_falha": [],
+        },
+        "indicadores_recalculados": [
+            "gold.geo_malha_uf",
+            "gold.mart_cobertura_fonte",
+        ],
+        "cobertura_antes": 0,
+        "cobertura_depois": 1,
+        "delta_cobertura": 1,
+    }
+
+    job_historico = SimpleNamespace(
+        fonte=FONTE_IBGE_MALHA,
+        entes=["21"],
+        periodos=["2022"],
+        resultado={"itens": [{"ok": True, "silver_rows": 0}]},
+    )
+    contagens_historicas = iter([1, 1])
+    monkeypatch.setattr(
+        ingest_jobs,
+        "_cobertura_count",
+        lambda session, current_job: next(contagens_historicas),
+    )
+    with admin_session() as session:
+        historico = ingest_jobs._recalcular(session, job_historico, ["21"])
+
+    assert historico["indicadores_recalculados"] == ["gold.mart_cobertura_fonte"]
+    assert historico["delta_cobertura"] == 0
+
+
 def test_pos_job_capag_materializa_gold_e_cobertura(monkeypatch) -> None:
     from app.modules.ingestion import cobertura as cobertura_mod
     from app.workers import materialize
