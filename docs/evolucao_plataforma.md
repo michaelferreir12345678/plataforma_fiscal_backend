@@ -1926,6 +1926,67 @@ rotas sem gate e o de cópias da regra de período ENCOLHAM. make lint && make t
 
 ---
 
+#### Sprint A4_MSC/A4_SIOPS — dry-run e prova de escala das ingestões adiadas na A4
+
+**Objetivo:** fechar a lacuna que a A4 deixou aberta por volume, não por defeito: `MSC`,
+`SIOPS` e `SIOPE` têm conector completo e testado, mas cobertura real de **1 ente cada**
+(confirmado no banco de dev: `gold.dim_entrega` tem 1 `cod_ibge` só para os três
+`relatorio`; `gold.fato_msc_saldo` tem 8.285 linhas, todas do mesmo ente). Sem um jeito de
+medir o custo antes de pagar o custo, a decisão de escalar continua sendo chute.
+
+**Problema:** o motor de backfill resiliente já existe (`app/workers/backfill.py` —
+checkpoint, commit por unidade, guarda de disco) e já foi usado para a âncora CE (Sprint
+21, `scripts/backfill_sprint21.py`), mas **não tem modo `--dry-run`** em lugar nenhum — nem
+no motor, nem no script. Para MSC especificamente, cada unidade (ente × mês) custa **12
+chamadas** (`classe_conta` 1..4 × `id_tv` 3 tipos — `MscConnector.extract`,
+`connectors/siconfi.py:321-329`), o que faz 184 municípios × 12 meses × 12 chamadas ≈ **26
+mil requisições** por ano de histórico. Disparar isso ao vivo sem antes saber o número e o
+tempo estimado é a mesma classe de erro que a A5/A15 já ensinaram a não repetir: mudar
+volume grande sem medir antes.
+
+**Justificativa:** Patrimônio (MSC) e Saúde/Educação (SIOPS/SIOPE) são páginas do produto
+com cobertura de fato zero fora do ente-âncora — o selo de cobertura (A1) já declara isso
+honestamente, mas "declarar a lacuna" não é o mesmo que "ter o caminho para fechá-la".
+
+**Páginas afetadas:** Patrimônio (MSC), Saúde & Educação (SIOPS/SIOPE), Central de Dados
+(cobertura por fonte).
+
+**Tarefas:**
+- `--dry-run` no motor (`app/workers/backfill.py`) e/ou na camada de script: monta o plano
+  de `BackfillUnit` inteiro, soma o número de unidades e o número de chamadas HTTP
+  esperadas por unidade (1 para SIOPS/SIOPE, 12 para MSC), estima o tempo pelo rate-limit
+  já herdado do cliente SICONFI (~6 req/s) — **sem** chamar `extract`/`to_bronze`/`to_silver`
+  e **sem** tocar no checkpoint.
+- Novo script (ou extensão de `backfill_sprint21.py`) que monta o plano nacional (todos os
+  entes, não só CE) para `siconfi_msc`, `siops_saude`, `siope_educacao`, reusando
+  `_escopo_entes`/checkpoint/disk-guard do motor existente — sem duplicar a lógica de
+  retomada.
+- Registrar no documento o número real do dry-run (unidades, chamadas, tempo estimado) para
+  cada uma das três fontes, nacional e por ano de histórico disponível.
+- **Fora de escopo desta sprint:** disparar a carga nacional completa ao vivo. Os ~26 mil
+  chamadas de MSC sozinho são volume real contra uma API de terceiro — decisão de quando e
+  em que lote executar fica para quem acompanha a cota/rate-limit, não para a sprint.
+
+**Riscos:** rate-limit/bloqueio da API do Tesouro/MS/FNDE se a carga real for disparada sem
+throttle — mitigado por manter o `--dry-run` como produto desta sprint, não a carga em si.
+Custo de armazenamento do backfill completo de MSC (maior tabela do sistema, Sprint 12) —
+por isso o dry-run soma tempo **e** volume estimado de linhas antes de qualquer decisão.
+
+**Critérios de aceite:** `--dry-run` roda para as três fontes sem gravar nada (banco de dev
+antes/depois idêntico); relata unidades, chamadas HTTP e tempo estimado; o número de
+chamadas do MSC bate com `184 × meses × 12` (±ente-estado); documento atualizado com os
+números reais do dry-run rodado nesta sprint.
+
+**Testes:** `--dry-run` não altera `gold.dim_entrega`/`fato_msc_saldo`/checkpoint (asserção
+antes/depois); a contagem de chamadas estimadas para MSC bate com a fórmula documentada no
+conector; o plano nacional inclui o ente estadual e não duplica os já cobertos (mesma
+guarda de idempotência do checkpoint).
+
+**Evidências:** saída do `--dry-run` para as três fontes, com contagem de unidades/chamadas/
+tempo estimado, registrada no documento.
+
+---
+
 ### Sprint E1 — execução: o que foi feito, com evidência antes/depois
 
 > **Ressalva de método — atualizada após execução real.** O ambiente em que a E1 foi
