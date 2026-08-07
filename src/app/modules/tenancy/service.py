@@ -40,7 +40,11 @@ from app.modules.tenancy.schemas import (
     UserCreate,
     UserOut,
 )
-from app.shared.scope import EnteNaoLicenciadoError, cobertura_licenca
+from app.shared.scope import (
+    EnteNaoLicenciadoError,
+    cobertura_licenca,
+    invalidar_escopo_carteira,
+)
 
 _COMPETENCIA_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
@@ -305,6 +309,8 @@ def add_carteira_ente(
     ente = repository.add_carteira_ente(
         session, org_id=org_id, cod_ibge=data.cod_ibge, grupo=data.grupo, tag=data.tag
     )
+    # O escopo memorizado (A27) foi calculado sobre a carteira anterior a esta linha.
+    invalidar_escopo_carteira(session, org_id)
     return CarteiraEnteOut.model_validate(ente)
 
 
@@ -344,6 +350,9 @@ def carteira_lote(
             removidos.append(cod)
         else:
             ignorados.append(cod)
+    if adicionados or removidos:
+        # O escopo memorizado (A27) reflete a carteira de antes do lote.
+        invalidar_escopo_carteira(session, org_id)
     repository.insert_audit_log(
         session,
         org_id=org_id,

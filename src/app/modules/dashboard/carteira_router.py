@@ -69,15 +69,20 @@ def mapa(
     return carteira_service.build_mapa(session, principal, periodo, indicador=indicador)
 
 
-@router.post("/refresh", response_model=dict)
+@router.post("/refresh", response_model=LoteJobOut, status_code=202)
 def refresh(
     periodo: str = Query(..., description="Período RREO a materializar."),
     principal: Principal = Depends(require_capability("administrar")),
     session: Session = Depends(get_db),
-) -> dict:
-    """Materializa ``mart_carteira`` (snapshot vigente) para todo o escopo do usuário."""
-    total = carteira_service.refresh_scope(session, principal, periodo)
-    return {"periodo": periodo, "linhas_materializadas": total}
+) -> LoteJobOut:
+    """Enfileira a materialização de ``mart_carteira`` para todo o escopo do usuário.
+
+    **E1:** até aqui o handler percorria o escopo inteiro chamando ``refresh_mart_carteira``
+    ente a ente — 5.598 iterações dentro de uma requisição HTTP para uma licença global. O
+    trabalho passou a nascer como job durável (mesmo padrão de ``POST /carteira/lote``, que
+    já devolve 202); quem executa é o worker de carteira, fora do request.
+    """
+    return carteira_service.enfileirar_refresh(session, principal, periodo)
 
 
 @router.post("/lote/{acao}", response_model=LoteJobOut, status_code=202)

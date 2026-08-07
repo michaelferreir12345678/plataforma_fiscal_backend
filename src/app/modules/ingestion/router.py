@@ -30,6 +30,7 @@ from app.modules.ingestion.schemas import (
     RunRequest,
 )
 from app.shared.ingestion.client import ClientResolver, RealClientResolver
+from app.shared.scope import assert_ente_in_scope
 
 router = APIRouter(prefix="/admin/ingestion", tags=["ingestion"])
 
@@ -190,11 +191,19 @@ def ingestion_data(
     as_of: datetime | None = Query(
         None, description="Reproduz a versão vigente naquele instante (§6.5)."
     ),
-    _: Principal = Depends(require_capability("administrar")),
+    principal: Principal = Depends(require_capability("administrar")),
     session: Session = Depends(get_db),
 ) -> DataResponse:
-    """Leitura silver 'as of': versão vigente (default) ou histórica (``as_of``)."""
-    return service.read_data(session, fonte=fonte, ente=ente, periodo=periodo, as_of=as_of)
+    """Leitura silver 'as of': versão vigente (default) ou histórica (``as_of``).
+
+    **A22 (E1):** ``administrar`` é o topo do RBAC *dentro* de uma organização — não diz
+    nada sobre **quais entes** ela contratou. O gate de escopo/licença é conferido aqui e
+    de novo no serviço (§6.4).
+    """
+    assert_ente_in_scope(session, principal, ente)
+    return service.read_data(
+        session, principal=principal, fonte=fonte, ente=ente, periodo=periodo, as_of=as_of
+    )
 
 
 # --- Central de Dados: jobs assíncronos de ingestão (Sprint 24) ---

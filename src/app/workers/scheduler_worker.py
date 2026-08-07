@@ -25,7 +25,7 @@ from types import FrameType
 
 # Processo isolado: registra os mapeamentos antes da primeira query (ver models_registry).
 from app.core import models_registry as _models_registry  # noqa: F401
-from app.workers import quality_tasks, report_tasks
+from app.workers import carteira_tasks, quality_tasks, report_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -50,15 +50,20 @@ def main() -> int:
     report_tasks.recover_pending()
     report_tasks.executar_agendamentos()
 
+    # Refresh de carteira enfileirado antes de um restart também é trabalho pendente.
+    carteira_tasks.executar_pendentes()
+
     report_tasks.start_scheduler()
     quality_tasks.start_scheduler()
-    logger.info("scheduler_worker: relatórios e qualidade agendados")
+    carteira_tasks.start_scheduler()
+    logger.info("scheduler_worker: relatórios, qualidade e carteira agendados")
 
     try:
         _parar.wait()
     finally:
         report_tasks.stop_scheduler()
         quality_tasks.stop_scheduler()
+        carteira_tasks.stop_scheduler()
         logger.info("scheduler_worker: encerrado")
     return 0
 

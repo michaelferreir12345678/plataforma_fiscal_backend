@@ -26,16 +26,26 @@ class DataQualityCheck(Base):
     """gold.data_quality_check — uma verificação executada sobre um recorte de dado.
 
     Guarda os **dois lados** da comparação e a tolerância aplicada, não só o veredito:
-    um gestor que discorda do check precisa poder refazer a conta. A chave única é
-    ``(check, fonte, ente, período)`` — reexecutar atualiza o estado corrente em vez de
-    empilhar histórico, porque o que aciona alerta é o estado, não a série.
+    um gestor que discorda do check precisa poder refazer a conta.
+
+    A chave única é ``(check, fonte, ente, período, versão da entrega)``. A
+    ``versao_entrega`` entrou na E1 (A26): antes, reexecutar o check depois de uma
+    retificação **sobrescrevia** o resultado da versão anterior, e ninguém sabia sobre
+    qual entrega o "ok" guardado havia sido dado. Com a versão na chave, a retificação
+    cria linha nova e o histórico de vereditos acompanha o histórico do dado —
+    bitemporalidade (§6.5) valendo também para a verificação, não só para o valor.
     """
 
     __tablename__ = "data_quality_check"
     __table_args__ = (
         CheckConstraint("status IN ('ok', 'aviso', 'falha')", name="ck_data_quality_check_status"),
         UniqueConstraint(
-            "check_codigo", "fonte", "cod_ibge", "periodo", name="uq_data_quality_check_chave"
+            "check_codigo",
+            "fonte",
+            "cod_ibge",
+            "periodo",
+            "versao_entrega",
+            name="uq_data_quality_check_chave_versao",
         ),
         {"schema": "gold"},
     )
@@ -45,6 +55,11 @@ class DataQualityCheck(Base):
     fonte: Mapped[str] = mapped_column(Text, nullable=False)
     cod_ibge: Mapped[str | None] = mapped_column(String(7), nullable=True)
     periodo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: ``'-'`` (e não NULL) quando o check não se ancora numa entrega: NULL numa UNIQUE do
+    #: PostgreSQL é distinto de NULL, e o *upsert* deixaria de conflitar.
+    versao_entrega: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="-", default="-"
+    )
     check_codigo: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(8), nullable=False)
     esquerda: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)

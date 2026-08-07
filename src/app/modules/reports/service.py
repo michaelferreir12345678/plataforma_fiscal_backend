@@ -33,6 +33,7 @@ from app.modules.reports.schemas import (
     RelatorioSolicitacaoOut,
 )
 from app.modules.tenancy import repository as tenancy_repo
+from app.shared import periodo as periodo_util
 from app.shared.scope import assert_ente_in_scope, carteira_scope_ibges
 
 MODEL_DEFINITIONS: dict[str, dict[str, Any]] = {
@@ -385,13 +386,16 @@ def _jsonable(value: Any) -> Any:
 
 
 def _rgf_period(periodo: str) -> str:
-    match = re.fullmatch(r"(\d{4})-B([1-6])", periodo)
-    if match:
-        ano, bimestre = match.groups()
-        return f"{ano}-Q{(int(bimestre) + 1) // 2}"
-    if re.fullmatch(r"\d{4}-Q[1-3]", periodo):
-        return periodo
-    return f"{periodo[:4]}-Q3"
+    """RGF do **ciclo corrente**; período que a regra canônica não interpreta cai no Q3.
+
+    Delega à regra canônica (§6.6) — era uma das seis cópias da A25. O fallback para o
+    último quadrimestre do exercício é local e continua aqui de propósito: um relatório
+    precisa de um período concreto para renderizar, e a regra de calendário não deve
+    inventar um para quem pediu um exercício inteiro.
+    """
+    return periodo_util.em_periodo_rgf(periodo, quando=periodo_util.CICLO_CORRENTE) or (
+        f"{periodo[:4]}-Q3"
+    )
 
 
 def _delivery(

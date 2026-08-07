@@ -10,7 +10,7 @@ else
 	PY ?= ./.venv/bin/python
 endif
 
-.PHONY: help up down redis worker worker-logs queue-info smoke-infra bootstrap migrate revision seed test lint fmt run install
+.PHONY: help up down redis worker worker-logs queue-info smoke-infra bootstrap migrate revision seed test lint mypy fmt run install
 
 help:
 	@echo "Comandos disponiveis:"
@@ -28,6 +28,7 @@ help:
 	@echo "  make seed        - carrega 1 municipio + 1 estado de exemplo"
 	@echo "  make test        - pytest"
 	@echo "  make lint        - ruff + mypy"
+	@echo "  make mypy        - somente a checagem de tipos"
 	@echo "  make fmt         - ruff format + fix"
 	@echo "  make run         - uvicorn (dev)"
 
@@ -75,6 +76,10 @@ test:
 
 lint:
 	$(PY) -m ruff check src tests
+	$(PY) -m mypy
+
+# Alvo próprio para quem quer só a tipagem (o `lint` já a inclui).
+mypy:
 	$(PY) -m mypy
 
 fmt:

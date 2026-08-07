@@ -64,6 +64,23 @@ def mart_scope_identity(
     return int(count or 0), latest
 
 
+def get_lote_job(session: Session, job_id: uuid.UUID) -> CarteiraLoteJob | None:
+    """Job de lote por identificador (a RLS de ``op`` já restringe à organização)."""
+    return session.get(CarteiraLoteJob, job_id)
+
+
+def list_lote_jobs(
+    session: Session, *, acao: str | None = None, status: str | None = None, limite: int = 200
+) -> list[CarteiraLoteJob]:
+    """Jobs de lote visíveis na sessão, mais antigos primeiro (ordem de execução)."""
+    stmt = select(CarteiraLoteJob)
+    if acao is not None:
+        stmt = stmt.where(CarteiraLoteJob.acao == acao)
+    if status is not None:
+        stmt = stmt.where(CarteiraLoteJob.status == status)
+    return list(session.scalars(stmt.order_by(CarteiraLoteJob.criado_em).limit(limite)))
+
+
 def insert_lote_job(
     session: Session,
     *,

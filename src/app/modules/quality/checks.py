@@ -56,6 +56,11 @@ class ResultadoCheck:
     status: Status
     cod_ibge: str | None = None
     periodo: str | None = None
+    #: Entrega sobre a qual o check foi conferido (A26/E1). Sem ela, depois de uma
+    #: retificação ninguém sabe se o "ok" guardado se refere ao número novo ou ao velho —
+    #: e o resultado era sobrescrito sem rastro. ``None`` = check que não se ancora numa
+    #: entrega (freshness, execução agendada).
+    versao_entrega: str | None = None
     esquerda: Decimal | None = None
     direita: Decimal | None = None
     diferenca: Decimal | None = None

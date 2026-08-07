@@ -30,8 +30,18 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
 
-LOTE_ACOES: tuple[str, ...] = ("relatorio", "alerta")
+#: ``refresh`` entrou na E1: ``POST /carteira/refresh`` deixou de percorrer o escopo
+#: dentro da requisição (5.598 iterações num handler HTTP para uma licença global) e
+#: passou a nascer como job durável, no mesmo caminho de ``POST /carteira/lote/{acao}``.
+ACAO_REFRESH = "refresh"
+LOTE_ACOES: tuple[str, ...] = ("relatorio", "alerta", ACAO_REFRESH)
 _ACAO_SQL = ", ".join(f"'{a}'" for a in LOTE_ACOES)
+
+#: Ciclo de vida de um job de lote. ``enfileirado`` é o estado em que ele nasce.
+LOTE_STATUS_ENFILEIRADO = "enfileirado"
+LOTE_STATUS_EXECUTANDO = "executando"
+LOTE_STATUS_CONCLUIDO = "concluido"
+LOTE_STATUS_FALHOU = "falhou"
 
 
 class MartCarteira(Base):

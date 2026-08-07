@@ -46,6 +46,7 @@ from app.modules.dashboard.estadual_schemas import (
 )
 from app.modules.dashboard.service import COR_POR_FAIXA
 from app.modules.indicators.limites import LimiteLegal, classificar_faixa
+from app.shared import periodo as periodo_util
 from app.shared import scope
 from app.shared.envelope import DrillEnvelope
 from app.shared.hierarchy import HierarchyNode, build_drill_envelope
@@ -225,18 +226,17 @@ def assert_uf_in_scope(session: Session, principal: Principal, uf_prefixo: str) 
 
 # --- Períodos / limites ---
 def rgf_periodo_de(periodo_rreo: str) -> str | None:
-    """Mapeia o período RREO (bimestral) ao RGF (quadrimestral): Q = teto(bimestre/2).
+    """Mapeia o período RREO (bimestral) ao RGF do **ciclo corrente**: Q = teto(bimestre/2).
 
     Público (sem ``_``) porque a Sprint A6 (A18) passou a reusá-lo em
     ``cockpit_service.py`` para ancorar o explicador de pessoal no RGF do **mesmo
     ciclo** do período RREO selecionado — antes ele sempre usava o RGF mais recente do
     ente, ignorando o período pedido.
+
+    Delega à regra canônica (§6.6) — era uma das seis cópias da A25, com a mesma
+    semântica de teto que já tinha.
     """
-    try:
-        ano_s, bim_s = periodo_rreo.split("-B")
-        return f"{ano_s}-Q{math.ceil(int(bim_s) / 2)}"
-    except (ValueError, AttributeError):
-        return None
+    return periodo_util.em_periodo_rgf(periodo_rreo, quando=periodo_util.CICLO_CORRENTE)
 
 
 def _ano_de(periodo: str) -> int | None:

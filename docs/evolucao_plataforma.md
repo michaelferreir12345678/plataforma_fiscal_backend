@@ -397,12 +397,12 @@ hora: cada linha abaixo parecia achado e não é.
 
 | # | Achado | Evidência | Gravidade | Status |
 |---|---|---|---|---|
-| **A22** | `GET /ingestao/data?ente=` sem gate de escopo/licença | `ingestion/router.py:185-197`, `ingestion/service.py:377-407` | Alta (comercial/conformidade; o dado é público) | Confirmado no código · **E1** |
+| **A22** | `GET /ingestao/data?ente=` sem gate de escopo/licença | `ingestion/router.py:185-197`, `ingestion/service.py:377-407` | Alta (comercial/conformidade; o dado é público) | ✅ **Corrigido na E1** — `assert_ente_in_scope` no roteador **e** no serviço; três estados cobertos por teste |
 | **A23** | Check `mart_vs_detalhe_pessoal` compara o mart (RCL Ajustada) com um recálculo pela RCL cheia — falha falsa que vira alerta | `quality/checks.py:486-510` × `personnel/service.py:395-402` | Alta | Confirmado no código · alcance a medir |
 | **A24** | Leitura da RCL Ajustada do Anexo 01 sem filtro de coluna e com `limit(1)` sem ordenação | `personnel/service.py:157-169` | Alta se materializar (denominador do limite de pessoal) | Confirmado no código · **hipótese** de alcance |
-| **A25** | Conversão bimestre→quadrimestre reimplementada 6× em 2 semânticas; nenhuma cobre RGF semestral | `quality/service.py:83`, `cash_rap/service.py:96`, `result/service.py:95`, `benchmark/service.py:817`, `estadual_service.py:227`, `reports/service.py:391` | Média | Confirmado no código |
-| **A26** | Reconciliação e checks de qualidade devolvem número fiscal sem `source_ref`, e o check não guarda a `versao_entrega` conferida | `reconciliation/schemas.py`, `quality/schemas.py:15-29`, `quality/models.py:38-48` | Média | Confirmado no código |
-| **A27** | Gate de escopo faz N+1 por requisição em conta estadual: `_estado_prefixes` percorre a carteira e consulta `dim_ente` ente a ente, **sem** o cache de sessão que a cobertura de licença já usa | `shared/scope.py:126-142` × `:96-117` | Média (desempenho na rota mais quente) | Confirmado no código · **E1** |
+| **A25** | Conversão bimestre→quadrimestre reimplementada 6× em 2 semânticas; nenhuma cobre RGF semestral | `quality/service.py:83`, `cash_rap/service.py:96`, `result/service.py:95`, `benchmark/service.py:817`, `estadual_service.py:227`, `reports/service.py:391` | Média | ✅ **Consolidado na E1** em `shared/periodo.py::em_periodo_rgf`, com as duas semânticas **nomeadas** e cadência semestral; caracterização provou equivalência antes de trocar |
+| **A26** | Reconciliação e checks de qualidade devolvem número fiscal sem `source_ref`, e o check não guarda a `versao_entrega` conferida | `reconciliation/schemas.py`, `quality/schemas.py:15-29`, `quality/models.py:38-48` | Média | ✅ **Corrigido na E1** — `source_ref` nos dois contratos (nos **dois lados** da reconciliação) e `versao_entrega` na chave de `gold.data_quality_check` (migration 0041) |
+| **A27** | Gate de escopo faz N+1 por requisição em conta estadual: `_estado_prefixes` percorre a carteira e consulta `dim_ente` ente a ente, **sem** o cache de sessão que a cobertura de licença já usa | `shared/scope.py:126-142` × `:96-117` | Média (desempenho na rota mais quente) | ✅ **Corrigido na E1** — consulta em lote + memorização em `session.info`; orçamento de ≤ 5 consultas preso por teste |
 
 #### Como confirmar cada item contra o dado (nada disto foi executado aqui)
 
@@ -1010,6 +1010,9 @@ sido apagar sem saber o que quebrava.
 | **Modelo consumindo dado impossível e devolvendo projeção plausível** | Média | **Crítico** | Saneamento da série antes do treino, com a exclusão declarada na resposta (C1) | ✅ Mitigado |
 | **Ingestão parcial passando por completa** | Média | **Crítico** | O A12 mostrou que uma API paginada lida pela metade não deixa rastro: o dado parece íntegro. Cobertura declarada (A1) detecta o sintoma; falta um teste de completude **por fonte**, comparando o que a API diz existir com o que carregamos | ⏳ Aberto |
 | Dado publicado só em PDF fora da API (mínimos, Anexos 8/12) | **Certa** | Alto | Nenhuma mitigação por ingestão — o SICONFI não publica. A cobertura declara "1 de 185" e a lacuna deixou de ser invisível | 🚫 Bloqueado na fonte |
+| **Existência de recurso de outra organização vazando pelo código de status** | Baixa | **Crítico** | A convenção (404, não 403) já estava certa no código; faltava ser exigida — o teste aceitava os dois. Matriz de isolamento com `== 404` em leitura **e** mutação, cinco famílias de recurso (E1) | ✅ Mitigado |
+| **Licença conferida só na leitura fiscal, não na Central de Dados** | Média | Alto | `GET /ingestao/data` exigia apenas `administrar`: uma conta licenciada para um município lia o silver de qualquer um dos 5.598. Gate de escopo/licença no roteador e no serviço (A22/E1) | ✅ Mitigado |
+| **Custo por requisição que cresce com o tamanho do cliente** | Alta | Médio | O gate de escopo fazia N+1 em `dim_ente` e o `/carteira/refresh` percorria o escopo no request — os dois pioram exatamente no cliente que paga mais. Consulta em lote + cache de sessão, e refresh como job durável, com orçamento de consultas preso por teste (A27/E1) | ✅ Mitigado |
 
 ---
 
@@ -1055,7 +1058,7 @@ Prioridade conforme a ordem pedida: correção dos dados → fórmulas e regras 
 | **D1** | Drill-down por órgão, fonte de recurso, programa/ação | dados, UX | A4 | Ficha detalhada em §12.3 — maior parte já pronta no backend |
 | **H1** | Governança: billing zerado, auditoria de RBAC, control plane sem auditoria própria, licença invisível ao tenant | arquitetura, billing | A0 | Planejada. Ficha em §12.3 |
 | **B3** | Funcionalidades construídas e nunca ligadas: impressão, links de relatório, gráficos acessíveis, sinalização do Assistente | UX | B1 | Planejada. Ficha em §12.3 |
-| **E1** | Segurança, isolamento entre organizações e desempenho | arquitetura, segurança | A0R | Planejada — **ficha detalhada em §12.3**, alimentada pelos achados confirmados da A0R (A22, A25, A26, A27 e a asserção frouxa de 404 × 403) |
+| **E1** | Segurança, isolamento entre organizações e desempenho | arquitetura, segurança | A0R | ✅ **Concluída e verificada** (ruff/mypy/pytest e eslint/tsc/vitest 228/228, todos verdes) — A22, A25, A26, A27, a asserção frouxa de 404 × 403 e a materialização síncrona do `/carteira/refresh` fechados; migration `0041`; baseline em `docs/baseline_desempenho_e1.md` |
 
 *(Cada sprint recebe ficha detalhada — objetivo, problema, justificativa, páginas afetadas,
 tarefas, riscos, critérios de aceite, testes, evidências — quando entra em execução.)*
@@ -1923,10 +1926,193 @@ rotas sem gate e o de cópias da regra de período ENCOLHAM. make lint && make t
 
 ---
 
+### Sprint E1 — execução: o que foi feito, com evidência antes/depois
+
+> **Ressalva de método — atualizada após execução real.** O ambiente em que a E1 foi
+> *implementada* não tinha shell utilizável (`bwrap: No permissions to create new
+> namespace`, e a saída sem sandbox bloqueada por política): nem uma linha de
+> `make lint`/`make mypy`/`make test` rodou ali, e o rascunho ficou várias tentativas sem
+> conseguir avançar por causa disso — não por defeito no código escrito. A execução real
+> aconteceu depois, fora daquele ambiente: `ruff check` e `mypy` limpos, suíte completa do
+> backend verde (`pytest`, banco de desenvolvimento real) e do frontend verde (`eslint`,
+> `tsc --noEmit`, `vitest` 228/228). Dois defeitos reais só apareceram nessa execução —
+> exatamente o tipo de coisa que leitura de código não pega:
+> 1. **ID da revision da migration com 34 caracteres** (`0041_sprinte1_isolamento_qualidade`)
+>    contra o limite de 32 de `alembic_version.version_num` — todo teste que aplicava
+>    migration quebrava em cascata (`StringDataRightTruncation`), disfarçado de dezenas de
+>    falhas não relacionadas. Renomeado para `0041_sprinte1_isolamento_qual` (29
+>    caracteres); nenhuma outra referência ao ID antigo existia no repositório.
+> 2. Um `SIM117` de estilo (`ruff`) em `test_sprint_e1_isolamento.py` — dois `with`
+>    aninhados que cabiam num só. Corrigido.
+>
+> O item 7 dos critérios de aceite (`make lint && make test` verdes) está **cumprido**, não
+> mais pendente. Nada disto era executável no ambiente de autoria — a disciplina de separar
+> "confirmado no código" de "confirmado contra o dado", herdada da A0R, foi o que permitiu
+> confiar no rascunho o suficiente para verificá-lo em vez de descartá-lo.
+
+#### 1. A22 — `GET /admin/ingestion/data` passou a conferir escopo e licença
+
+| | Comportamento para um ente **fora** da carteira |
+|---|---|
+| **Antes** | `200` com as linhas do silver daquele ente (`ingestion/router.py:185-197` exigia só `administrar`; `service.read_data` não conferia nada) |
+| **Depois** | `403 urn:…:scope-forbidden`; ente na carteira e sem licença, `403 urn:…:ente-nao-licenciado`; ente ok, `200` |
+
+O `assert` está nos **dois** níveis, e isso é deliberado: o roteador protege o navegador, o
+serviço protege o caminho programático (worker, script, outro módulo), que é justamente
+por onde uma rotina interna leria o silver alheio sem passar pela borda. Teste do caminho
+programático incluído (`test_o_gate_de_ingestao_data_vive_tambem_no_servico`).
+
+Efeito colateral pretendido: `ingestion` saiu de `_SEM_GATE_CONHECIDOS` na catraca da A0R.
+Restou **um** módulo na lista, `platform`, que é exceção legítima (control plane).
+
+#### 2. 404 × 403 — a régua deixou de ser opinião
+
+| | `GET /relatorios/{id}` de outra organização |
+|---|---|
+| **Antes** | `assert resposta.status_code in {403, 404}` (`test_sprint28_seguranca.py:248`) — uma regressão que passasse a responder 403, **vazando a existência**, não quebrava nada |
+| **Depois** | `assert resposta.status_code == 404`, e a matriz completa em `tests/test_sprint_e1_isolamento.py` |
+
+A matriz cobre **cinco famílias** (relatório, agendamento, cenário, alerta e job de
+ingestão) em **leitura e mutação**, 13 rotas ao todo, e vai além do status:
+
+* o corpo do erro não pode conter o `cod_ibge` nem o `org_id` do outro tenant;
+* **o dado do dono tem de continuar como estava** depois de todas as tentativas de mutação
+  — sem isso, um handler que apagasse a linha e *depois* devolvesse 404 passaria no teste;
+* o dono continua enxergando e alterando o que é dele — um 404 universal passaria na
+  matriz inteira e quebraria o produto.
+
+O intruso recebe **todas** as capacidades RBAC na própria organização, de propósito: assim
+um 403 só poderia vir da fronteira entre tenants, nunca de permissão faltando.
+
+Nenhuma rota precisou ser corrigida: a convenção já estava certa no código (o repositório
+filtra por `org_id`, o serviço devolve 404). O que a E1 fez foi torná-la **exigível**.
+
+#### 3. A27 — o N+1 que o próprio gate introduzia
+
+| | Consultas no gate, conta estadual com 184 municípios |
+|---|---|
+| **Antes** | `1` (carteira do ente) `+ 1` (`get_org`) `+ 1` (`list_carteira`) `+ 184` (`dim_ente`, uma por ente, via `session.get`) `+ 1` (licença) = **até 188**, repetidas a cada chamada do gate na mesma requisição |
+| **Depois** | **5** na primeira chamada; **1** em cada chamada seguinte da mesma sessão |
+
+Três mudanças: `dim_ente` em **uma** consulta (`list_dim_entes`, `IN (...)`); memorização
+de `_estado_prefixes`/`_is_estado` em `session.info`, no mesmo padrão que
+`cobertura_licenca` já usava; e a leitura da carteira unificada em `_carteira_ibges` — o
+contador expôs que o gate e a visão agregada liam **a mesma carteira** duas vezes na mesma
+requisição, o que a leitura de código não tinha mostrado.
+
+O teste mede o caminho da **ampliação estadual** (município da UF que não está listado na
+carteira), e não o município listado: quando o ente está na carteira, a primeira condição
+do `or` responde antes e nada disto roda. Medir o caminho fácil não mediria defeito nenhum. A invalidação foi ao mesmo ponto — `invalidar_cobertura` —,
+mais `invalidar_escopo_carteira`, chamada nas duas mutações de carteira
+(`add_carteira_ente`, `carteira_lote`), porque a carteira **pode** mudar dentro da mesma
+requisição. Esse risco estava listado na ficha e tem teste próprio.
+
+O limiar é **contagem de consultas**, não milissegundos: a suíte divide o banco com o
+resto, e um limiar de tempo mediria a carga da máquina, não o código. Registro completo
+(consulta, volume, ambiente, limiar) em `docs/baseline_desempenho_e1.md`.
+
+#### 4. `POST /carteira/refresh` — 202 com job, nada de escopo no request
+
+| | `POST /carteira/refresh` |
+|---|---|
+| **Antes** | `200 {"linhas_materializadas": N}`, com **N iterações** de `refresh_mart_carteira` dentro do handler — 5.598 para uma licença global |
+| **Depois** | `202` com o job (`op.carteira_lote_job`, `acao='refresh'`); o request grava **uma** linha. Escopo vazio ⇒ `422` |
+
+Quem executa é `app/workers/carteira_tasks.py`, com relógio próprio ao lado dos de
+relatórios e qualidade (e retomada do que ficou pendente antes de um restart — o banco é a
+fila). **Sem teto artificial de entes**: um teto que nunca dispara é decoração, e nada no
+request cresce mais com o escopo. O teste prende os três lados: a resposta é 202, nada foi
+materializado quando ela volta, e o job materializa **o mesmo total** de antes — sem esse
+terceiro, "melhorar o desempenho" seria só perder a funcionalidade.
+
+#### 5. A26 — `source_ref` nos dois contratos que não tinham, e a versão conferida
+
+**Reconciliação.** `DivergenciaItem` ganhou `source_ref_plataforma` e `source_ref_oficial`
+— os **dois** lados, com `versao_entrega` em cada um —, e `ReconciliacaoResultado` ganhou
+o `source_ref` agregado. O lado oficial carrega também o **período de origem**, porque a
+correção do RGF chega por republicação num quadrimestre posterior (A15): sem isso, não se
+distingue divergência real de comparação entre versões diferentes.
+
+**Checks de qualidade.** `CheckOut` ganhou `versao_entrega` e `source_ref`; a coluna entrou
+em `gold.data_quality_check` **e na chave única** (migration `0041`, aditiva e reversível).
+
+| | Reexecutar um check depois de uma retificação |
+|---|---|
+| **Antes** | Sobrescrevia a linha. O painel dizia "ok" e ninguém sabia se aquele "ok" era do número novo ou do velho |
+| **Depois** | Cria **linha nova**. As duas versões coexistem, e a leitura (painel e selo) elege o veredito **mais recente por chave** |
+
+Três decisões de implementação que valem registro:
+
+* `versao_entrega` é `NOT NULL DEFAULT '-'`, não `NULL`. Em PostgreSQL, `NULL` é distinto
+  de `NULL` numa `UNIQUE`: com `NULL`, o *upsert* nunca conflitaria e o check de
+  atualidade empilharia uma linha por execução. A sentinela não vaza para o contrato.
+* A leitura precisou de um filtro de vigência. Sem ele, uma falha de entrega **já
+  retificada** continuaria selando a página — o histórico seria ganho e a tela, prejuízo.
+* `executado_em` passou a ser gravado pelo relógio da aplicação também na inserção: `now()`
+  do PostgreSQL é o instante da **transação**, e dois vereditos no mesmo commit ficariam
+  com o mesmo carimbo, deixando a eleição do vigente dependente de um desempate aleatório.
+
+O índice `ix_data_quality_check_chave` acompanha, e **não é especulativo**: ele sustenta a
+subconsulta correlacionada que esta mesma sprint introduziu. Nenhum outro índice foi
+criado — não há medição que justifique.
+
+#### 6. A25 — consolidada **depois** de a caracterização provar equivalência
+
+A ficha avisava que consolidar "muda número onde as duas semânticas divergiam". Mudaria, se
+a consolidação escolhesse uma das duas. Ela não escolheu: as duas respondem perguntas
+diferentes e as duas têm uso legítimo — o painel de qualidade não deve conferir a DCL
+contra um quadrimestre que ainda não fechou, e o benchmarking não deve perder a linhagem do
+numerador de pessoal porque o usuário abriu um bimestre ímpar. **O defeito era a escolha
+ser implícita**, não haver duas.
+
+`shared/periodo.py::em_periodo_rgf` passou a expor as duas com nome — `CICLO_FECHADO`
+(bimestre ímpar ⇒ `None`) e `CICLO_CORRENTE` (teto) — e cada chamador declara a sua, na
+que já tinha. A cadência **semestral** do art. 63, II, entrou junto (`2024-B3` → `2024-S1`),
+que era ponto cego das seis cópias.
+
+`tests/test_sprint_e1_regra_periodo.py` reproduz as **seis implementações antigas
+literalmente** e compara caso a caso, em todo o domínio que os chamadores produzem
+(bimestres, anual, mensal, entrada vazia): **zero divergência**. Três diferenças
+intencionais estão isoladas em testes próprios, com o motivo:
+
+1. período já em forma de RGF volta como está (`2024-Q2` → `2024-Q2`) em vez de `None` —
+   idempotência; os três que devolviam `None` faziam-no por acidente de `split`, e nenhum
+   é alcançável por esse caminho;
+2. bimestre fora da faixa (`2024-B7`) devolve `None` em vez de fabricar `2024-Q4`;
+3. ano malformado (`20XX-B2`) devolve `None` em vez de `20XX-Q1`.
+
+As três são correções, não regressões — e nenhuma é alcançável pelos chamadores reais, que
+só passam período bimestral do RREO. Um quarto teste prova que as seis cópias **deixaram de
+existir**: a catraca da A0R aceita a redução, este teste mostra que ela aconteceu.
+
+Além da caracterização, a decisão do §10 está escrita como **tabela** — os seis bimestres,
+nas duas semânticas, um caso de teste por bimestre (`_TABELA_QUADRIMESTRAL`), mais a
+cadência semestral completa. É o que a ficha pedia ("para cada bimestre 1–6 e para o RGF
+semestral"): quem mudar a semântica quebra no bimestre exato, e não numa página fiscal
+três sprints depois. Um teste à parte prende o **padrão** do parâmetro: quem esquecer de
+declarar a semântica recebe o ciclo fechado, que erra para o lado da ausência (aparece como
+"sem dado") em vez de apontar um quadrimestre que ainda não fechou (apareceria como número).
+
+#### Arquivos da sprint
+
+* Migration: `alembic/versions/0041_sprinte1_isolamento_qualidade.py` (aditiva, reversível).
+* Novos: `app/workers/carteira_tasks.py`, `docs/baseline_desempenho_e1.md`,
+  `tests/test_sprint_e1_isolamento.py`, `tests/test_sprint_e1_desempenho.py`,
+  `tests/test_sprint_e1_regra_periodo.py`, `tests/test_sprint_e1_rastreabilidade.py`.
+* Contrato alterado (o frontend precisa saber): `POST /carteira/refresh` passou de
+  `200 {linhas_materializadas}` para `202 {job}`. Nenhum fetcher em `services/backend.ts`
+  consome essa rota hoje — conferido antes de mudar, como o risco da ficha pedia. Os
+  campos novos de `CheckOut` são aditivos e opcionais.
+
+---
+
 ## 10. Decisões técnicas e metodológicas registradas
 
 | Data | Decisão | Motivo |
 |---|---|---|
+| 2026-08-06 | **Bimestre → RGF tem duas semânticas, e as duas ficam — com nome.** `CICLO_FECHADO` (bimestre ímpar ⇒ sem RGF correspondente) e `CICLO_CORRENTE` (teto: B3 cai no Q2 em curso), em `shared/periodo.py::em_periodo_rgf`; cada chamador declara a sua | A A25 pedia "decidir a semântica". Decidir por **uma** teria mudado número em metade da plataforma sem que ninguém tivesse pedido: o painel de qualidade não deve conferir a DCL contra um quadrimestre que ainda não fechou, e o benchmarking não deve perder a linhagem do numerador de pessoal porque o usuário abriu um bimestre ímpar. As perguntas são diferentes; o defeito era a escolha ser **implícita**, e a correção é obrigá-la a aparecer no ponto da chamada. A cadência **semestral** do art. 63, II, entrou junto — era ponto cego das seis cópias |
+| 2026-08-06 | **Limiar de desempenho em número de consultas, não em milissegundos** | A suíte divide o banco de desenvolvimento com o resto (decisão de 2026-08-04, abaixo): um limiar de tempo passaria numa máquina ociosa e falharia numa ocupada, e a reação natural a um teste que falha por motivo alheio é afrouxá-lo até parar de incomodar — é assim que um guarda de desempenho morre. Contagem de consultas é determinística e mede exatamente a classe de defeito da A27: trabalho que **cresce com o tamanho do cliente**. O orçamento de latência por rota continua onde estava (`x-performance-p95-ms`, Sprint 27) |
+| 2026-08-06 | **`versao_entrega` entra na chave do check de qualidade com sentinela `'-'`, não `NULL`** | Em PostgreSQL, `NULL` é distinto de `NULL` numa `UNIQUE`: com `NULL`, o *upsert* nunca conflitaria e o check de atualidade — que não se ancora em entrega nenhuma — empilharia uma linha por execução. A sentinela é de chave e não vaza para o contrato (`versao_entrega: null`, `source_ref: null`) |
 | 2026-08-04 | Suíte do backend roda contra o **banco de desenvolvimento real**: nada de carga nem de segunda suíte enquanto ela roda | Aconteceu duas vezes na mesma sessão — primeiro a materialização da B2 derrubou `test_reports`, depois um `pytest` paralelo derrubou `test_sprint21_backfill`. Nenhuma das duas era regressão. A suíte é boa o bastante para notar a mudança embaixo dela; a disciplina de operação é que precisa acompanhar |
 | 2026-08-04 | Nota metodológica e glossário **inline**, nunca em página separada | Quem sai do número para entender o número raramente volta ao mesmo ponto |
 | 2026-08-04 | Participação **omitida** (não zerada) quando há valor negativo no nível | Com clamp, as participações somavam >100% e cada fonte superavitária aparecia inflada — 21% exibido como 34% |
@@ -1947,7 +2133,7 @@ rotas sem gate e o de cópias da regra de período ENCOLHAM. make lint && make t
 | P1 | **A8 — resíduo de teste em produção** | Aguardando decisão | 3 organizações `Org <hex>` e 6 entes sintéticos em `op.organizacao`/`op.carteira_ente`. Apagar é destrutivo e irreversível sem backup | Decisão do responsável. Recomendo: verificar se alguma tem usuário real associado, fazer dump só do schema `op`, e então remover |
 | P2 | **Frente fiscal/contábil** | ✅ **Relatório concluído** (A0R, §5.1.2) — execução contra o dado pendente | RCL × RCL Ajustada, exclusões do art. 19 §1º e acima × abaixo da linha auditados e **corretos**; a leitura da RCL Ajustada tem defeito de consulta (**A24**). Falta rodar `scripts/validacao_fiscal.py` e as consultas do §5.1.2 contra o banco | Uma sessão com banco de desenvolvimento. Comandos já escritos |
 | P3 | **Frente de dados/rastreabilidade** | ✅ **Relatório concluído** (A0R, §5.1.2) — nove checks **não executados** | Inventário de `source_ref` fechado (160 rotas, 22 contratos, 2 lacunas reais = **A26**); varredura de valores fixos **limpa** (nenhum teto da LRF hardcoded); os nove checks auditados por código, com um defeito achado (**A23**), e ainda **não executados** | Mesma sessão com banco. `pytest tests/test_auditoria_a0r.py` já roda sem dado |
-| P4 | **Frente de arquitetura/segurança** | ✅ **Relatório concluído** (A0R, §5.1.2) — execução empírica pendente | Convenção 404 × 403 **correta no código** e frouxa no teste (`test_sprint28_seguranca.py:248` aceita os dois); 1 rota sem gate de escopo (**A22**); regra de período duplicada 6× (**A25**); N+1 no gate (**A27**) | Rodar a suíte de isolamento; o resto virou ficha **E1** |
+| P4 | **Frente de arquitetura/segurança** | ✅ **Relatório concluído, corrigido e verificado na E1** | Todos os itens foram fechados: asserção estrita de **404** com matriz de leitura e mutação em cinco famílias de recurso; **A22** (gate em `/ingestao/data`, roteador e serviço); **A25** (regra de período consolidada com as duas semânticas nomeadas, após caracterização); **A26** (`source_ref` + `versao_entrega`); **A27** (N+1 do gate). Evidência antes/depois em §12.3. `make lint && make mypy && make test` (backend) e `eslint && tsc && vitest` (frontend) executados de verdade e verdes, fora do ambiente de autoria (que não tinha shell) | — |
 | P5 | **Divergência do DTP** | 🔎 **Rediagnosticada — permanece aberta, com causa provável e correção especificada** | O enunciado antigo ("`DTP (VI) = (IIIa + IIIb)` tratado como composição em vez de `bruta − exclusões`") **não descreve o código de hoje**: a DTP publicada *é* a líquida repartida por estágio no MDF, e é assim que `pessoal.apurar` a usa (`pessoal.py:164-178`) — tratá-la como valor oficial está certo. A causa provável das divergências residuais é o **denominador**, não o numerador: **A24** (leitura da RCL Ajustada sem filtro de coluna e com `limit(1)` sem ordenação) explica um conjunto pequeno e específico de entes, que é a forma dos 6/2024 e 18/2025 registrados. **Decisão:** permanece aberta nesta sprint (diagnóstico) porque a confirmação exige o banco; a correção é de baixo risco e está especificada — filtrar `coluna = 'Valor'` e ordenar deterministicamente, sem migration e sem reprocessar. Motivo de não corrigir agora: mexer no denominador do limite de pessoal sem antes medir quantas linhas mudam repetiria o erro que a B2-c e a A5 já custaram | Rodar a 1ª e a 4ª consulta do §5.1.2. Se a 1ª voltar linhas, a correção da A24 entra na próxima sprint fiscal com reprocessamento medido antes |
 | P6 | ~~Contagem de `dim_ente` não explicada~~ | ✅ **Resolvido** | A investigação levou a A9/A10: o catálogo estava incompleto em 8 municípios e o silver de entes em 1. Após reingestão e conformação, o catálogo bate **exatamente** com a fonte: 5.570 municipais + 27 estaduais (26 + DF) + 1 federal = **5.598**, o total publicado pelo SICONFI | — |
 
@@ -1957,6 +2143,7 @@ rotas sem gate e o de cópias da regra de período ENCOLHAM. make lint && make t
 
 | Data | Alteração |
 |---|---|
+| 2026-08-06 | **Sprint E1 implementada — segurança, isolamento entre organizações e desempenho.** Todos os seis itens da ficha (§12.3) foram fechados, e nenhum deles saiu de suposição: são os achados que a frente P4 da A0R confirmou no código, com `arquivo:linha`. **A22** — `GET /admin/ingestion/data?ente=` exigia só a capacidade `administrar` e nunca chamava `assert_ente_in_scope`; como o gate de **licença** vive dentro desse `assert`, uma conta licenciada para um município lia o silver de qualquer um dos 5.598. O gate entrou no roteador **e** no serviço (o caminho programático — worker, script — não passa pela borda), com os três estados cobertos por teste: fora da carteira `403 scope-forbidden`, na carteira e sem licença `403 ente-nao-licenciado`, ok `200`. O módulo saiu de `_SEM_GATE_CONHECIDOS` na catraca da A0R, que restou com **um** nome (`platform`, exceção legítima). **404 × 403** — a convenção certa já estava no código; o que faltava era ser exigida, porque `test_sprint28_seguranca.py:248` aceitava `403 ou 404` e uma regressão que passasse a vazar a existência do recurso alheio não quebrava nada. Agora é `== 404`, e a matriz nova (`test_sprint_e1_isolamento.py`) cobre **cinco famílias** — relatório, agendamento, cenário, alerta e job de ingestão — em **leitura e mutação**, 13 rotas, com o intruso recebendo *todas* as capacidades RBAC na própria organização de propósito (assim um 403 só poderia vir da fronteira entre tenants, nunca de permissão faltando). Três asserções além do status: o corpo do erro não pode conter o `cod_ibge` nem o `org_id` alheio; **o dado do dono continua como estava** depois de todas as tentativas de mutação (sem isso, um handler que apagasse a linha e *depois* devolvesse 404 passaria); e o dono continua enxergando e alterando o que é dele (um 404 universal passaria na matriz inteira e quebraria o produto). Nenhuma rota precisou ser corrigida — o repositório já filtrava por `org_id` e o serviço já devolvia 404. **A27** — o gate fazia N+1 em `dim_ente` (`session.get` por ente da carteira, sem cache): 1 + até 184 + 1 consultas por requisição numa conta estadual, repetidas a cada chamada do gate, num custo que **cresce com o tamanho do cliente**. Virou uma consulta em lote mais memorização em `session.info`, no mesmo padrão que `cobertura_licenca` já usava; a invalidação foi ao mesmo ponto, mais `invalidar_escopo_carteira` nas duas mutações de carteira, porque a carteira pode mudar dentro da mesma requisição (risco listado na ficha, com teste próprio). O limiar declarado é **≤ 5 consultas**, preso por contador de eventos `before_cursor_execute` — e há um teste que impede o próprio limiar de voltar a crescer com a carteira. **Decisão de método registrada no §10:** o guarda é em número de consultas, não em milissegundos, porque a suíte divide o banco de desenvolvimento com o resto e um limiar de tempo mediria a carga da máquina; o orçamento de latência por rota continua onde estava (`x-performance-p95-ms`, Sprint 27). **`POST /carteira/refresh`** deixou de percorrer o escopo dentro do handler (5.598 iterações para uma licença global) e passou a **202 com job durável** em `op.carteira_lote_job`, executado por `app/workers/carteira_tasks.py`, com relógio próprio ao lado dos de relatórios e qualidade. Sem teto artificial de entes — um teto que nunca dispara é decoração, e nada no request cresce mais com o escopo; escopo vazio responde 422, porque 202 para um lote sem trabalho esconderia erro de cadastro atrás de um "aceito". O teste prende os três lados: a resposta é 202, **nada** foi materializado quando ela volta, e o job materializa **o mesmo total** de antes — sem esse terceiro, "melhorar o desempenho" seria só perder a funcionalidade. **A26** — a reconciliação e os checks de qualidade eram as duas únicas lacunas reais do inventário de `source_ref` da frente P3, e as duas devolvem número fiscal. `DivergenciaItem` ganhou a procedência dos **dois** lados comparados (com `versao_entrega` em cada um, e o período de origem do lado oficial, porque a correção do RGF chega por republicação num quadrimestre posterior — A15); `CheckOut` ganhou `versao_entrega` e `source_ref`; e a coluna entrou em `gold.data_quality_check` **e na chave única** (migration `0041`, aditiva e reversível), de modo que reexecutar um check depois de uma retificação **cria linha nova** em vez de sobrescrever o veredito da versão anterior sem rastro. Três decisões de implementação que valem registro: a sentinela `'-'` em vez de `NULL` (em PostgreSQL `NULL` é distinto de `NULL` numa `UNIQUE`, e o check de atualidade empilharia uma linha por execução); um filtro de vigência na leitura, sem o qual uma falha de entrega **já retificada** continuaria selando a página (o histórico seria ganho e a tela, prejuízo); e `executado_em` gravado pelo relógio da aplicação também na inserção, porque `now()` do PostgreSQL é o instante da **transação** e dois vereditos no mesmo commit ficariam com carimbos iguais, deixando a eleição do vigente dependente de desempate aleatório. O índice `ix_data_quality_check_chave` acompanha e **não é especulativo**: sustenta a subconsulta correlacionada que esta mesma sprint introduziu; nenhum outro índice foi criado, porque não há medição que justifique. **A25** — a ficha avisava que consolidar "muda número onde as duas semânticas divergiam". Mudaria, se a consolidação escolhesse uma delas; ela não escolheu. As duas respondem perguntas diferentes e as duas têm uso legítimo — o painel de qualidade não deve conferir a DCL contra um quadrimestre que ainda não fechou, e o benchmarking não deve perder a linhagem do numerador de pessoal porque o usuário abriu um bimestre ímpar. O defeito era a escolha ser **implícita**. `shared/periodo.py::em_periodo_rgf` passou a expor as duas com nome (`CICLO_FECHADO` × `CICLO_CORRENTE`), cada chamador declara a que já tinha, e a cadência **semestral** do art. 63, II (`2024-B3` → `2024-S1`) entrou junto — ponto cego das seis cópias. A troca só foi feita **depois** do teste de caracterização: `test_sprint_e1_regra_periodo.py` reproduz as seis implementações antigas **literalmente** e compara caso a caso em todo o domínio que os chamadores produzem, com **zero divergência**; as três diferenças intencionais (idempotência para período já em forma de RGF, bimestre fora da faixa e ano malformado deixando de fabricar `2024-Q4`/`20XX-Q1`) estão isoladas em testes próprios, com o motivo, e nenhuma é alcançável pelos chamadores reais. Um quarto teste prova que as seis cópias **deixaram de existir** — a catraca da A0R aceita a redução, este mostra que ela aconteceu. **Ressalva de método, declarada também na ficha e no baseline:** o ambiente de autoria **não tinha shell** (`bwrap: No permissions to create new namespace`), então `make lint`, `make mypy` e `make test` não rodaram lá, nem nenhuma consulta ao banco — o rascunho ficou pronto, mas não verificado. A execução real aconteceu depois, fora daquele ambiente: `ruff`/`mypy` limpos, suíte completa do backend verde contra o banco de desenvolvimento, `eslint`/`tsc --noEmit`/`vitest` (228/228) verdes no frontend. Dois defeitos reais só apareceram nessa execução, nenhum dos dois no raciocínio da sprint: o ID da revision da migration tinha 34 caracteres contra o limite de 32 de `alembic_version.version_num` (renomeado para `0041_sprinte1_isolamento_qual`, 29 caracteres — sem isso, toda fixture que aplicava migration quebrava em cascata, disfarçado de dezenas de falhas não relacionadas), e um `SIM117` de estilo em `test_sprint_e1_isolamento.py` (dois `with` aninhados que cabiam num só). O critério 7 da ficha (`make lint && make test` verdes) está **cumprido**. Baseline de desempenho com consulta, volume, ambiente e limiar em `docs/baseline_desempenho_e1.md`. Nesta mesma sessão, o orquestrador externo (`prumo-sprint-orchestrator`) que produziu este rascunho foi cancelado após uma corrupção de armazenamento do Docker Desktop (I/O error nos snapshots do containerd, `wsl --shutdown` não resolveu por completo) — a sprint foi retomada e verificada diretamente, sem o orquestrador. Um `package.json`/`package-lock.json`/`node_modules` e uma leva de `.env*`/lockfiles vazios, criados por engano na raiz do projeto (fora dos dois repositórios) na primeira configuração do orquestrador, quebravam a resolução de config do Vite/esbuild e foram removidos — `.claude/` na raiz foi preservado por conter estado real do próprio Claude Code. |
 | 2026-08-05 | **Sprint A0R concluída — as três frentes interrompidas voltaram com relatório (§5.1.2).** P2, P3 e P4 têm agora status individual, evidência `arquivo:linha` e a consulta/comando de confirmação para cada item. **Ressalva de método declarada no topo da seção, e ela vale para tudo que a A0R afirma:** esta rodada correu **sem shell e sem banco** — nenhuma consulta SQL, nenhum `pytest` e nenhum comando foram executados aqui; "confirmado" significa *confirmado no código*, e o que depende de dado está marcado **hipótese** com a consulta que a decide. **P2 (fiscal):** RCL × RCL Ajustada corretas (o denominador do art. 20 é a Ajustada publicada, com a RCL cheia só como queda declarada por `rcl_ajustada = NULL`), exclusões do art. 19 §1º completas e condicionais ao RPPS, acima × abaixo da linha com identidade verificada e tolerância explícita. **P3 (dados):** inventário de `source_ref` fechado — 160 rotas, 22 contratos com `source_ref`, duas lacunas reais (reconciliação e checks de qualidade) e uma dispensa justificada (cobertura mede o produto, não é número de demonstrativo); varredura de valores fixos **limpa** — nenhum teto da LRF hardcoded no backend, as faixas 90/95% derivadas num lugar só com override do banco, e a única exceção é o `0.70` do FUNDEB dentro do conector de PDF, registrado como tal; os nove checks foram **inventariados e auditados**, e **não executados**. **P4 (arquitetura):** a convenção 404 × 403 está certa no código (repositório filtra por `org_id`, serviço devolve 404 — existência alheia não vaza) e **frouxa no teste** (`test_sprint28_seguranca.py:248` aceita os dois); das 19 rotas que recebem ente, 17 validam escopo, 1 é exceção legítima (control plane) e **1 não valida** (A22). **Seis achados novos:** **A22** (`GET /ingestao/data?ente=` sem gate — fura a licença, não o dado, que é público), **A23** (o check `mart_vs_detalhe_pessoal` compara o mart, apurado sobre a RCL Ajustada, com um recálculo pela RCL cheia — falha estrutural falsa que vira alerta na fila do cliente), **A24** (a leitura da RCL Ajustada do Anexo 01 não filtra a coluna e usa `limit(1)` sem `order by` — mesma família do B2-b), **A25** (a conversão bimestre→quadrimestre existe **seis vezes em duas semânticas**: para o bimestre ímpar, metade da plataforma diz "não há RGF" e a outra metade aponta um; nenhuma cobre o RGF semestral), **A26** (reconciliação e checks devolvem número fiscal sem `source_ref`, e o check não guarda a `versao_entrega` conferida) e **A27** (o gate de escopo faz N+1 por requisição em conta estadual, sem o cache de sessão que a licença ao lado já usa). **P5/DTP rediagnosticada:** o enunciado antigo não descreve o código atual — no MDF a `DTP (VI) = (IIIa + IIIb)` **é** a líquida repartida por estágio, e usá-la como valor oficial está certo; a causa provável das divergências residuais é o denominador (A24), não o numerador. **Decisão registrada: permanece aberta**, com a correção especificada (filtrar `coluna = 'Valor'` e ordenar) e o motivo de não aplicá-la agora — mexer no denominador do limite de pessoal sem medir antes quantas linhas mudam repetiria o custo da B2-c e da A5. **Sete falsos positivos** foram verificados e descartados com o motivo de cada um (relatório em lote, refresh estadual, painel de qualidade e a própria condicionalidade de RPPS na DTP), para que a próxima rodada não gaste a mesma hora. A ficha da **E1** foi escrita a partir dos achados confirmados, com critérios objetivos e mensuráveis (403 nos três estados de `/ingestao/data`; `== 404` no lugar de `in {403,404}`; ≤ 5 consultas no gate de escopo para carteira de 184 municípios; `/carteira/refresh` em 202 com job). **Testes:** `tests/test_auditoria_a0r.py` — 9 casos, nenhum dependente de dado: regra pura do Anexo 01 (DTP publicada manda; exclusão de inativos condicional ao RPPS; coluna de percentual nunca entra no numerador; contas do layout oficial reconhecidas) e três **catracas** de inventário (contrato que tem `source_ref` não pode perdê-lo; rota por ente sem gate não pode crescer; a regra de período não pode ganhar uma sétima cópia). As catracas são deliberadamente unilaterais: aceitam a melhora e falham na piora — uma que travasse o defeito no lugar deixaria a suíte vermelha para quem corrigisse. Os 9 casos foram **escritos e não executados** nesta rodada (mesmo motivo: sem shell); rodar `pytest tests/test_auditoria_a0r.py` é o primeiro item da retomada, antes de qualquer conclusão sobre eles. **Nenhuma correção foi aplicada e nenhuma ação de produção foi executada**, por desenho da sprint. |
 | 2026-08-05 | **Sprint F2 em produção — deploy verificado.** Backend em `8364c7b`, migration sem pendência nova (F2 não adiciona nenhuma), `/api/health` respondendo `200`. Frontend em `afb7811`, bundle `index-ByIkPdEf.js` — hash servido = publicado = build, os três conferidos, diferente do anterior (`index-z3fGw81Y.js`). |
 | 2026-08-05 | **Sprint F2 concluída — 15 de 16 achados de clareza fechados (U19–U34), continuação direta da B1.** Mesma disciplina: nenhum número mudou, só rótulo, denominador exibido ou campo novo. Três exemplos concretos (o que o gestor lia × o que o dado dizia × a correção), no formato da tabela da B1 (§5.1.5): **(1) Receita/Despesa (U19)** — lia "Categoria → Origem → Espécie → Rubrica → Alínea" (5 níveis) sobre a árvore de Receita e "Categoria → Grupo → Modalidade → Elemento" (4 níveis) sobre a de Despesa/natureza; o dado só deriva 3 e 2 níveis respectivamente (`natureza.construir_arvore`, `classificacao.NATUREZA_PARENT` — o SICONFI não expõe código numérico pontuado, logo não há Rubrica/Alínea/Modalidade/Elemento a mostrar); corrigido para "Categoria → Origem → Espécie" e "Categoria Econômica → Grupo de Natureza" nos dois lugares onde o texto estava hardcoded (`ReceitaPage.tsx`, `DespesaPage.tsx`, e o `hierarquia` da memória de Receita em `revenue/service.py`, que tinha o mesmo erro). **(2) Limites — barra de progresso para pisos (U32)** — um ente em 27% de aplicação em saúde (piso 15%, cumprindo com folga) desenhava uma barra **quase cheia**, a mesma leitura visual que um ente prestes a estourar um teto; a razão valor/piso satura em 100% assim que o piso é superado, então "cumprir com folga" e "estar exatamente no limite" ficavam indistinguíveis pelo preenchimento. Corrigido invertendo o preenchimento visual só para `sentido=piso` (`ratioVisual = 100 − ratio`): agora a barra fica **vazia** para quem cumpre com folga e **cheia** para quem está bem abaixo do mínimo — a mesma convenção "mais cheia = mais perto de violar" que já valia para teto. O valor real na árvore de acessibilidade (`aria-valuenow`) não mudou — só o pixel. **(3) CAPAG — três grandezas sob um rótulo (U26)** — o card de Dívida mostrava "Metodologia 2022" para um ente cujo layout de origem (municipal histórico) publica a coluna `Ano_Base`, não uma metodologia — 2022 era o ano-base real da planilha, não uma versão de método; e um município (layout oficial, ICF) e um estado (layout estadual, texto de metodologia) apareciam com o mesmo rótulo "Metodologia" apesar de serem publicações e conectores diferentes do Tesouro. Corrigido com dois campos novos, sem migration e sem reprocessar CAPAG: `ano_base_fonte` (`debt/service.py::_parse_ano_base_fonte`, extraído só quando o valor bruto é um ano plausível de 4 dígitos) exibido como "Ano-base da fonte", com validação cruzada contra `ano_ref − 1` sinalizada (nunca corrigida em silêncio) quando diverge; e `metodologia_rotulo` ("ICF" para município, "Metodologia" para estado — resolvido pelo mesmo `len(cod_ibge)` que já escolhe entre as entregas `CAPAG`/`CAPAG-EST`, sem precisar de coluna nova para saber a origem). `metodologia_versao` deixou de repetir o mesmo número sob o rótulo errado quando era na verdade um ano-base — as três grandezas agora têm três rótulos, sem se misturar. Demais achados fechados: **Resultado (U27/U28)** — "(com RPPS)"/"(sem RPPS)" movidos para o `MetricHeader` do primário/nominal (antes só na `NotaRpps` recolhida) e para as fórmulas da memória de cálculo; `meta_nominal`/`realizado_nominal` passam a aparecer quando o ente publica só a meta nominal (antes lia "Meta de resultado primário —", indistinguível de não ter meta nenhuma). **Patrimônio (U33)** — "✓ Conciliado — Conciliação MSC ↔ DCA" aparecia para entes sem MSC nenhuma (só 1 dos 3 checks roda); `build_conciliacao` ganhou um `titulo` condicional ("Balanço fecha" sem MSC) e a `observacao` passou a descrever só os checks que de fato rodaram. **Receita (U20/U21/U22)** — `deducoes` (materializada, nunca exibida) exposta como bruto×deduções quando a fonte publica a coluna (achado à parte: nenhum RREO Anexo 01 real no acervo tem essa coluna hoje — confirmado por consulta direta ao banco; o campo aparece pronto para quando/se existir); a barra "própria×transferida" desdobrada em corrente×capital (`DependenciaResumo` ganhou `transferida_corrente`/`transferida_capital`, calculados pela raiz categórica do nó — sem mudar a soma). **Despesa (U21/U22/U23)** — `SeloCobertura` que só existia em Receita agora também aparece aqui (já registrada em `registry.py::FONTE_META`, só faltava consumir); aviso novo quando o eixo natureza está selecionado avisando que cabeçalho/série continuam no eixo função (Anexo 02), evitando a leitura de bug. **Pessoal (U25)** — cabeçalho passa a dizer a cadência do RGF do ente (quadrimestral/semestral, LRF art. 63, II), reusando `alerts/rules.py::cadencia_rgf` (campo novo `PessoalDetalhe.cadencia_rgf`). **Caixa (U29)** — `Art42Panel` mostra o quadrimestre avaliado (ex.: "2024-Q3"), não só o booleano dentro/fora da janela. **Limites/Benchmarking (U31/U34)** — `SeloCobertura`/`SeloQualidadePagina` adicionados nas duas páginas (indicadores já registrados em `coverage/service.py::INDICADORES_POR_PAGINA`, só faltava consumir). **Achado revisado na investigação, não fechado como a ficha propunha (U29/U30, parte do FUNDEB):** a ficha pedia replicar no card FUNDEB a nota de expurgo de RPNP sem lastro que a árvore MDE/ASPS já tem — mas a investigação (`health_edu/service.py::_apurar_educacao`) mostrou que o indicador `fundeb_profissionais` **não é expurgado** de RPNP sem lastro (só o total combinado de MDE é: `aplicada = despesa_bruta − deducoes − rpnp`; o `FUNDEB_PROFISSIONAIS` do Anexo 8 entra bruto, sem a subtração). Replicar a nota como paridade teria sido uma **falsa clareza** — exatamente o defeito que esta sprint existe para consertar, só que ao contrário. Em vez de replicar, `CardFundeb` ganhou uma nota que diz a assimetria real ("não expurga… diferente do ASPS/MDE acima"), sem tocar em nenhum cálculo; se o expurgo do FUNDEB for de fato exigido, é um achado de **cálculo**, não de rótulo, e pertence a outra sprint. **Testes:** backend — extensões em `test_debt.py` (+5, incluindo o caso estadual "Metodologia" × municipal "ICF"), `test_accounting.py` (+2 asserções), `test_revenue.py` (+2), `test_personnel.py` (+2) e `test_result.py` (+2) sobre a suíte já existente, tudo verde (`ruff`, `mypy` 235 arquivos, `pytest` completo, sem falha — inclusive reexecutado depois de corrigir uma colisão de `versao_entrega` fixo entre corridas no teste estadual, mesma lição de higiene de dado de teste já registrada em sprints anteriores). Frontend — arquivo novo `divida-capag.test.tsx` (4 testes) + extensões em `receita-despesa.test.tsx`, `sprint25b.test.tsx`, `sprint25c.test.tsx`, `sprint25d.test.tsx`, `sprint25e.test.tsx` e um índice de rastreabilidade em `clareza-conceitual.test.tsx`: suíte de 207 para **228 testes**, `tsc --noEmit` limpo, `eslint` só com os 10 avisos pré-existentes. |

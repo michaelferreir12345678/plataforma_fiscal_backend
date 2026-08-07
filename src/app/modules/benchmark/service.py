@@ -815,15 +815,13 @@ def _unique_sources(values: list[BenchmarkValue]) -> list[SourceRef]:
 
 
 def _rgf_periodo(periodo_rreo: str) -> str | None:
-    """Converte o RREO bimestral usado na RCL ao RGF quadrimestral do numerador."""
-    if "-Q" in periodo_rreo:
-        return periodo_rreo
-    try:
-        ano, bimestre = periodo_rreo.split("-B", 1)
-        numero = int(bimestre)
-    except (ValueError, TypeError):
-        return None
-    return f"{ano}-Q{(numero + 1) // 2}"
+    """Converte o RREO bimestral usado na RCL ao RGF do **ciclo corrente** do numerador.
+
+    Delega à regra canônica (§6.6) — era uma das seis cópias da A25. Aqui a semântica
+    sempre foi a do teto (B3 ⇒ Q2): o numerador de pessoal vem do RGF em curso, e
+    devolver ``None`` no bimestre ímpar apagaria a linhagem do valor exibido.
+    """
+    return periodo_util.em_periodo_rgf(periodo_rreo, quando=periodo_util.CICLO_CORRENTE)
 
 
 def _add_personnel_lineage(

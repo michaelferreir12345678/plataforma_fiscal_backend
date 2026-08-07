@@ -23,6 +23,7 @@ from app.modules.dashboard.models import MartCarteira
 from app.modules.indicators import service as indicators_service
 from app.modules.indicators.models import FatoRcl, MartIndicador
 from app.modules.ingestion.models import DimEntrega, SilverEnte, SilverRreo
+from app.workers import carteira_tasks
 from tests.conftest import auth_header, login
 
 PERIODO = "2024-B6"
@@ -231,7 +232,16 @@ def test_entes_filtro_por_porte(client, make_org, limpar) -> None:
     assert grande not in cods
 
 
-def test_refresh_materializa_escopo(client, make_org, limpar) -> None:
+def test_refresh_enfileira_job_e_o_job_materializa_o_escopo(
+    client, make_org, limpar
+) -> None:
+    """Sprint E1: o refresh deixou de percorrer o escopo dentro da requisição.
+
+    O contrato mudou de ``200 {linhas_materializadas}`` para ``202 {job}``: para uma
+    licença global o laço antigo tinha 5.598 iterações num handler HTTP. O que **não**
+    mudou é o resultado — o job materializa exatamente o mesmo que o laço síncrono
+    materializava, e é isto que este teste prende.
+    """
     prefix = _prefix()
     a, b = _muni(prefix), _muni(prefix)
     limpar.extend([a, b])
@@ -253,14 +263,41 @@ def test_refresh_materializa_escopo(client, make_org, limpar) -> None:
     resp = client.post(
         "/carteira/refresh", params={"periodo": PERIODO}, headers=auth_header(token)
     )
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["linhas_materializadas"] == 2
+    assert resp.status_code == 202, resp.text
+    job = resp.json()
+    assert job["acao"] == "refresh"
+    assert job["status"] == "enfileirado"
+    assert job["periodo"] == PERIODO
+    assert sorted(job["entes"]) == sorted([a, b])
+    assert job["total_entes"] == 2
+
+    # A requisição não materializou nada — quem materializa é o worker.
+    ainda = client.get(
+        "/carteira/entes", params={"periodo": PERIODO}, headers=auth_header(token)
+    ).json()
+    assert {r["conformidade"] for r in ainda["data"]} == {"sem_dados"}
+
+    resumo = carteira_tasks.executar_pendentes()
+    assert resumo["falhas"] == 0
+    assert resumo["linhas"] >= 2, resumo
 
     depois = client.get(
         "/carteira/entes", params={"periodo": PERIODO}, headers=auth_header(token)
     ).json()
     conf = {r["cod_ibge"]: r["conformidade"] for r in depois["data"]}
     assert conf == {a: "critico", b: "alerta"}
+
+
+def test_refresh_com_escopo_vazio_recusa_em_vez_de_enfileirar_nada(
+    client, make_org
+) -> None:
+    """202 para um lote sem ente esconderia erro de cadastro atrás de um "aceito"."""
+    fx = make_org(tipo_conta="consultoria", capacidades=["ver", "administrar"], entes=[])
+    token = login(client, fx.email, fx.senha)
+    resp = client.post(
+        "/carteira/refresh", params={"periodo": PERIODO}, headers=auth_header(token)
+    )
+    assert resp.status_code == 422, resp.text
 
 
 def test_lote_enfileira_e_valida_escopo(client, make_org, limpar) -> None:

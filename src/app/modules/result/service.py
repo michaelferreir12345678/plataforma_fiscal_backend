@@ -93,12 +93,12 @@ def _bimestre(periodo: str) -> int:
 
 
 def _periodo_rgf(periodo: str) -> str | None:
-    """Período RGF (quadrimestral) correspondente, para cruzar a DCL (só bimestres pares)."""
-    m = _PERIODO_BIMESTRAL_RE.match(periodo)
-    if m is None:
-        return None
-    b = int(m.group(2))
-    return f"{m.group(1)}-Q{b // 2}" if b % 2 == 0 else None
+    """Período RGF do **ciclo fechado**, para cruzar a DCL (só bimestres pares).
+
+    Delega à regra canônica (§6.6) — era uma das seis cópias da A25, com a mesma
+    semântica conservadora que se mantém aqui.
+    """
+    return periodo_util.em_periodo_rgf(periodo, quando=periodo_util.CICLO_FECHADO)
 
 
 def _decimal(v: object) -> Decimal | None:

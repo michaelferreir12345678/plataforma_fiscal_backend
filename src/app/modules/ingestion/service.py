@@ -12,6 +12,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.core.deps import Principal
 from app.core.errors import AppError
 from app.modules.ingestion import cobertura as cobertura_mod
 from app.modules.ingestion import integracoes, repository
@@ -49,6 +50,7 @@ from app.modules.ingestion.schemas import (
 )
 from app.shared.ingestion.base import BaseConnector, IngestionJob
 from app.shared.ingestion.client import ClientResolver
+from app.shared.scope import assert_ente_in_scope
 from app.shared.source_ref import SourceRef
 
 # Silver tipado por relatório (leitura as_of). MSC tem forma própria.
@@ -377,12 +379,22 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
 def read_data(
     session: Session,
     *,
+    principal: Principal,
     fonte: str,
     ente: str,
     periodo: str,
     as_of: datetime | None = None,
 ) -> DataResponse:
-    """Leitura silver 'as of' (§6.5): resolve a versão efetiva e retorna suas linhas."""
+    """Leitura silver 'as of' (§6.5): resolve a versão efetiva e retorna suas linhas.
+
+    **A22 (E1):** o gate de escopo é conferido aqui, e não só no roteador, porque é dentro
+    dele que vive o gate de **licença**. O dado do SICONFI é público, então não há
+    vazamento entre organizações; o que estava furado era o contrato comercial — uma conta
+    licenciada para um município lia o silver de qualquer um dos 5.598. Repetir o
+    ``assert`` no serviço fecha o caminho programático (worker, script, outro módulo), que
+    não passa pelo roteador.
+    """
+    assert_ente_in_scope(session, principal, ente)
     model = SILVER_MODEL_BY_FONTE.get(fonte)
     if model is None:
         raise AppError(

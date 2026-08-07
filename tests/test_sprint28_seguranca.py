@@ -221,6 +221,11 @@ def test_identificador_de_outra_organizacao_nao_e_acessivel_por_id(
 
     O artefato é criado **pela API**, como o cliente cria: montá-lo à mão no banco
     testaria um objeto que talvez o produto nunca produza.
+
+    **Sprint E1:** a asserção era ``in {403, 404}`` e por isso não protegia nada — 403
+    diz "existe, e você não pode", que é justamente a existência vazando. Agora é
+    ``== 404``. A matriz completa (as cinco famílias, leitura **e** mutação) está em
+    ``test_sprint_e1_isolamento.py``; aqui fica o caso criado pelo caminho real do produto.
     """
     dono = make_org(entes=[FORTALEZA])
     intruso = make_org(entes=[MARACANAU])
@@ -245,7 +250,7 @@ def test_identificador_de_outra_organizacao_nao_e_acessivel_por_id(
     # O vizinho, com o mesmo identificador em mãos, não.
     h_intruso = auth_header(login(client, intruso.email, intruso.senha))
     resposta = client.get(f"/relatorios/{relatorio_id}", headers=h_intruso)
-    assert resposta.status_code in {403, 404}, resposta.text
+    assert resposta.status_code == 404, resposta.text
     assert FORTALEZA not in resposta.text, "o corpo do erro vazou o ente do outro tenant"
 
 

@@ -196,11 +196,12 @@ _GATILHO_DE_ENTE = re.compile(r"\{cod_ibge\}|\bentes?\s*:\s*(?:str|list\[str\])[
 #: Módulos sem gate por ente no roteador nem no serviço, com o motivo de cada um:
 #: * ``platform`` — control plane, exclusivo do operador da plataforma; não há carteira
 #:   a respeitar, e é a única sessão que legitimamente enxerga todos os entes.
-#: * ``ingestion`` — **achado A22 desta auditoria**, não uma exceção legítima:
-#:   ``GET /ingestao/data?ente=`` lê o silver de qualquer ente com a só capacidade
-#:   ``administrar``. Fica na lista para que a catraca proteja o resto enquanto a E1 não
-#:   fecha; quando fechar, o conjunto encolhe e o teste continua passando.
-_SEM_GATE_CONHECIDOS = {"platform", "ingestion"}
+#:
+#: ``ingestion`` esteve aqui como o **achado A22**, não como exceção legítima. A Sprint E1
+#: fechou o gate em ``GET /ingestao/data`` (roteador **e** serviço) e o módulo saiu da
+#: lista — a catraca é unilateral, então a redução do conjunto é exatamente o que ela
+#: aceita.
+_SEM_GATE_CONHECIDOS = {"platform"}
 
 
 def _texto(caminho: Path) -> str:
@@ -235,11 +236,12 @@ def test_rota_de_ente_sem_gate_de_escopo_nao_pode_crescer() -> None:
 # --------------------------------------------------------------------------- #
 # P4 — regra fiscal duplicada: bimestre RREO → quadrimestre RGF (catraca)
 # --------------------------------------------------------------------------- #
-#: A conversão está reimplementada nestes seis lugares, em **duas** semânticas: bimestre
-#: ímpar vira ``None`` em três deles e vira quadrimestre por teto nos outros três. Nenhum
-#: conhece o RGF **semestral** do município com menos de 50 mil habitantes (LRF art. 63).
-#: A regra canônica de período é ``app/shared/periodo.py``, que hoje só tem a inversa
-#: (``em_bimestre``). Consolidar reduz este conjunto — e a catraca aceita a redução.
+#: A conversão estava reimplementada nestes seis lugares, em **duas** semânticas: bimestre
+#: ímpar virava ``None`` em três deles e quadrimestre por teto nos outros três. Nenhum
+#: conhecia o RGF **semestral** do município com menos de 50 mil habitantes (LRF art. 63).
+#: A Sprint E1 consolidou tudo em ``app/shared/periodo.py::em_periodo_rgf``, com as duas
+#: semânticas **nomeadas** (``CICLO_FECHADO`` × ``CICLO_CORRENTE``) e cada chamador
+#: declarando a sua; o conjunto encontrado hoje é vazio, e a catraca aceita a redução.
 _CONVERSAO_B_PARA_Q: frozenset[str] = frozenset(
     {
         "benchmark/service.py",

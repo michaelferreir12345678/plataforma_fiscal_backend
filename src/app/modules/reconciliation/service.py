@@ -43,6 +43,7 @@ from app.modules.reconciliation.schemas import (
     ReconciliacaoResultado,
     ReconciliacaoResumo,
 )
+from app.shared.source_ref import SourceRef
 
 #: Tolerância. Um centavo cobre o arredondamento do Decimal; acima disso é divergência de
 #: verdade. Alargar isto seria esconder diferença por arredondamento — exatamente o que a
@@ -60,6 +61,13 @@ class Comparacao:
     fonte_oficial: str
     metodologia: str
     sql: str
+    #: Relatório/anexo de cada lado, para o ``source_ref`` do par (A26/E1). A comparação
+    #: só prova alguma coisa porque os dois lados vêm de caminhos independentes — então
+    #: os dois precisam declarar de onde vieram.
+    relatorio_plataforma: str = "RREO"
+    anexo_plataforma: str | None = "Anexo 03"
+    relatorio_oficial: str = "RGF"
+    anexo_oficial: str | None = "Anexo 02"
 
 
 #: A RCL é o caso mais valioso: é o denominador de quase todo limite da LRF, e o ente
@@ -89,6 +97,7 @@ _RCL = Comparacao(
                    when r.coluna like 'Até o 3%%' then '3'
                  end as quad_alvo,
                  r.periodo as periodo_publicador,
+                 r.versao_entrega,
                  r.valor
           from silver.siconfi_rgf r
           join gold.dim_entrega e
@@ -103,7 +112,7 @@ _RCL = Comparacao(
         -- entre versões do mesmo período.
         oficial as (
           select distinct on (cod_ibge, ano, quad_alvo)
-                 cod_ibge, ano, quad_alvo, valor
+                 cod_ibge, ano, quad_alvo, valor, versao_entrega, periodo_publicador
           from candidatos
           where quad_alvo is not null
           order by cod_ibge, ano, quad_alvo, periodo_publicador desc
@@ -111,7 +120,11 @@ _RCL = Comparacao(
         select o.cod_ibge,
                (o.ano || '-Q' || o.quad_alvo) as periodo,
                o.valor as valor_oficial,
-               f.rcl_12m as valor_plataforma
+               f.rcl_12m as valor_plataforma,
+               o.versao_entrega as versao_oficial,
+               o.periodo_publicador as periodo_oficial,
+               f.versao_entrega as versao_plataforma,
+               f.periodo_ref as periodo_plataforma
         from oficial o
         join gold.fato_rcl f
           on f.cod_ibge = o.cod_ibge
@@ -121,6 +134,11 @@ _RCL = Comparacao(
 )
 
 COMPARACOES: dict[str, Comparacao] = {_RCL.codigo: _RCL}
+
+
+def _source_ref_oficial(comp: Comparacao) -> SourceRef:
+    """Procedência do lado oficial da comparação, sem versão (ela é por par)."""
+    return SourceRef(relatorio=comp.relatorio_oficial, anexo=comp.anexo_oficial)
 
 
 def _causa_provavel(oficial: Decimal, plataforma: Decimal) -> str:
@@ -168,12 +186,15 @@ def build_reconciliacao(
             metodologia=comp.metodologia,
             resumo=ReconciliacaoResumo(pares=0, conferem=0, divergem=0, sem_par=0),
             divergencias=[],
+            source_ref=_source_ref_oficial(comp),
         )
 
-    linhas = session.execute(text(comp.sql), {"entes": sorted(entes)}).all()
+    linhas = session.execute(text(comp.sql), {"entes": sorted(entes)}).mappings().all()
     conferem = divergem = sem_par = 0
     itens: list[DivergenciaItem] = []
-    for cod_ibge, periodo, oficial, plataforma in linhas:
+    for linha in linhas:
+        oficial = linha["valor_oficial"]
+        plataforma = linha["valor_plataforma"]
         if oficial is None or plataforma is None:
             sem_par += 1
             continue
@@ -186,14 +207,26 @@ def build_reconciliacao(
         divergem += 1
         itens.append(
             DivergenciaItem(
-                cod_ibge=cod_ibge,
-                periodo=periodo,
+                cod_ibge=linha["cod_ibge"],
+                periodo=linha["periodo"],
                 valor_plataforma=pl,
                 valor_oficial=of,
                 diferenca=diferenca,
                 # Sem denominador não há percentual; devolver zero sugeriria "sem diferença".
                 diferenca_pct=(diferenca / of * 100) if of else None,
                 causa_provavel=_causa_provavel(of, pl),
+                source_ref_plataforma=SourceRef(
+                    relatorio=comp.relatorio_plataforma,
+                    anexo=comp.anexo_plataforma,
+                    periodo=linha["periodo_plataforma"],
+                    versao_entrega=linha["versao_plataforma"],
+                ),
+                source_ref_oficial=SourceRef(
+                    relatorio=comp.relatorio_oficial,
+                    anexo=comp.anexo_oficial,
+                    periodo=linha["periodo_oficial"],
+                    versao_entrega=linha["versao_oficial"],
+                ),
             )
         )
 
@@ -209,4 +242,5 @@ def build_reconciliacao(
         ),
         divergencias=itens[:limite],
         truncado=len(itens) > limite,
+        source_ref=_source_ref_oficial(comp),
     )

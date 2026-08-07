@@ -125,7 +125,7 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def recover_report_jobs() -> None:
         """Retoma fila persistida e dispara agendamentos vencidos após restart."""
-        from app.workers import ingest_jobs, quality_tasks, report_tasks
+        from app.workers import carteira_tasks, ingest_jobs, quality_tasks, report_tasks
 
         report_tasks.recover_pending()
         report_tasks.executar_agendamentos()
@@ -135,6 +135,7 @@ def create_app() -> FastAPI:
         if not settings.scheduler_em_processo_separado:
             report_tasks.start_scheduler()
             quality_tasks.start_scheduler()
+            carteira_tasks.start_scheduler()
         # Reentrega pendências duráveis; o consumidor in-process é apenas opt-in local.
         ingest_jobs.recover_pending()
         if settings.ingest_worker_in_process:
@@ -146,10 +147,11 @@ def create_app() -> FastAPI:
         from app.workers import ingest_jobs, report_tasks
 
         if not settings.scheduler_em_processo_separado:
-            from app.workers import quality_tasks
+            from app.workers import carteira_tasks, quality_tasks
 
             report_tasks.stop_scheduler()
             quality_tasks.stop_scheduler()
+            carteira_tasks.stop_scheduler()
         if settings.ingest_worker_in_process:
             ingest_jobs.stop_worker()
 

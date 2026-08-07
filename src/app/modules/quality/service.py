@@ -15,6 +15,7 @@ quando algo crítico quebra. Três invariantes deste módulo:
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
@@ -38,7 +39,9 @@ from app.modules.quality.schemas import (
     QualidadeResponse,
     ResumoQualidade,
 )
+from app.shared import periodo as periodo_util
 from app.shared.scope import carteira_scope_ibges
+from app.shared.source_ref import SourceRef
 
 ROTULOS: dict[str, str] = {
     "receita_soma_filhos": "Receita: soma das origens = total",
@@ -61,6 +64,21 @@ CATEGORIA_QUALIDADE = "qualidade_dado"
 CATEGORIA_FALHA_INGESTAO = "falha_ingestao"
 _LINK_CENTRAL = "/central-dados?painel=qualidade"
 
+#: Sentinela de chave para o check que não se ancora numa entrega (A26/E1).
+#: ``versao_entrega`` entrou na chave única de ``gold.data_quality_check`` para que uma
+#: retificação **crie linha nova** em vez de sobrescrever o veredito da versão anterior.
+#: Em PostgreSQL, ``NULL`` é distinto de ``NULL`` numa UNIQUE — usar NULL aqui faria o
+#: *upsert* nunca conflitar e empilhar uma linha por execução do check de atualidade.
+SEM_VERSAO = "-"
+
+#: Relatório de origem por fonte de ingestão, para montar o ``source_ref`` do check.
+_RELATORIO_POR_FONTE: dict[str, str] = {
+    "siconfi_rreo": "RREO",
+    "siconfi_rgf": "RGF",
+    "siconfi_dca": "DCA",
+    "siconfi_msc": "MSC",
+}
+
 
 def rotulo(codigo: str) -> str:
     return ROTULOS.get(codigo, codigo.replace("_", " ").capitalize())
@@ -80,14 +98,35 @@ def _versao_vigente(session: Session, cod_ibge: str, relatorio: str, periodo: st
     )
 
 
+def _versao_vigente_do_exercicio(
+    session: Session, cod_ibge: str, relatorio: str, ano: int
+) -> str | None:
+    """Entrega vigente do exercício, qualquer que seja o rótulo do período anual.
+
+    A DCA é anual, mas o período gravado em ``gold.dim_entrega`` nem sempre é o ano puro;
+    casar por prefixo evita depender do rótulo para saber qual entrega foi conferida.
+    """
+    return session.scalar(
+        select(DimEntrega.versao_entrega)
+        .where(
+            DimEntrega.cod_ibge == cod_ibge,
+            DimEntrega.relatorio == relatorio,
+            DimEntrega.periodo.startswith(str(ano)),
+            DimEntrega.vigente.is_(True),
+        )
+        .order_by(DimEntrega.periodo)
+        .limit(1)
+    )
+
+
 def _rgf_de_rreo(periodo_rreo: str) -> str | None:
-    """RREO bimestral → RGF quadrimestral correspondente (B2→Q1, B4→Q2, B6→Q3)."""
-    try:
-        ano, bim = periodo_rreo.split("-B", 1)
-        numero = int(bim)
-    except (ValueError, TypeError):
-        return None
-    return f"{ano}-Q{(numero + 1) // 2}" if numero % 2 == 0 else None
+    """RREO bimestral → RGF do **ciclo fechado** (B2→Q1, B4→Q2, B6→Q3).
+
+    Delega à regra canônica (§6.6). Era uma das seis cópias da A25; a semântica
+    conservadora (bimestre ímpar ⇒ sem RGF correspondente) é a que este módulo sempre
+    teve, e continua sendo — só que agora **declarada**, não implícita.
+    """
+    return periodo_util.em_periodo_rgf(periodo_rreo, quando=periodo_util.CICLO_FECHADO)
 
 
 def _exercicio(periodo: str) -> int | None:
@@ -105,32 +144,42 @@ def executar_para_ente(
     job_id: uuid.UUID | None = None,
     hoje: date | None = None,
 ) -> list[ResultadoCheck]:
-    """Roda todos os checks aplicáveis ao ente/período. Não levanta: coleta resultados."""
+    """Roda todos os checks aplicáveis ao ente/período. Não levanta: coleta resultados.
+
+    Cada resultado sai carimbado com a ``versao_entrega`` sobre a qual foi conferido
+    (A26/E1): a entrega vigente do RREO para os checks ancorados no bimestre, a do RGF
+    para os dois que cruzam o quadrimestre. Os de atualidade (*freshness*) não têm
+    entrega — eles medem justamente a **ausência** dela — e ficam com ``None``.
+    """
     resultados: list[ResultadoCheck] = []
     versao = _versao_vigente(session, cod_ibge, "RREO", periodo_rreo)
     if versao is not None:
-        resultados.append(checks_mod.receita_soma_filhos(session, cod_ibge, periodo_rreo, versao))
-        resultados.append(checks_mod.despesa_estagios(session, cod_ibge, periodo_rreo, versao))
-        resultados.append(
-            checks_mod.rcl_calculada_vs_publicada(session, cod_ibge, periodo_rreo, versao)
-        )
+        rreo: list[ResultadoCheck] = [
+            checks_mod.receita_soma_filhos(session, cod_ibge, periodo_rreo, versao),
+            checks_mod.despesa_estagios(session, cod_ibge, periodo_rreo, versao),
+            checks_mod.rcl_calculada_vs_publicada(session, cod_ibge, periodo_rreo, versao),
+        ]
         for area in ("saude", "educacao"):
-            resultados.append(
+            rreo.append(
                 checks_mod.minimo_recalculado_vs_materializado(
                     session, cod_ibge, periodo_rreo, area
                 )
             )
+        resultados.extend(replace(r, versao_entrega=versao) for r in rreo)
     periodo_rgf = _rgf_de_rreo(periodo_rreo)
     if periodo_rgf:
-        resultados.append(
-            checks_mod.dcl_a6_vs_rgf(session, cod_ibge, periodo_rreo, periodo_rgf)
-        )
-        resultados.append(
-            checks_mod.mart_vs_detalhe_pessoal(session, cod_ibge, periodo_rreo, periodo_rgf)
-        )
+        versao_rgf = _versao_vigente(session, cod_ibge, "RGF", periodo_rgf)
+        cruzados = [
+            checks_mod.dcl_a6_vs_rgf(session, cod_ibge, periodo_rreo, periodo_rgf),
+            checks_mod.mart_vs_detalhe_pessoal(session, cod_ibge, periodo_rreo, periodo_rgf),
+        ]
+        resultados.extend(replace(r, versao_entrega=versao_rgf) for r in cruzados)
     ano = _exercicio(periodo_rreo)
     if ano is not None:
-        resultados.append(checks_mod.msc_vs_dca(session, cod_ibge, ano))
+        versao_dca = _versao_vigente_do_exercicio(session, cod_ibge, "DCA", ano)
+        resultados.append(
+            replace(checks_mod.msc_vs_dca(session, cod_ibge, ano), versao_entrega=versao_dca)
+        )
     for sla in checks_mod.SLAS:
         resultados.append(checks_mod.freshness(session, sla, cod_ibge=cod_ibge, hoje=hoje))
     return resultados
@@ -147,6 +196,7 @@ def persistir(
                 "fonte": r.fonte,
                 "cod_ibge": r.cod_ibge,
                 "periodo": r.periodo,
+                "versao_entrega": r.versao_entrega or SEM_VERSAO,
                 "check_codigo": r.check_codigo,
                 "status": r.status,
                 "esquerda": r.esquerda,
@@ -307,6 +357,28 @@ def _acao_alerta(r: ResultadoCheck) -> str:
 # --------------------------------------------------------------------------- #
 # Leitura (painel)
 # --------------------------------------------------------------------------- #
+def _versao_declarada(row: DataQualityCheck) -> str | None:
+    """``SEM_VERSAO`` é sentinela de chave, não versão: não vaza para o contrato."""
+    versao = row.versao_entrega
+    return None if versao in (None, SEM_VERSAO) else versao
+
+
+def source_ref_do_check(row: DataQualityCheck) -> SourceRef | None:
+    """Procedência do número que o check compara (§6.3).
+
+    Sem entrega conferida não há ``source_ref``: um check de atualidade mede a ausência
+    da entrega, e inventar uma referência para ele seria pior que não ter nenhuma.
+    """
+    versao = _versao_declarada(row)
+    if versao is None:
+        return None
+    return SourceRef(
+        relatorio=_RELATORIO_POR_FONTE.get(row.fonte, row.fonte.upper()),
+        periodo=row.periodo,
+        versao_entrega=versao,
+    )
+
+
 def _to_out(row: DataQualityCheck) -> CheckOut:
     return CheckOut(
         id=row.id,
@@ -314,6 +386,7 @@ def _to_out(row: DataQualityCheck) -> CheckOut:
         fonte=row.fonte,
         cod_ibge=row.cod_ibge,
         periodo=row.periodo,
+        versao_entrega=_versao_declarada(row),
         check_codigo=row.check_codigo,
         rotulo=rotulo(row.check_codigo),
         status=row.status,
@@ -323,6 +396,7 @@ def _to_out(row: DataQualityCheck) -> CheckOut:
         tolerancia=row.tolerancia,
         detalhe=row.detalhe or {},
         executado_em=row.executado_em,
+        source_ref=source_ref_do_check(row),
     )
 
 

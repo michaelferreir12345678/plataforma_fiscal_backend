@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 import time
+import uuid
 from collections import Counter, OrderedDict, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -31,7 +32,13 @@ from app.modules.dashboard.carteira_schemas import (
     MapaEnte,
     ResumoIndicador,
 )
-from app.modules.dashboard.models import LOTE_ACOES, MartCarteira
+from app.modules.dashboard.models import (
+    ACAO_REFRESH,
+    LOTE_ACOES,
+    LOTE_STATUS_CONCLUIDO,
+    LOTE_STATUS_EXECUTANDO,
+    MartCarteira,
+)
 from app.modules.dashboard.service import COR_POR_FAIXA
 from app.modules.indicators import repository as indicators_repo
 from app.modules.limits import repository as limits_repo
@@ -176,10 +183,71 @@ def refresh_mart_carteira(
 
 
 def refresh_scope(session: Session, principal: Principal, periodo: str) -> int:
-    """Materializa ``mart_carteira`` para todos os entes no escopo (operacional)."""
+    """Materializa ``mart_carteira`` para todos os entes no escopo (operacional).
+
+    Continua existindo para uso **fora de requisição** (worker, script de carga). Desde a
+    E1 nenhum handler HTTP a chama: para uma licença global o laço tem 5.598 iterações, e
+    isso não cabe num request. O caminho HTTP é :func:`enfileirar_refresh`.
+    """
     total = 0
     for cod in sorted(scope.carteira_scope_ibges(session, principal)):
         total += refresh_mart_carteira(session, cod, periodo)
+    return total
+
+
+def enfileirar_refresh(
+    session: Session, principal: Principal, periodo: str
+) -> LoteJobOut:
+    """Cria o job durável que materializa ``mart_carteira`` para o escopo (E1).
+
+    Não percorre o escopo: resolve **quais** entes entram (uma consulta de conjunto, a
+    mesma que a leitura da carteira já faz) e devolve o job. A materialização acontece
+    fora da requisição, em :func:`executar_refresh_job`.
+
+    Sem teto artificial de entes: nada aqui cresce com o tamanho do escopo além da lista
+    persistida no próprio job. Escopo vazio é 422 — enfileirar trabalho para ninguém
+    esconderia um erro de cadastro atrás de um 202.
+    """
+    if principal.org_id is None:
+        raise AppError(status=400, title="Sem organização", detail="Principal sem org ativa.")
+    entes = sorted(scope.carteira_scope_ibges(session, principal))
+    if not entes:
+        raise AppError(
+            status=422,
+            title="Escopo vazio",
+            detail="Nenhum ente no escopo para materializar.",
+        )
+    job = carteira_repo.insert_lote_job(
+        session,
+        org_id=principal.org_id,
+        acao=ACAO_REFRESH,
+        periodo=periodo,
+        entes=entes,
+        filtro={"periodo": periodo},
+        criado_por=principal.usuario_id,
+    )
+    return LoteJobOut.model_validate(job)
+
+
+def executar_refresh_job(session: Session, job_id: uuid.UUID) -> int:
+    """Executa um job ``refresh`` já persistido. Retorna as linhas materializadas.
+
+    Idempotente por construção (``refresh_mart_carteira`` faz *upsert*): reexecutar um job
+    concluído recalcula o mesmo snapshot. Um ente sem entrega vigente contribui zero
+    linhas e não derruba o lote — o mesmo contrato do laço síncrono anterior.
+    """
+    job = carteira_repo.get_lote_job(session, job_id)
+    if job is None or job.acao != ACAO_REFRESH:
+        raise AppError(
+            status=404, title="Job de refresh inexistente", detail=str(job_id)
+        )
+    job.status = LOTE_STATUS_EXECUTANDO
+    session.flush()
+    total = 0
+    for cod in job.entes:
+        total += refresh_mart_carteira(session, str(cod), job.periodo or "")
+    job.status = LOTE_STATUS_CONCLUIDO
+    session.flush()
     return total
 
 

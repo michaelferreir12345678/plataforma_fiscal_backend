@@ -94,12 +94,12 @@ def rreo_periodo_de_rgf(periodo: str) -> str | None:
 
 
 def rgf_periodo_de_rreo(periodo_rreo: str) -> str | None:
-    """Quadrimestre RGF correspondente ao bimestre RREO (só bimestres pares: B2→Q1…)."""
-    m = re.match(r"^(\d{4})-B([1-6])$", periodo_rreo)
-    if m is None:
-        return None
-    b = int(m.group(2))
-    return f"{m.group(1)}-Q{b // 2}" if b % 2 == 0 else None
+    """Quadrimestre RGF do **ciclo fechado** pelo bimestre RREO (só pares: B2→Q1…).
+
+    Delega à regra canônica (§6.6) — era uma das seis cópias da A25. A semântica não
+    mudou: o expurgo de RPNP sem lastro só tem RGF a que se ancorar em bimestre par.
+    """
+    return periodo_util.em_periodo_rgf(periodo_rreo, quando=periodo_util.CICLO_FECHADO)
 
 
 def _resolve_versao_rgf(

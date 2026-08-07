@@ -7,18 +7,63 @@ from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, not_, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.modules.quality.models import DataQualityCheck, LineageEdge
 
 
+def _somente_vigente() -> ColumnElement[bool]:
+    """Predicado que mantém, por chave de check, apenas o veredito mais recente.
+
+    Desde a E1 (A26) a ``versao_entrega`` faz parte da chave única: uma retificação cria
+    **linha nova** em vez de sobrescrever o resultado da versão anterior. O histórico é
+    justamente o ganho — mas o painel e o selo mostram estado, não série, e sem este
+    filtro um "falha" de uma entrega já retificada continuaria selando a página.
+
+    O desempate por ``id`` garante exatamente uma linha por chave mesmo se duas versões
+    forem verificadas no mesmo instante.
+    """
+    superior = aliased(DataQualityCheck)
+    mais_novo = (
+        select(superior.id)
+        .where(
+            superior.check_codigo == DataQualityCheck.check_codigo,
+            superior.fonte == DataQualityCheck.fonte,
+            superior.cod_ibge.is_not_distinct_from(DataQualityCheck.cod_ibge),
+            superior.periodo.is_not_distinct_from(DataQualityCheck.periodo),
+            or_(
+                superior.executado_em > DataQualityCheck.executado_em,
+                and_(
+                    superior.executado_em == DataQualityCheck.executado_em,
+                    superior.id > DataQualityCheck.id,
+                ),
+            ),
+        )
+        .exists()
+    )
+    return not_(mais_novo)
+
+
 def upsert_check(session: Session, valores: dict[str, Any]) -> None:
-    """Grava o estado corrente do check — reexecutar atualiza, não empilha."""
-    stmt = pg_insert(DataQualityCheck).values(id=uuid.uuid4(), **valores)
+    """Grava o estado corrente do check para **aquela entrega**.
+
+    Reexecutar sobre a mesma versão atualiza a linha; reexecutar depois de uma retificação
+    grava uma linha nova, porque a ``versao_entrega`` entrou na chave (A26/E1). O painel
+    continua mostrando o estado corrente — o que deixou de existir é a sobrescrita muda do
+    veredito da versão anterior.
+    """
+    # ``executado_em`` é gravado pelo relógio da aplicação também na inserção, e não pelo
+    # ``server_default``: em PostgreSQL, ``now()`` é o instante da **transação**, então
+    # dois vereditos gravados no mesmo commit ficariam com o mesmo carimbo — e a eleição
+    # do veredito vigente por chave passaria a depender do desempate por ``id``, que é
+    # aleatório. Com o relógio da aplicação, a ordem é a ordem real das execuções.
+    agora = datetime.now(UTC)
+    stmt = pg_insert(DataQualityCheck).values(id=uuid.uuid4(), executado_em=agora, **valores)
     stmt = stmt.on_conflict_do_update(
-        constraint="uq_data_quality_check_chave",
+        constraint="uq_data_quality_check_chave_versao",
         set_={
             "job_id": stmt.excluded.job_id,
             "status": stmt.excluded.status,
@@ -27,7 +72,7 @@ def upsert_check(session: Session, valores: dict[str, Any]) -> None:
             "diferenca": stmt.excluded.diferenca,
             "tolerancia": stmt.excluded.tolerancia,
             "detalhe": stmt.excluded.detalhe,
-            "executado_em": datetime.now(UTC),
+            "executado_em": agora,
         },
     )
     session.execute(stmt)
@@ -44,7 +89,7 @@ def listar_checks(
     limite: int = 100,
     offset: int = 0,
 ) -> tuple[list[DataQualityCheck], int]:
-    stmt = select(DataQualityCheck)
+    stmt = select(DataQualityCheck).where(_somente_vigente())
     if fonte:
         stmt = stmt.where(DataQualityCheck.fonte == fonte)
     if status:
@@ -77,7 +122,11 @@ def listar_checks(
 def contar_por_status(
     session: Session, *, cods_escopo: Iterable[str] | None = None
 ) -> dict[str, int]:
-    stmt = select(DataQualityCheck.status, func.count()).group_by(DataQualityCheck.status)
+    stmt = (
+        select(DataQualityCheck.status, func.count())
+        .where(_somente_vigente())
+        .group_by(DataQualityCheck.status)
+    )
     if cods_escopo is not None:
         codigos = list(cods_escopo)
         stmt = stmt.where(
@@ -93,6 +142,8 @@ def checks_abertos(
     stmt = select(DataQualityCheck).where(
         DataQualityCheck.cod_ibge == cod_ibge,
         DataQualityCheck.status.in_(("falha", "aviso")),
+        # A entrega retificada não sela a página com o veredito da versão superada.
+        _somente_vigente(),
     )
     if periodo:
         stmt = stmt.where(

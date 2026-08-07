@@ -89,6 +89,72 @@ def em_bimestre(periodo: str) -> str | None:
     return formatar(ano, "B", bimestre) if 1 <= bimestre <= POR_ANO["B"] else None
 
 
+#: Cadências em que o RGF é publicado. Quadrimestral é a regra geral; **semestral** é a
+#: faculdade do município com menos de 50 mil habitantes (LRF, art. 63, II).
+CADENCIA_QUADRIMESTRAL = "quadrimestral"
+CADENCIA_SEMESTRAL = "semestral"
+
+#: As duas semânticas que a A25 encontrou espalhadas pelo código — sem nome, e por isso
+#: aplicadas ao acaso. Elas respondem perguntas **diferentes** sobre o bimestre ímpar:
+#:
+#: * ``CICLO_FECHADO`` — "qual RGF fecha o mesmo mês que este bimestre?". B2/B4/B6 fecham
+#:   Q1/Q2/Q3; B1/B3/B5 não fecham quadrimestre nenhum, e a resposta honesta é ``None``.
+#: * ``CICLO_CORRENTE`` — "dentro de qual ciclo de RGF este bimestre cai?". Aqui B3 cai no
+#:   Q2 em curso, e a resposta é ``Q2`` mesmo sem o quadrimestre ter fechado.
+#:
+#: Nenhuma das duas é errada; o defeito era não dizer qual estava em uso.
+CICLO_FECHADO = "ciclo_fechado"
+CICLO_CORRENTE = "ciclo_corrente"
+
+_TIPO_POR_CADENCIA: dict[str, str] = {
+    CADENCIA_QUADRIMESTRAL: "Q",
+    CADENCIA_SEMESTRAL: "S",
+}
+
+
+def em_periodo_rgf(
+    periodo: str,
+    *,
+    cadencia: str = CADENCIA_QUADRIMESTRAL,
+    quando: str = CICLO_FECHADO,
+) -> str | None:
+    """Converte um bimestre do RREO ao período do RGF correspondente (inversa de
+    :func:`em_bimestre`).
+
+    Fonte única da conversão (§6.6). Antes da E1 ela existia **seis vezes**, em duas
+    semânticas contraditórias: para ``2024-B3``, metade da plataforma dizia "não há RGF
+    correspondente" e a outra metade apontava ``2024-Q2``. Nenhuma das seis conhecia a
+    cadência **semestral** do art. 63, II, da LRF.
+
+    A ambiguidade não se resolve escolhendo uma das duas: são perguntas diferentes, e as
+    duas têm uso legítimo. O que a consolidação faz é **obrigar quem chama a dizer qual**
+    — ``quando=CICLO_FECHADO`` (padrão, conservador) ou ``quando=CICLO_CORRENTE``.
+
+    Idempotente: um período já na cadência pedida volta como está. Período anual, mensal
+    ou fora da faixa devolve ``None`` — inventar ``2024-Q4`` seria pior que não responder.
+    """
+    tipo_alvo = _TIPO_POR_CADENCIA.get(cadencia)
+    if tipo_alvo is None:
+        raise ValueError(f"Cadência de RGF desconhecida: {cadencia!r}")
+    if quando not in (CICLO_FECHADO, CICLO_CORRENTE):
+        raise ValueError(f"Semântica de conversão desconhecida: {quando!r}")
+    try:
+        ano, tipo, num = parse(periodo)
+    except ValueError:
+        return None
+    if tipo is None or num is None:
+        return None
+    if tipo == tipo_alvo:
+        return periodo if 1 <= num <= POR_ANO[tipo_alvo] else None
+    if tipo != "B" or not 1 <= num <= POR_ANO["B"]:
+        return None
+    # Quantos bimestres cabem num período da cadência alvo: 2 no quadrimestre, 3 no semestre.
+    fator = POR_ANO["B"] // POR_ANO[tipo_alvo]
+    if quando == CICLO_FECHADO:
+        return formatar(ano, tipo_alvo, num // fator) if num % fator == 0 else None
+    return formatar(ano, tipo_alvo, -(-num // fator))  # teto da divisão
+
+
 def ordenar_chave(periodo: str) -> tuple[int, int]:
     """Chave de ordenação cronológica (ano, posição no ano). Inválido vai para o fim."""
     try:

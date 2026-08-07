@@ -117,10 +117,58 @@ def cobertura_licenca(
     return cobertura
 
 
+#: Chaves memorizadas em ``session.info`` por este módulo (uma sessão = uma requisição).
+_CHAVE_CARTEIRA = "escopo_carteira_ibges"
+_CHAVE_PREFIXOS = "escopo_prefixos_uf"
+_CHAVE_TIPO_CONTA = "escopo_conta_estadual"
+
+
 def invalidar_cobertura(session: Session, org_id: uuid.UUID) -> None:
-    """Descarta a cobertura memorizada — suspender licença tem de valer na hora."""
-    for chave in [k for k in session.info if isinstance(k, tuple) and k[:2] == ("licenca", org_id)]:
+    """Descarta o escopo memorizado — suspender licença tem de valer na hora.
+
+    Desde a E1 (A27) o cache não é só o da licença: o tipo de conta e os prefixos de UF
+    da carteira também são memorizados por requisição. Todos morrem no mesmo ponto, de
+    propósito — cache com dois pontos de invalidação é cache que sobrevive à mudança.
+    """
+    alvos = [
+        k
+        for k in session.info
+        if isinstance(k, tuple)
+        and (
+            k[:2] == ("licenca", org_id)
+            or k in ((_CHAVE_CARTEIRA, org_id), (_CHAVE_PREFIXOS, org_id),
+                     (_CHAVE_TIPO_CONTA, org_id))
+        )
+    ]
+    for chave in alvos:
         session.info.pop(chave, None)
+
+
+def invalidar_escopo_carteira(session: Session, org_id: uuid.UUID) -> None:
+    """Descarta o que depende da carteira, memorizado, após uma mutação dela.
+
+    Necessário porque a carteira **pode** mudar dentro da mesma requisição (cadastro em
+    lote seguido de leitura do escopo). A licença não muda por esta via, então só o que
+    depende da carteira é descartado.
+    """
+    session.info.pop((_CHAVE_CARTEIRA, org_id), None)
+    session.info.pop((_CHAVE_PREFIXOS, org_id), None)
+
+
+def _carteira_ibges(session: Session, org_id: uuid.UUID) -> tuple[str, ...]:
+    """Códigos da carteira da organização, memorizados por requisição.
+
+    O gate e a visão agregada liam a mesma carteira em consultas separadas dentro da
+    mesma requisição — visível no contador de consultas da E1. Uma leitura só, e o
+    conjunto passa a ser o mesmo nos dois caminhos por construção, não por coincidência.
+    """
+    chave = (_CHAVE_CARTEIRA, org_id)
+    em_cache = session.info.get(chave)
+    if isinstance(em_cache, tuple):
+        return em_cache
+    cods = tuple(c.cod_ibge for c in repository.list_carteira(session, org_id))
+    session.info[chave] = cods
+    return cods
 
 
 def _estado_prefixes(session: Session, org_id: uuid.UUID) -> set[str]:
@@ -129,22 +177,38 @@ def _estado_prefixes(session: Session, org_id: uuid.UUID) -> set[str]:
     Vem dos entes estaduais da carteira: o código do ente estadual (2 dígitos) é o
     prefixo do código IBGE de 7 dígitos dos seus municípios. Para contas não
     estaduais, o conjunto é vazio (nenhuma ampliação por UF).
+
+    **A27 (E1):** antes isto consultava ``dim_ente`` *ente a ente*, sem cache — até 184
+    consultas por requisição numa conta estadual, dentro do gate que roda em toda rota
+    fiscal. Agora são duas consultas no máximo (carteira + ``dim_ente`` em lote),
+    memorizadas em ``session.info`` no mesmo padrão da :func:`cobertura_licenca`.
     """
-    prefixes: set[str] = set()
-    for c in repository.list_carteira(session, org_id):
-        cod = c.cod_ibge
-        if len(cod) == 2:
-            prefixes.add(cod)
-        else:
-            ente = catalog_repo.get_dim_ente(session, cod)
-            if ente is not None and ente.esfera == ESFERA_ESTADUAL:
-                prefixes.add(cod[:2])
+    chave = (_CHAVE_PREFIXOS, org_id)
+    em_cache = session.info.get(chave)
+    if isinstance(em_cache, frozenset):
+        return set(em_cache)
+
+    carteira = _carteira_ibges(session, org_id)
+    prefixes = {cod for cod in carteira if len(cod) == 2}
+    # Um só ``IN (...)`` no lugar do ``session.get`` por ente: o custo do gate deixa de
+    # crescer com o tamanho da carteira, que é justamente o do cliente que paga mais.
+    demais = [cod for cod in carteira if len(cod) != 2]
+    for ente in catalog_repo.list_dim_entes(session, demais):
+        if ente.esfera == ESFERA_ESTADUAL:
+            prefixes.add(ente.cod_ibge[:2])
+    session.info[chave] = frozenset(prefixes)
     return prefixes
 
 
 def _is_estado(session: Session, org_id: uuid.UUID) -> bool:
+    chave = (_CHAVE_TIPO_CONTA, org_id)
+    em_cache = session.info.get(chave)
+    if isinstance(em_cache, bool):
+        return em_cache
     org = repository.get_org(session, org_id)
-    return org is not None and org.tipo_conta == TIPO_CONTA_ESTADO
+    valor = org is not None and org.tipo_conta == TIPO_CONTA_ESTADO
+    session.info[chave] = valor
+    return valor
 
 
 def assert_ente_in_scope(session: Session, principal: Principal, ente: str) -> None:
@@ -183,7 +247,7 @@ def carteira_scope_ibges(session: Session, principal: Principal) -> set[str]:
     """
     if principal.org_id is None:
         return set()
-    scope = {c.cod_ibge for c in repository.list_carteira(session, principal.org_id)}
+    scope = set(_carteira_ibges(session, principal.org_id))
     if _is_estado(session, principal.org_id):
         prefixes = _estado_prefixes(session, principal.org_id)
         scope |= set(catalog_repo.list_ibges_by_prefixes(session, prefixes))
