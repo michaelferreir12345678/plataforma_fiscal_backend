@@ -32,6 +32,12 @@ SIOPS_BASE_URL = settings.siops_base_url.rstrip("/") + "/"
 SIOPE_BASE_URL = settings.siope_base_url.rstrip("/") + "/"
 TESOURO_TRANSFERENCIAS_BASE_URL = settings.tesouro_transferencias_base_url.rstrip("/") + "/"
 
+#: Rate-limit padrão de ``_BaseHttpClient`` (chamadas/segundo). Constante nomeada — não um
+#: literal solto — porque o estimador de tempo do ``--dry-run`` de backfill
+#: (``app/workers/backfill.py::estimate_backfill``) precisa do MESMO número que os clientes
+#: reais usam (SICONFI/MSC, SIOPS, SIOPE herdam este padrão; só o SADIPEM o sobrescreve).
+DEFAULT_MAX_PER_SECOND = 6.0
+
 
 class _RespostaTransitoria(httpx.HTTPStatusError):
     """5xx ou 429: vale repetir. Continua sendo ``HTTPStatusError`` para quem trata acima."""
@@ -102,7 +108,11 @@ class _BaseHttpClient:
     """Base com httpx, rate-limit e backoff (tenacity)."""
 
     def __init__(
-        self, base_url: str, *, max_per_second: float = 6.0, timeout: float = 60.0
+        self,
+        base_url: str,
+        *,
+        max_per_second: float = DEFAULT_MAX_PER_SECOND,
+        timeout: float = 60.0,
     ) -> None:
         self._client = httpx.Client(base_url=base_url, timeout=timeout)
         self._limiter = _RateLimiter(max_per_second)

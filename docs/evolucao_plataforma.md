@@ -2167,10 +2167,167 @@ declarar a semântica recebe o ciclo fechado, que erra para o lado da ausência 
 
 ---
 
+### Sprint A4_MSC/A4_SIOPS — execução: os números reais do dry-run, medidos contra o cadastro nacional
+
+Não há "antes/depois" de valor fiscal nesta sprint — nenhum dado publicado foi tocado. A
+evidência é **"estimado pela ficha" × "medido pelo dry-run real"**, contra o cadastro
+nacional de verdade (`silver.siconfi_entes`, banco de desenvolvimento), com o banco
+conferido idêntico antes e depois (hash do checkpoint e contagens de linhas).
+
+#### 1. `--dry-run` no motor + `estimate_backfill`
+
+`app/workers/backfill.py` ganhou `estimate_backfill(units)`: monta o mesmo plano de
+`BackfillUnit` que `run_backfill` executaria, chama o `discover()` **real** de cada
+conector (puro — nenhum dos três toca rede ou sessão ali) e soma as chamadas HTTP por job
+com uma fórmula derivada do próprio conector, não um literal solto:
+
+| Fonte | Chamadas por job | De onde vem |
+|---|---|---|
+| MSC | `len(MscConnector.classes) * len(MscConnector.tipos_valor)` = 4×3 = **12** | os mesmos atributos que `MscConnector.extract` percorre (`connectors/siconfi.py:321-329`) |
+| SIOPS/SIOPE | `len(job.params["entes"])` | o próprio job — varia com o tamanho do lote, não é fixo |
+| demais fontes | `1` (piso; RGF subestimado — fora do escopo desta sprint) | `SiconfiConnectorBase.extract` |
+
+O cliente e o *sink* injetados no conector são sentinelas (`_DryRunNetworkGuard`,
+`_DryRunWriteGuard`): qualquer tentativa de `extract`/`upsert_bronze`/`register_entrega`
+levanta `RuntimeError` na hora, em vez de sair à rede ou gravar em silêncio. O tempo
+estimado usa a mesma constante nomeada que os três clientes já usam de verdade
+(`DEFAULT_MAX_PER_SECOND = 6.0`, promovida de literal solto para constante em
+`shared/ingestion/client.py`) — é um **piso**: soma só o intervalo mínimo entre chamadas,
+não a latência de resposta nem o backoff de erro, então a execução real leva mais tempo
+que isto, nunca menos.
+
+#### 2. A fórmula bate com o critério de aceite, ao pé da letra
+
+| | Estimado pela ficha | Medido pelo dry-run real |
+|---|---|---|
+| MSC, escopo do Ceará (184 municípios + 1 estado), 1 ano | "184 × 12 meses × 12 chamadas ≈ 26 mil" | `--dry-run --ufs CE --fontes siconfi_msc --anos 2023` → **185 unidades, 2.220 jobs, 26.640 chamadas** = 184×12×12 + **1×12×12** (o "± ente-estado" da ficha, exato) |
+| CE + PI, 2 anos (2022–2023), as 3 fontes | (sem número prévio — só o plano nacional total) | **828 unidades, 9.888 jobs, 127.920 chamadas**; MSC/ano = 410 unidades = 185 (CE) + 225 (PI, 224 municípios + 1 estado) — bate com a contagem real de municípios das duas UFs |
+
+Reproduzido com o script: `python -m scripts.backfill_msc_siops_siope --dry-run --ufs CE --fontes siconfi_msc --anos 2023`.
+
+#### 3. Escala nacional, medida (não chutada)
+
+Cadastro nacional hoje (`silver.siconfi_entes`, consulta real desta sprint): **5.568**
+municípios (`esfera='M'`) + **26** estados (`esfera='E'`) + **1** Distrito Federal
+(`esfera='D'`, `cod_ibge='53'` — código de 2 dígitos, tratado como "estado" pelas três
+APIs) = **5.595** entes subnacionais em escopo (fora a União, `esfera='U'`, sem sentido
+fiscal subnacional). É consistente com o total oficial do SICONFI registrado em §20/P6
+(5.598 = 5.570 municípios + 27 estaduais + 1 federal); a diferença de 2 municípios é a
+mesma lacuna de cadastro já rastreada ali, não uma descoberta nova desta sprint.
+
+`python -m scripts.backfill_msc_siops_siope --dry-run --anos 2021-2026` (nacional, as 3
+fontes, 6 exercícios — rodado de verdade nesta sprint, ~4s, puro cômputo local):
+
+| Fonte | Unidades | Jobs | Chamadas HTTP | Tempo estimado (piso, 6 req/s) |
+|---|---:|---:|---:|---:|
+| **Total** | 33.894 | 404.784 | **5.236.920** | 242,4 h (~10,1 dias corridos ininterruptos) |
+| `siconfi_msc` | 33.570 | 402.840 | 4.834.080 | 223,8 h (~9,3 dias) |
+| `siops_saude` | 162 | 972 | 201.420 | 9,3 h |
+| `siope_educacao` | 162 | 972 | 201.420 | 9,3 h |
+
+Por ano — **idêntico nos 6 exercícios** (2021 a 2026, incluindo o ano corrente): nenhum dos
+três conectores descarta período ainda não decorrido (`tipo_periodo` não é setado em
+`MscConnector`, e `SiopsConnector`/`SiopeConnector` não herdam esse filtro) — o plano pede
+os 12 meses/6 bimestres completos mesmo para 2026 em andamento. É uma leitura honesta do
+que o plano **tentaria**, não do que existe publicado; a diferença é o tipo de coisa que só
+aparece medindo, e é exatamente o que esta sprint existia para expor antes de gastar a cota:
+
+| Fonte | Unidades/ano | Jobs/ano | Chamadas/ano | Tempo/ano |
+|---|---:|---:|---:|---:|
+| `siconfi_msc` | 5.595 | 67.140 | 805.680 | 37,3 h |
+| `siops_saude` | 27 | 162 | 33.570 | 1,6 h |
+| `siope_educacao` | 27 | 162 | 33.570 | 1,6 h |
+
+MSC domina o custo por si só (maior tabela do sistema, Sprint 12): **~92%** das chamadas
+totais do plano nacional 2021–2026, e é a fonte cujo volume de linhas (não só de chamadas)
+merece decisão de janela antes de qualquer disparo — o risco que a ficha já apontava.
+
+#### 4. Achado de implementação: SIOPS/SIOPE precisam de unidade agrupada por UF, não por ente
+
+Os conectores de SIOPS/SIOPE não são "um ente por chamada" como o MSC. `discover()` gera
+**1 job por (ano, bimestre)**, e esse job carrega **vários entes dentro do mesmo
+`params["entes"]`**; `extract` faz 1 chamada por ente, mas o bronze e a entrega são
+gravados sob a chave sentinela `cod_ibge="BR"` (`connectors/siops.py`/`siope.py`).
+`repository.upsert_bronze` usa `ON CONFLICT DO NOTHING` em
+`(fonte, cod_ibge, período, versão)` — então **duas unidades do mesmo `(ano, bimestre)`
+executadas no mesmo dia** (mesma `versao` = data de captura) colidiriam na mesma chave, e
+só a primeira gravaria o silver; as demais seriam puladas em silêncio. É exatamente o
+padrão que o campo `entrega_agregada` documenta em `connectors/registry.py`, e que o outro
+orquestrador da plataforma (`app/workers/ingest_jobs.py::_all_units`) já trata de
+propósito — mas `FONTE_META` **não** marca `siops_saude`/`siope_educacao` com
+`entrega_agregada=True`.
+
+Por isso `scripts/backfill_msc_siops_siope.py` monta **uma unidade por (UF, ano)** para
+estas duas fontes — o estado/DF e todos os seus municípios num único `RunRequest` — em vez
+de uma por ente (o desenho do MSC). O total de chamadas HTTP não muda (seria o mesmo de
+qualquer forma: 1 por ente por bimestre), mas a forma de agrupar evita a colisão de chave
+E mantém o raio de uma falha real pequeno (uma UF, não o país inteiro, no rollback de uma
+unidade que falhar no meio).
+
+**Não corrigido nesta sprint, de propósito:** marcar `entrega_agregada=True` em
+`FONTE_META` para `siops_saude`/`siope_educacao` resolveria a mesma armadilha no *outro*
+orquestrador (`ingest_jobs.py`, usado pela tela "Central de Dados"), mas está fora do
+escopo explícito desta ficha (conector/registry central, não o motor de backfill nem o
+script). Fica registrado aqui como achado relacionado para decisão humana — é uma mudança
+de 1 linha, aditiva, sem migration, no mesmo padrão já usado por `tesouro_fpm`/
+`fnde_fundeb_repasse`/`transferencia_generica`.
+
+#### 5. Prova de que o dry-run não grava nada
+
+Hash MD5 de `var/backfill/checkpoint.json` idêntico antes e depois de rodar o dry-run
+nacional completo (`9f0e166c504ccacee7c2bd4860b8232b`, nas duas medições) — o arquivo nem
+foi aberto. Contagem de `gold.dim_entrega`/`silver.siconfi_msc`/`silver.siops_saude`/
+`silver.siope_educacao`, filtrada pelos mesmos entes usados no plano, idêntica antes e
+depois. `tests/test_a4_msc_siops_dry_run.py::test_dry_run_nao_grava_nada_no_banco` torna
+isso um teste de regressão, não só uma observação pontual: cria um ente que só existe
+dentro do teste, roda o `--dry-run` referenciando-o, e confere zero linhas em bronze,
+entrega e nos três silvers tipados.
+
+#### 6. Critérios de aceite
+
+* `--dry-run` roda para as três fontes sem gravar nada — ✅ provado por hash de checkpoint
+  + contagem de linhas antes/depois, e coberto por teste de regressão.
+* Relata unidades, chamadas HTTP e tempo estimado — ✅ `format_estimate_report`, total e
+  por fonte × ano (tabelas acima).
+* O número de chamadas do MSC bate com `184 × meses × 12` (± ente-estado) — ✅ 26.640 =
+  184×12×12 + 1×12×12, medido de verdade (§2), e coberto por teste que reproduz a fórmula
+  a partir dos atributos do conector, não de um número solto.
+* Documento atualizado com os números reais do dry-run — ✅ esta seção.
+* Plano nacional inclui o ente estadual e não duplica os já cobertos — ✅ o cadastro por
+  UF sempre inclui o código do estado/DF (§3); o checkpoint **padrão** do script novo é o
+  **mesmo arquivo** do Sprint 21 (`var/backfill/checkpoint.json`), então uma unidade já
+  concluída pela âncora CE (ou por uma corrida anterior deste script) é pulada, não
+  reexecutada — testado em
+  `test_plano_nacional_respeita_checkpoint_ja_concluido`.
+
+`ruff check src tests` e `mypy` limpos; suíte completa **758 passed, 34 skipped, 2
+xfailed** (banco de desenvolvimento real, sem processo concorrente). 21 testes novos em
+`tests/test_a4_msc_siops_dry_run.py`.
+
+#### Arquivos da sprint
+
+* Sem migration — nenhuma tabela nova (o motor de backfill e o script não persistem
+  estado próprio além do checkpoint em arquivo, que já existia).
+* Alterados: `app/workers/backfill.py` (`estimate_backfill`, `BackfillEstimate`,
+  `UnitEstimate`, `format_estimate_report`, sentinelas de rede/gravação),
+  `app/shared/ingestion/client.py` (`DEFAULT_MAX_PER_SECOND`, antes literal `6.0` solto no
+  default do construtor).
+* Novos: `scripts/backfill_msc_siops_siope.py`, `tests/test_a4_msc_siops_dry_run.py`.
+* `scripts/backfill_sprint21.py` **não foi alterado** — o script novo é independente
+  (import de `app.workers.backfill`, sem tocar na âncora CE), e os dois só se encontram no
+  mesmo arquivo de checkpoint, de propósito (§6).
+* Fora de escopo desta sprint, como planejado: nenhuma chamada real de backfill em escala
+  contra a API do Tesouro/MS/FNDE foi disparada. A janela/throttle da carga nacional
+  completa (~5,2 milhões de chamadas nas 3 fontes, 2021–2026) é decisão humana separada —
+  os números acima existem para informar essa decisão, não para substituí-la.
+
+---
+
 ## 10. Decisões técnicas e metodológicas registradas
 
 | Data | Decisão | Motivo |
 |---|---|---|
+| 2026-08-06 | **SIOPS/SIOPE no backfill nacional agrupam entes por UF, uma unidade por `(UF, ano)`** — não uma unidade por ente, como o MSC | Os dois conectores gravam bronze/entrega sob a chave sentinela `cod_ibge="BR"` (`connectors/siops.py`/`siope.py`); `upsert_bronze` faz `ON CONFLICT DO NOTHING`, então duas unidades do mesmo `(ano, bimestre)` no mesmo dia colidiriam e só a primeira gravaria o silver — o mesmo padrão que o campo `entrega_agregada` documenta em `connectors/registry.py`, mas que `FONTE_META` não marca para estas duas fontes. Agrupar por UF evita a colisão sem tocar no conector nem no registry (fora do escopo da A4_MSC/A4_SIOPS); ver a sprint completa abaixo |
 | 2026-08-06 | **Bimestre → RGF tem duas semânticas, e as duas ficam — com nome.** `CICLO_FECHADO` (bimestre ímpar ⇒ sem RGF correspondente) e `CICLO_CORRENTE` (teto: B3 cai no Q2 em curso), em `shared/periodo.py::em_periodo_rgf`; cada chamador declara a sua | A A25 pedia "decidir a semântica". Decidir por **uma** teria mudado número em metade da plataforma sem que ninguém tivesse pedido: o painel de qualidade não deve conferir a DCL contra um quadrimestre que ainda não fechou, e o benchmarking não deve perder a linhagem do numerador de pessoal porque o usuário abriu um bimestre ímpar. As perguntas são diferentes; o defeito era a escolha ser **implícita**, e a correção é obrigá-la a aparecer no ponto da chamada. A cadência **semestral** do art. 63, II, entrou junto — era ponto cego das seis cópias |
 | 2026-08-06 | **Limiar de desempenho em número de consultas, não em milissegundos** | A suíte divide o banco de desenvolvimento com o resto (decisão de 2026-08-04, abaixo): um limiar de tempo passaria numa máquina ociosa e falharia numa ocupada, e a reação natural a um teste que falha por motivo alheio é afrouxá-lo até parar de incomodar — é assim que um guarda de desempenho morre. Contagem de consultas é determinística e mede exatamente a classe de defeito da A27: trabalho que **cresce com o tamanho do cliente**. O orçamento de latência por rota continua onde estava (`x-performance-p95-ms`, Sprint 27) |
 | 2026-08-06 | **`versao_entrega` entra na chave do check de qualidade com sentinela `'-'`, não `NULL`** | Em PostgreSQL, `NULL` é distinto de `NULL` numa `UNIQUE`: com `NULL`, o *upsert* nunca conflitaria e o check de atualidade — que não se ancora em entrega nenhuma — empilharia uma linha por execução. A sentinela é de chave e não vaza para o contrato (`versao_entrega: null`, `source_ref: null`) |
