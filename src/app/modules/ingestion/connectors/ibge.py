@@ -1,4 +1,4 @@
-"""Conectores IBGE (população e PIB municipal). Cadência anual.
+"""Conectores IBGE (população e PIB por UF/município). Cadência anual.
 
 Fontes oficiais:
 - https://servicodados.ibge.gov.br/api/v3/agregados/{agregado}/...
@@ -32,6 +32,19 @@ from app.modules.ingestion.models import (
 from app.shared.ingestion.base import BaseConnector, IngestionJob, capture_versao
 
 
+def _nivel_territorial(cod_ibge: str) -> str:
+    """Traduz o código canônico da plataforma para o nível da API de Agregados."""
+    codigo = str(cod_ibge).strip()
+    if codigo.isdigit() and len(codigo) == 2:
+        return "N3"  # Unidade da Federação
+    if codigo.isdigit() and len(codigo) == 7:
+        return "N6"  # Município
+    raise ValueError(
+        f"Código IBGE inválido para agregação territorial: {cod_ibge!r}. "
+        "Use 2 dígitos para UF ou 7 para município."
+    )
+
+
 class IbgeConnectorBase(BaseConnector):
     """Base IBGE: um job por (ente, ano); extract nos agregados v3."""
 
@@ -63,8 +76,9 @@ class IbgeConnectorBase(BaseConnector):
     def extract(self, job: IngestionJob) -> Any:
         ano = job.params["ano"]
         cod_ibge = job.params["cod_ibge"]
+        nivel = _nivel_territorial(cod_ibge)
         path = f"v3/agregados/{self.agregado}/periodos/{ano}/variaveis/{self.variaveis}"
-        return self.client.get_records(path, {"localidades": f"N6[{cod_ibge}]"})
+        return self.client.get_records(path, {"localidades": f"{nivel}[{cod_ibge}]"})
 
 
 class IbgePopulacaoConnector(IbgeConnectorBase):
@@ -131,6 +145,13 @@ class IbgePibConnector(IbgeConnectorBase):
         pib_nominal = super().extract(job)
         ano = job.params["ano"]
         cod_ibge = job.params["cod_ibge"]
+        # O indicador 47001 da Pesquisa 38 é municipal. Para UF, o agregado 5938
+        # fornece o PIB nominal oficial e o per capita permanece ausente, sem derivá-lo.
+        if _nivel_territorial(cod_ibge) == "N3":
+            return {
+                "pib_nominal_agregado_5938_variavel_37": pib_nominal,
+                "pib_per_capita_pesquisa_38_indicador_47001": [],
+            }
         per_capita_path = (
             f"v1/pesquisas/{self.pesquisa_pib}/periodos/{ano}/indicadores/"
             f"{self.indicador_pib_per_capita}/resultados/{cod_ibge}"

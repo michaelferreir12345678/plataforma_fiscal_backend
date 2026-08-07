@@ -9,7 +9,7 @@ from __future__ import annotations
 import random
 from collections.abc import Iterator
 from datetime import date
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,6 +18,7 @@ from sqlalchemy import delete, func, select
 from app.core.db import SessionLocal
 from app.main import app
 from app.modules.catalog.models import DimEnte
+from app.modules.ingestion.connectors.ibge import IbgePibConnector, IbgePopulacaoConnector
 from app.modules.ingestion.models import (
     BcbIndice,
     DimEntrega,
@@ -470,6 +471,59 @@ def test_ibge_flatten_pesquisa_leaf_pib_per_capita() -> None:
             "valor": "27165.05",
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("cod_ibge", "nivel"),
+    [("21", "N3"), ("2111300", "N6")],
+)
+def test_ibge_populacao_usa_nivel_territorial_do_ente(
+    fake_client: FakeRecordsClient, cod_ibge: str, nivel: str
+) -> None:
+    connector = IbgePopulacaoConnector(fake_client, cast(Any, None))
+    job = connector.discover({"entes": [cod_ibge], "anos": [2025], "versao": "teste"})[0]
+
+    connector.extract(job)
+
+    assert fake_client.calls == [
+        (
+            "v3/agregados/6579/periodos/2025/variaveis/9324",
+            {"localidades": f"{nivel}[{cod_ibge}]"},
+        )
+    ]
+
+
+def test_ibge_pib_uf_usa_n3_sem_consultar_per_capita_municipal(
+    fake_client: FakeRecordsClient,
+) -> None:
+    connector = IbgePibConnector(fake_client, cast(Any, None))
+    job = connector.discover({"entes": ["21"], "anos": [2023], "versao": "teste"})[0]
+    fake_client.set_records(
+        "v3/agregados/5938/periodos/2023/variaveis/37",
+        {"localidades": "N3[21]"},
+        [{"variavel": "37", "cod_ibge": "21", "ano": "2023", "valor": "149227195"}],
+    )
+
+    payload = connector.extract(job)
+
+    assert fake_client.calls == [
+        (
+            "v3/agregados/5938/periodos/2023/variaveis/37",
+            {"localidades": "N3[21]"},
+        )
+    ]
+    assert payload["pib_nominal_agregado_5938_variavel_37"][0]["valor"] == "149227195"
+    assert payload["pib_per_capita_pesquisa_38_indicador_47001"] == []
+
+
+def test_ibge_rejeita_codigo_sem_nivel_territorial(fake_client: FakeRecordsClient) -> None:
+    connector = IbgePopulacaoConnector(fake_client, cast(Any, None))
+    job = connector.discover({"entes": ["211130"], "anos": [2025], "versao": "teste"})[0]
+
+    with pytest.raises(ValueError, match="Use 2 dígitos para UF ou 7 para município"):
+        connector.extract(job)
+
+    assert fake_client.calls == []
 
 
 def test_ibge_populacao_materializa_silver(client, make_org, fake_client, cleanup) -> None:
