@@ -23,7 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
-from app.modules.accounting import pcasp, repository
+from app.modules.accounting import pcasp, pcasp_glossario, repository
 from app.modules.accounting.models import MartMscRollup
 from app.modules.accounting.schemas import (
     BalancoComparacaoOut,
@@ -266,7 +266,11 @@ def _materializar_msc_mes(
                 "cod_ibge": cod_ibge, "uf": uf, "ano": ano, "periodo": periodo, "mes": mes,
                 "cod_conta": cod, "parent_conta": pais[cod], "nivel": conta.nivel,
                 "classe": conta.classe, "natureza": natureza,
-                "descricao": descricoes.get(cod) or pcasp.nome_no(cod),
+                "descricao": (
+                    descricoes.get(cod)
+                    or pcasp_glossario.nome_oficial(cod)
+                    or pcasp.nome_no(cod)
+                ),
                 "saldo_inicial": saldos["si"], "saldo_final": saldos["sf"],
                 "has_children": filhos_por_pai.get(cod, 0) > 0,
                 "versao_entrega": versao,
@@ -289,12 +293,16 @@ def _upsert_conta(
         for lbl in labels:
             parent_path = make_path(parent_path or None, lbl)
     path = make_path(parent_path, conta.codigo)
+    # Descrição da DCA (autoritativa por natureza) supera o glossário estático da portaria
+    # STN (Sprint D1), que por sua vez supera o fallback genérico "código · Subitem" — a
+    # MSC não publica nome de conta e ~90% das folhas de nível 6-7 só existiam nela.
+    nome = descricao or pcasp_glossario.nome_oficial(conta.codigo)
     repository.upsert_conta(
         session,
         {
             "codigo": conta.codigo,
-            "descricao": descricao or pcasp.nome_no(conta.codigo),
-            "descricao_autoritativa": bool(descricao),
+            "descricao": nome or pcasp.nome_no(conta.codigo),
+            "descricao_autoritativa": bool(nome),
             "parent_codigo": parent,
             "nivel": conta.nivel,
             "path": path,
@@ -323,6 +331,23 @@ def _registrar_contas(session: Session, nomes: dict[str, str | None], *, fonte: 
     for cod in sorted(todos, key=lambda c: (pcasp.require(c).nivel, c)):
         conta = pcasp.require(cod)
         _upsert_conta(session, conta, autoritativas.get(cod), fonte=fonte)
+
+
+def backfill_glossario_pcasp(session: Session) -> int:
+    """Aplica o glossário PCASP estático (Sprint D1) às contas já materializadas.
+
+    Sem isto, só as materializações **futuras** ganhariam o nome oficial via
+    :func:`_upsert_conta` — os entes já carregados (ex.: São Paulo, que publica MSC)
+    continuariam com o rótulo genérico "código · Subitem" gravado antes desta sprint. É um
+    backfill de metadado puro: não recalcula saldo, não toca ``fato_msc_saldo``, só
+    substitui o texto de exibição onde ele é **exatamente** o fallback antigo (nunca uma
+    descrição vinda da DCA). Idempotente — rodar de novo depois da 1ª vez não tem efeito.
+    """
+    atualizacoes = [
+        {"codigo": codigo, "fallback": pcasp.nome_no(codigo), "novo": nome}
+        for codigo, nome in pcasp_glossario.GLOSSARIO.items()
+    ]
+    return repository.atualizar_descricoes_fallback(session, atualizacoes)
 
 
 def _nome_conta_dca(conta_desc: str | None, codigo: str) -> str | None:
@@ -519,7 +544,10 @@ def _breadcrumb_pcasp(session: Session, codigo: str) -> list[DrillNodeRef]:
         out.append(
             DrillNodeRef(
                 codigo=cod,
-                descricao=c.descricao if c else pcasp.nome_no(cod),
+                descricao=(
+                    c.descricao if c
+                    else (pcasp_glossario.nome_oficial(cod) or pcasp.nome_no(cod))
+                ),
                 nivel=pcasp.require(cod).nivel,
             )
         )

@@ -170,6 +170,28 @@ def test_arvore_lazy_e_rollup(client, make_org, limpar) -> None:
     ]
 
 
+# --- glossário PCASP estático (Sprint D1) ---
+def test_folhas_msc_usam_nome_oficial_do_glossario_pcasp(client, make_org, limpar) -> None:
+    """A MSC não publica nome de conta, e a DCA deste fixture só descreve até o nível 2 —
+    antes da Sprint D1 as folhas 6-7 caíam no fallback genérico "código · Subitem"
+    (``pcasp.nome_no``). O glossário estático da portaria STN fecha a lacuna para os
+    códigos que o Tesouro de fato define, sem inventar nome para o resto."""
+    cod = _ente()
+    limpar.append(cod)
+    _seed(cod)
+    h = _auth(client, make_org, cod)
+
+    n5 = client.get(
+        f"/entes/{cod}/msc/arvore",
+        params={"periodo": M12, "node": "1.1.1.1.1.00.00"}, headers=h,
+    ).json()
+    nomes = {c["codigo"]: c["descricao"] for c in n5["children"]}
+    assert nomes["1.1.1.1.1.01.00"] == "Caixa"
+    assert nomes["1.1.1.1.1.02.00"] == "Conta Única"
+    assert "Subitem" not in nomes["1.1.1.1.1.01.00"]
+    assert "Subitem" not in nomes["1.1.1.1.1.02.00"]
+
+
 # --- matriz mensal + desempenho (< 300 ms warm) ---
 def test_matriz_mensal_e_desempenho(client, make_org, limpar) -> None:
     cod = _ente()

@@ -7,9 +7,9 @@ leituras bitemporais no silver e escreve/lê a gold (``dim_conta_pcasp``, ``fato
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import delete, exists, or_, select, tuple_
+from sqlalchemy import Table, bindparam, delete, exists, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -115,6 +115,52 @@ def list_contas(session: Session, codigos: list[str]) -> list[DimContaPcasp]:
 
 def descricoes_por_codigo(session: Session, codigos: list[str]) -> dict[str, DimContaPcasp]:
     return {c.codigo: c for c in list_contas(session, codigos)}
+
+
+def atualizar_descricoes_fallback(
+    session: Session, atualizacoes: list[dict[str, str]]
+) -> int:
+    """Substitui o rótulo genérico "código · Subitem" pelo nome oficial do glossário.
+
+    Backfill de metadado puro (Sprint D1): não toca ``fato_msc_saldo`` (nenhum saldo é
+    reprocessado), só o texto de exibição em ``dim_conta_pcasp``/``mart_msc_rollup`` — e só
+    quando o valor atual é **exatamente** o fallback genérico daquele código (nunca
+    sobrescreve uma descrição já vinda da DCA). ``atualizacoes`` é uma lista de
+    ``{"codigo": ..., "fallback": ..., "novo": ...}``.
+    """
+    if not atualizacoes:
+        return 0
+    # bindparam com o mesmo nome de uma coluna de ``UPDATE`` é ambíguo para o SQLAlchemy
+    # (``codigo``/``descricao`` existem nas duas tabelas) — por isso os nomes ``b_*``.
+    params = [
+        {"b_codigo": a["codigo"], "b_fallback": a["fallback"], "b_novo": a["novo"]}
+        for a in atualizacoes
+    ]
+    # UPDATE Core puro (via ``.__table__``, não a entidade ORM): o alvo é um bulk
+    # executemany por bindparam, sem objetos ORM na sessão para sincronizar — o
+    # ``update(Model)`` ORM-enabled tenta interpretar isso como "bulk UPDATE por PK" e
+    # exige a PK nos parâmetros, o que não é o que este backfill faz.
+    r1 = session.execute(
+        update(cast(Table, DimContaPcasp.__table__))
+        .where(
+            DimContaPcasp.codigo == bindparam("b_codigo"),
+            DimContaPcasp.descricao == bindparam("b_fallback"),
+        )
+        .values(descricao=bindparam("b_novo")),
+        params,
+    )
+    r2 = session.execute(
+        update(cast(Table, MartMscRollup.__table__))
+        .where(
+            MartMscRollup.cod_conta == bindparam("b_codigo"),
+            MartMscRollup.descricao == bindparam("b_fallback"),
+        )
+        .values(descricao=bindparam("b_novo")),
+        params,
+    )
+    n1 = r1.rowcount if isinstance(r1.rowcount, int) else 0
+    n2 = r2.rowcount if isinstance(r2.rowcount, int) else 0
+    return n1 + n2
 
 
 # --- gold.fato_msc_saldo (particionada por uf/ano) ---
