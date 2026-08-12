@@ -9,7 +9,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
-from app.modules.tenancy.models import CAPACIDADES, METRICAS_COBRANCA, TIPOS_CONTA
+from app.modules.tenancy.models import (
+    CAPACIDADES,
+    METRICAS_COBRANCA,
+    STATUS_LICENCA,
+    TIPOS_CONTA,
+    TIPOS_LICENCA,
+)
 
 MetricaCobranca = Literal["por_ente", "por_populacao", "por_consulta_ia", "fixo"]
 assert set(METRICAS_COBRANCA) == set(MetricaCobranca.__args__)  # type: ignore[attr-defined]
@@ -18,9 +24,13 @@ Capacidade = Literal[
     "ver", "exportar", "editar", "config_alerta", "gerar_relatorio", "usar_ia", "administrar"
 ]
 TipoConta = Literal["prefeitura", "estado", "consultoria"]
+TipoLicenca = Literal["ente", "uf", "global"]
+StatusLicenca = Literal["ativa", "suspensa", "expirada"]
 
 assert set(CAPACIDADES) == set(Capacidade.__args__)  # type: ignore[attr-defined]
 assert set(TIPOS_CONTA) == set(TipoConta.__args__)  # type: ignore[attr-defined]
+assert set(TIPOS_LICENCA) == set(TipoLicenca.__args__)  # type: ignore[attr-defined]
+assert set(STATUS_LICENCA) == set(StatusLicenca.__args__)  # type: ignore[attr-defined]
 
 
 # --- Auth ---
@@ -261,10 +271,14 @@ class BillingOverview(BaseModel):
     faturas: list[FaturaOut] = Field(default_factory=list)
 
 
-# --- Auditoria filtrável (Sprint 18) ---
+# --- Auditoria filtrável (Sprint 18; autor exposto na Sprint H1) ---
 class AuditoriaItem(BaseModel):
     id: uuid.UUID
     usuario_id: uuid.UUID | None = None
+    #: Nome/e-mail do autor (join com ``op.usuario`` — Sprint H1). ``None`` quando o
+    #: usuário foi apagado (``ON DELETE SET NULL``) ou a ação não teve autor humano.
+    usuario_nome: str | None = None
+    usuario_email: str | None = None
     acao: str
     recurso: str
     ts: datetime
@@ -275,3 +289,24 @@ class AuditoriaPage(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+# --- Licença, do ponto de vista de quem a usa (Sprint H1) ---
+class MinhaLicencaOut(BaseModel):
+    """Projeção da licença da própria organização.
+
+    Hoje o tenant só descobre o estado da licença por um 403 ao tentar adicionar um
+    ente à carteira. Este é o contrato de ``GET /me/licencas``: a mesma verdade que o
+    control plane vê (``vigente`` já resolve status × prazo), sem expor nada de outra
+    organização.
+    """
+
+    id: uuid.UUID
+    tipo: TipoLicenca
+    cod_ibge: str | None
+    uf: str | None
+    vigencia_inicio: date
+    vigencia_fim: date | None
+    status: StatusLicenca
+    vigente: bool
+    observacao: str | None

@@ -16,6 +16,7 @@ from app.modules.tenancy.schemas import (
     CarteiraEnteCreate,
     CarteiraEnteOut,
     MeResponse,
+    MinhaLicencaOut,
     OrgCreate,
     OrgOut,
     PapelCreate,
@@ -75,6 +76,16 @@ def alterar_senha(
     return Response(status_code=204)
 
 
+@router.get("/me/licencas", response_model=list[MinhaLicencaOut], tags=["auth"])
+def minhas_licencas(
+    principal: Principal = Depends(require_capability("ver")),
+    session: Session = Depends(get_db),
+) -> list[MinhaLicencaOut]:
+    """A licença da própria organização (Sprint H1) — hoje só se descobre por um 403
+    ao tentar adicionar um ente fora dela à carteira."""
+    return service.minhas_licencas(session, principal)
+
+
 # --- Organizações (plano de controle; requer 'administrar') ---
 @router.post("/orgs", response_model=OrgOut, status_code=201, tags=["orgs"])
 def create_org(
@@ -126,7 +137,9 @@ def create_papel(
 ) -> PapelOut:
     if principal.org_id is None:
         raise AppError(status=400, title="Sem organização", detail="Principal sem org ativa.")
-    return service.create_papel(session, principal.org_id, data)
+    return service.create_papel(
+        session, principal.org_id, data, actor_user_id=principal.usuario_id
+    )
 
 
 @router.get("/papeis", response_model=list[PapelOut], tags=["papeis"])

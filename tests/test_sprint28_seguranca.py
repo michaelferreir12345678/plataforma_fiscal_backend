@@ -16,12 +16,14 @@ import uuid
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 
 from app.core.db import SessionLocal, admin_session, apply_context
+from app.core.security import hash_password
 from app.modules.alerts.models import Alerta
 from app.modules.reports.models import Relatorio
-from app.modules.tenancy.models import CarteiraEnte, Fatura
+from app.modules.tenancy import repository as tenancy_repo
+from app.modules.tenancy.models import AuditLog, CarteiraEnte, Fatura, Usuario
 from app.shared.seguranca import JanelaDeslizante
 from tests.conftest import auth_header, login
 
@@ -383,3 +385,113 @@ def test_mart_e_fato_de_pessoal_nao_podem_divergir(client, make_org) -> None:
     assert not divergentes, (
         "o percentual de pessoal difere entre fato e mart:\n  " + "\n  ".join(divergentes[:8])
     )
+
+
+# --------------------------------------------------------------------------- #
+# Sprint H1 — os endpoints novos de governança não podem vazar entre organizações
+# --------------------------------------------------------------------------- #
+
+
+def test_me_licencas_nao_vaza_entre_organizacoes(client, make_org) -> None:
+    """GET /me/licencas é o dado mais sensível que um tenant lê sobre si mesmo — a
+    cobertura comercial de outra organização não pode aparecer aqui por engano."""
+    dono = make_org(entes=[FORTALEZA])
+    intruso = make_org(entes=[MARACANAU])
+
+    h_dono = auth_header(login(client, dono.email, dono.senha))
+    h_intruso = auth_header(login(client, intruso.email, intruso.senha))
+
+    lic_dono = client.get("/me/licencas", headers=h_dono)
+    lic_intruso = client.get("/me/licencas", headers=h_intruso)
+    assert lic_dono.status_code == 200, lic_dono.text
+    assert lic_intruso.status_code == 200, lic_intruso.text
+
+    cods_dono = {item["cod_ibge"] for item in lic_dono.json() if item["cod_ibge"]}
+    cods_intruso = {item["cod_ibge"] for item in lic_intruso.json() if item["cod_ibge"]}
+    assert FORTALEZA in cods_dono and FORTALEZA not in cods_intruso
+    assert MARACANAU in cods_intruso and MARACANAU not in cods_dono
+
+
+@pytest.fixture
+def _superuser_h1():
+    """Operador da plataforma isolado desta suíte — mesma fábrica usada na Sprint 19."""
+    email = f"plataforma-h1-{uuid.uuid4().hex}@prumo.gov.br"
+    senha = "senha1234"
+    with admin_session() as s:
+        usuario = tenancy_repo.create_usuario(
+            s, email=email, nome="Operador H1", senha_hash=hash_password(senha), mfa_ativo=False
+        )
+        usuario.is_superuser = True
+        s.flush()
+        usuario_id = usuario.id
+    yield {"email": email, "senha": senha, "id": usuario_id}
+    with admin_session() as s:
+        s.execute(delete(AuditLog).where(AuditLog.usuario_id == usuario_id))
+        s.execute(delete(Usuario).where(Usuario.id == usuario_id))
+
+
+def test_platform_auditoria_exige_superusuario_e_isola_por_organizacao(
+    client, make_org, _superuser_h1
+) -> None:
+    """Metade da matriz que a ficha pede: quem só administra o próprio tenant não
+    entra em /platform/auditoria; e filtrar por uma org não pode trazer a ação da outra."""
+    org_a = make_org(entes=[FORTALEZA], capacidades=["ver", "administrar"])
+    org_b = make_org(entes=[MARACANAU], capacidades=["ver", "administrar"])
+    h_super = auth_header(login(client, _superuser_h1["email"], _superuser_h1["senha"]))
+
+    # Quem só administra a própria organização não é o operador da plataforma.
+    h_admin_tenant = auth_header(login(client, org_a.email, org_a.senha))
+    negado = client.get("/platform/auditoria", headers=h_admin_tenant)
+    assert negado.status_code == 403, negado.text
+    assert negado.json()["type"].endswith("superuser-required")
+
+    # O superusuário concede uma licença a cada organização — ação registrada com
+    # org_id de cada uma; o alvo (código IBGE) fica no recurso.
+    client.post(
+        f"/platform/orgs/{org_a.org_id}/licencas",
+        json={"tipo": "ente", "cod_ibge": FORTALEZA},
+        headers=h_super,
+    )
+    client.post(
+        f"/platform/orgs/{org_b.org_id}/licencas",
+        json={"tipo": "ente", "cod_ibge": MARACANAU},
+        headers=h_super,
+    )
+
+    filtrado_a = client.get(
+        "/platform/auditoria", params={"org_id": str(org_a.org_id)}, headers=h_super
+    )
+    assert filtrado_a.status_code == 200, filtrado_a.text
+    corpo_a = filtrado_a.json()
+    assert corpo_a["total"] >= 1
+    assert all(item["org_id"] == str(org_a.org_id) for item in corpo_a["itens"])
+    recursos_a = " ".join(item["recurso"] for item in corpo_a["itens"])
+    assert FORTALEZA in recursos_a
+    assert MARACANAU not in recursos_a, "a auditoria filtrada por A vazou uma ação de B"
+
+    # O autor de cada ação é o próprio superusuário — join com op.usuario funcionando.
+    algum_item = corpo_a["itens"][0]
+    assert algum_item["usuario_id"] == str(_superuser_h1["id"])
+    assert algum_item["usuario_email"] == _superuser_h1["email"]
+
+
+def test_platform_auditoria_cobre_acoes_sem_organizacao(client, _superuser_h1) -> None:
+    """definir_brasao grava org_id=None — a trilha do control plane precisa achar isso
+    também, não só o que tem organização-alvo."""
+    with admin_session() as s:
+        s.add(
+            AuditLog(
+                org_id=None,
+                usuario_id=_superuser_h1["id"],
+                acao="plataforma:definir_brasao",
+                recurso="ente:2304400;h1-sem-org",
+            )
+        )
+
+    h_super = auth_header(login(client, _superuser_h1["email"], _superuser_h1["senha"]))
+    resposta = client.get(
+        "/platform/auditoria", params={"q": "h1-sem-org"}, headers=h_super
+    )
+    assert resposta.status_code == 200, resposta.text
+    itens = resposta.json()["itens"]
+    assert any(item["org_id"] is None and "h1-sem-org" in item["recurso"] for item in itens)

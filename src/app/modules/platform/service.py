@@ -14,6 +14,7 @@ from __future__ import annotations
 import mimetypes
 import uuid
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 
 from sqlalchemy import func, select
@@ -26,6 +27,9 @@ from app.core.security import hash_password
 from app.modules.assistant.models import ConversaUso
 from app.modules.catalog.models import DimEnte
 from app.modules.platform.schemas import (
+    AssinaturaPatch,
+    AuditoriaPlataformaItem,
+    AuditoriaPlataformaPage,
     IdentidadeVisualOut,
     LicencaCreate,
     LicencaOut,
@@ -38,12 +42,14 @@ from app.modules.reports.models import Relatorio
 from app.modules.tenancy import repository
 from app.modules.tenancy.models import (
     LICENCA_ATIVA,
+    Assinatura,
     AuditLog,
     CarteiraEnte,
     Licenca,
     Membership,
     Organizacao,
 )
+from app.modules.tenancy.schemas import AssinaturaInput, AssinaturaOut
 from app.shared.scope import invalidar_cobertura
 
 MARCADOR = "plataforma"
@@ -154,11 +160,36 @@ def provisionar_org(
         for item in data.licencas
     ]
 
+    # Sem métrica/preço aqui, a organização nasce com billing indefinido e a primeira
+    # fatura sai em zero — o achado central da Sprint H1. O formulário de
+    # provisionamento agora coleta os dois; quando vêm, a assinatura nasce junto.
+    assinatura_row: Assinatura | None = None
+    if data.metrica_cobranca is not None:
+        assinatura_row = _gravar_assinatura(
+            session,
+            org_id=org.id,
+            plano="padrao",
+            metrica_cobranca=data.metrica_cobranca,
+            preco_unitario=data.preco_unitario or Decimal("0"),
+            moeda="BRL",
+            ciclo="mensal",
+            status="ativa",
+            inicio_vigencia=None,
+            fim_vigencia=None,
+        )
+
     _auditar(
         session,
         principal,
         acao="provisionar_org",
-        recurso=f"organizacao:{org.id}:{org.nome}",
+        recurso=(
+            f"organizacao:{org.id}:{org.nome}"
+            + (
+                f";metrica={data.metrica_cobranca};preco={data.preco_unitario or Decimal('0')}"
+                if assinatura_row is not None
+                else ""
+            )
+        ),
         org_id=org.id,
     )
     session.flush()
@@ -169,7 +200,105 @@ def provisionar_org(
         admin_email=usuario.email,
         papel_admin_id=papel.id,
         licencas=[_to_out(lic) for lic in licencas],
+        assinatura=AssinaturaOut.model_validate(assinatura_row) if assinatura_row else None,
     )
+
+
+# --- Assinatura / billing (Sprint H1) ----------------------------------------
+# emitir_fatura (tenancy/service.py) sempre calculava preco=Decimal("0") porque o
+# único endpoint que grava op.assinatura (POST /billing/assinatura) está com 403
+# hardcoded de propósito — um tenant não pode fixar o próprio preço. Faltava o
+# equivalente do control plane; é o que existe daqui para baixo.
+
+
+def _gravar_assinatura(
+    session: Session,
+    *,
+    org_id: uuid.UUID,
+    plano: str,
+    metrica_cobranca: str,
+    preco_unitario: Decimal,
+    moeda: str,
+    ciclo: str,
+    status: str,
+    inicio_vigencia: date | None,
+    fim_vigencia: date | None,
+) -> Assinatura:
+    return repository.upsert_assinatura(
+        session,
+        org_id=org_id,
+        plano=plano,
+        metrica_cobranca=metrica_cobranca,
+        preco_unitario=preco_unitario,
+        moeda=moeda,
+        ciclo=ciclo,
+        status=status,
+        inicio_vigencia=inicio_vigencia,
+        fim_vigencia=fim_vigencia,
+    )
+
+
+def definir_assinatura(
+    session: Session, principal: Principal, org_id: uuid.UUID, data: AssinaturaInput
+) -> AssinaturaOut:
+    """POST — cria ou substitui integralmente a assinatura (métrica + preço) da organização."""
+    if repository.get_org(session, org_id) is None:
+        raise AppError(status=404, title="Organização inexistente", detail=str(org_id))
+    row = _gravar_assinatura(
+        session,
+        org_id=org_id,
+        plano=data.plano,
+        metrica_cobranca=data.metrica_cobranca,
+        preco_unitario=data.preco_unitario,
+        moeda=data.moeda,
+        ciclo=data.ciclo,
+        status=data.status,
+        inicio_vigencia=data.inicio_vigencia,
+        fim_vigencia=data.fim_vigencia,
+    )
+    _auditar(
+        session,
+        principal,
+        acao="definir_assinatura",
+        recurso=f"assinatura:{row.id};metrica={data.metrica_cobranca};preco={data.preco_unitario}",
+        org_id=org_id,
+    )
+    session.flush()
+    return AssinaturaOut.model_validate(row)
+
+
+def alterar_assinatura(
+    session: Session, principal: Principal, org_id: uuid.UUID, data: AssinaturaPatch
+) -> AssinaturaOut:
+    """PATCH — altera só os campos informados (ex.: reajustar o preço sem reenviar tudo)."""
+    if repository.get_org(session, org_id) is None:
+        raise AppError(status=404, title="Organização inexistente", detail=str(org_id))
+    atual = repository.get_assinatura(session, org_id=org_id)
+    base: dict[str, object] = {
+        "plano": atual.plano if atual else "padrao",
+        "metrica_cobranca": atual.metrica_cobranca if atual else "fixo",
+        "preco_unitario": atual.preco_unitario if atual else Decimal("0"),
+        "moeda": atual.moeda if atual else "BRL",
+        "ciclo": atual.ciclo if atual else "mensal",
+        "status": atual.status if atual else "ativa",
+        "inicio_vigencia": atual.inicio_vigencia if atual else None,
+        "fim_vigencia": atual.fim_vigencia if atual else None,
+    }
+    for campo, valor in data.model_dump(exclude_unset=True).items():
+        if valor is not None:
+            base[campo] = valor
+    row = _gravar_assinatura(session, org_id=org_id, **base)  # type: ignore[arg-type]
+    antes = f"{atual.metrica_cobranca}:{atual.preco_unitario}" if atual else "inexistente"
+    depois = f"{row.metrica_cobranca}:{row.preco_unitario}"
+    _auditar(
+        session,
+        principal,
+        acao="alterar_assinatura",
+        recurso=f"assinatura:{row.id};antes={antes};depois={depois}",
+        org_id=org_id,
+    )
+    session.flush()
+    return AssinaturaOut.model_validate(row)
 
 
 # --- Licenças ---------------------------------------------------------------
@@ -378,3 +507,57 @@ def definir_brasao(
 
 def tipo_conteudo(nome: str) -> str:
     return mimetypes.guess_type(nome)[0] or "application/octet-stream"
+
+
+# --- Auditoria própria do control plane (Sprint H1) --------------------------
+# O superusuário nunca tem org_id de sessão (existe fora de qualquer organização),
+# então nunca poderia chamar GET /admin/auditoria — que filtra por org_id do
+# principal. Este endpoint espelha o mesmo padrão (filtros, paginação, autor
+# via join) mas sobre a sessão bypass de RLS (`superuser_session`), cobrindo
+# inclusive ações sem organização-alvo (`definir_brasao`, org_id is None).
+
+
+def auditoria(
+    session: Session,
+    *,
+    org_id: uuid.UUID | None = None,
+    acao: str | None = None,
+    recurso: str | None = None,
+    usuario_id: uuid.UUID | None = None,
+    texto: str | None = None,
+    de: datetime | None = None,
+    ate: datetime | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> AuditoriaPlataformaPage:
+    rows, total = repository.query_auditoria_plataforma(
+        session,
+        org_id=org_id,
+        acao=acao,
+        recurso=recurso,
+        usuario_id=usuario_id,
+        texto=texto,
+        de=de,
+        ate=ate,
+        limit=limit,
+        offset=offset,
+    )
+    return AuditoriaPlataformaPage(
+        itens=[
+            AuditoriaPlataformaItem(
+                id=log.id,
+                org_id=log.org_id,
+                org_nome=org_nome,
+                usuario_id=log.usuario_id,
+                usuario_nome=usuario_nome,
+                usuario_email=usuario_email,
+                acao=log.acao,
+                recurso=log.recurso,
+                ts=log.ts,
+            )
+            for log, usuario_nome, usuario_email, org_nome in rows
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )

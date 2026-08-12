@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -33,6 +33,7 @@ from app.modules.tenancy.schemas import (
     FaturaPreview,
     MembershipInfo,
     MeResponse,
+    MinhaLicencaOut,
     OrgOut,
     PapelCreate,
     PapelOut,
@@ -191,6 +192,16 @@ def create_user(session: Session, principal: Principal, data: UserCreate) -> Use
         papel_id=papel_id,
     )
     papel = repository.get_papel(session, papel_id)
+    repository.insert_audit_log(
+        session,
+        org_id=org_id,
+        usuario_id=principal.usuario_id,
+        acao="CRIAR_USUARIO",
+        recurso=(
+            f"usuario:{usuario.id}:{usuario.email};"
+            f"papel={papel.nome if papel is not None else papel_id}"
+        ),
+    )
     return UserOut(
         id=usuario.id,
         email=usuario.email,
@@ -217,9 +228,18 @@ def list_users(session: Session, principal: Principal) -> list[UserOut]:
 
 
 # --- Papel / RBAC (plano de dados, org do principal) ---
-def create_papel(session: Session, org_id: uuid.UUID, data: PapelCreate) -> PapelOut:
+def create_papel(
+    session: Session, org_id: uuid.UUID, data: PapelCreate, *, actor_user_id: uuid.UUID
+) -> PapelOut:
     papel = repository.create_papel(session, org_id=org_id, nome=data.nome)
     repository.set_papel_capacidades(session, papel_id=papel.id, capacidades=list(data.capacidades))
+    repository.insert_audit_log(
+        session,
+        org_id=org_id,
+        usuario_id=actor_user_id,
+        acao="CRIAR_PAPEL",
+        recurso=f"papel:{papel.id}:{papel.nome};capacidades={','.join(sorted(data.capacidades))}",
+    )
     return PapelOut(
         id=papel.id,
         org_id=papel.org_id,
@@ -286,6 +306,16 @@ def update_papel_capacidades(
             type_="urn:plataforma-fiscal:error:last-admin-protected",
         )
     repository.set_papel_capacidades(session, papel_id=papel_id, capacidades=capacidades)
+    repository.insert_audit_log(
+        session,
+        org_id=org_id,
+        usuario_id=actor_user_id,
+        acao="ALTERAR_PAPEL_CAPACIDADES",
+        recurso=(
+            f"papel:{papel_id}:{papel.nome};"
+            f"antes={','.join(sorted(atuais))};depois={','.join(sorted(set(capacidades)))}"
+        ),
+    )
     return PapelOut(
         id=papel.id, org_id=papel.org_id, nome=papel.nome, capacidades=sorted(set(capacidades))
     )
@@ -597,13 +627,42 @@ def auditoria(
     )
     return AuditoriaPage(
         itens=[
-            AuditoriaItem(id=r.id, usuario_id=r.usuario_id, acao=r.acao, recurso=r.recurso, ts=r.ts)
-            for r in rows
+            AuditoriaItem(
+                id=log.id,
+                usuario_id=log.usuario_id,
+                usuario_nome=nome,
+                usuario_email=email,
+                acao=log.acao,
+                recurso=log.recurso,
+                ts=log.ts,
+            )
+            for log, nome, email in rows
         ],
         total=total,
         limit=limit,
         offset=offset,
     )
+
+
+# --- Licença, do ponto de vista do tenant (Sprint H1) ---
+def minhas_licencas(session: Session, principal: Principal) -> list[MinhaLicencaOut]:
+    """A licença da própria organização — sem precisar de um 403 para descobrir o estado dela."""
+    org_id = _org_id(principal)
+    hoje = date.today()
+    return [
+        MinhaLicencaOut(
+            id=lic.id,
+            tipo=lic.tipo,
+            cod_ibge=lic.cod_ibge,
+            uf=lic.uf,
+            vigencia_inicio=lic.vigencia_inicio,
+            vigencia_fim=lic.vigencia_fim,
+            status=lic.status,
+            vigente=lic.vigente_em(hoje),
+            observacao=lic.observacao,
+        )
+        for lic in repository.list_licencas(session, org_id)
+    ]
 
 
 def trocar_organizacao(

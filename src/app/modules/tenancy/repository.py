@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import and_, delete, func, select
 from sqlalchemy.orm import Session
@@ -430,21 +431,19 @@ def insert_audit_log(
     session.flush()
 
 
-def query_auditoria(
-    session: Session,
+def _auditoria_conds(
     *,
-    org_id: uuid.UUID,
-    acao: str | None = None,
-    recurso: str | None = None,
-    usuario_id: uuid.UUID | None = None,
-    texto: str | None = None,
-    de: datetime | None = None,
-    ate: datetime | None = None,
-    limit: int = 50,
-    offset: int = 0,
-) -> tuple[list[AuditLog], int]:
-    """Trilha de auditoria filtrável (RLS por org, além do filtro explícito por org_id)."""
-    conds = [AuditLog.org_id == org_id]
+    org_id: uuid.UUID | None,
+    acao: str | None,
+    recurso: str | None,
+    usuario_id: uuid.UUID | None,
+    texto: str | None,
+    de: datetime | None,
+    ate: datetime | None,
+) -> list[Any]:
+    conds: list[Any] = []
+    if org_id is not None:
+        conds.append(AuditLog.org_id == org_id)
     if acao:
         conds.append(AuditLog.acao.ilike(f"%{acao}%"))
     if recurso:
@@ -457,13 +456,83 @@ def query_auditoria(
         conds.append(AuditLog.ts >= de)
     if ate is not None:
         conds.append(AuditLog.ts < ate)
+    return conds
+
+
+def query_auditoria(
+    session: Session,
+    *,
+    org_id: uuid.UUID,
+    acao: str | None = None,
+    recurso: str | None = None,
+    usuario_id: uuid.UUID | None = None,
+    texto: str | None = None,
+    de: datetime | None = None,
+    ate: datetime | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[tuple[AuditLog, str | None, str | None]], int]:
+    """Trilha de auditoria filtrável (RLS por org, além do filtro explícito por org_id).
+
+    Junta com ``op.usuario`` para expor nome/e-mail do autor (Sprint H1) — sem isso a
+    trilha mostra só um UUID, e "quem fez isso?" fica sem resposta na tela.
+    """
+    conds = _auditoria_conds(
+        org_id=org_id, acao=acao, recurso=recurso, usuario_id=usuario_id,
+        texto=texto, de=de, ate=ate,
+    )
     total = int(session.scalar(select(func.count()).select_from(AuditLog).where(*conds)) or 0)
     rows = list(
-        session.scalars(
-            select(AuditLog).where(*conds).order_by(AuditLog.ts.desc()).limit(limit).offset(offset)
-        )
+        session.execute(
+            select(AuditLog, Usuario.nome, Usuario.email)
+            .outerjoin(Usuario, Usuario.id == AuditLog.usuario_id)
+            .where(*conds)
+            .order_by(AuditLog.ts.desc())
+            .limit(limit)
+            .offset(offset)
+        ).all()
     )
-    return rows, total
+    return [(r[0], r[1], r[2]) for r in rows], total
+
+
+def query_auditoria_plataforma(
+    session: Session,
+    *,
+    org_id: uuid.UUID | None = None,
+    acao: str | None = None,
+    recurso: str | None = None,
+    usuario_id: uuid.UUID | None = None,
+    texto: str | None = None,
+    de: datetime | None = None,
+    ate: datetime | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[tuple[AuditLog, str | None, str | None, str | None]], int]:
+    """Trilha de auditoria **sem** o filtro obrigatório de organização.
+
+    Uso exclusivo do control plane (sessão ``superuser_session``, já em bypass de RLS):
+    o superusuário nunca tem ``org_id`` de sessão e precisa enxergar as próprias ações
+    entre organizações, inclusive as que não têm organização nenhuma (``definir_brasao``,
+    ``org_id is None``). Chamar esta função fora de uma sessão bypass devolveria a trilha
+    inteira da plataforma — por isso ela não é exportada para rota de tenant nenhuma.
+    """
+    conds = _auditoria_conds(
+        org_id=org_id, acao=acao, recurso=recurso, usuario_id=usuario_id,
+        texto=texto, de=de, ate=ate,
+    )
+    total = int(session.scalar(select(func.count()).select_from(AuditLog).where(*conds)) or 0)
+    rows = list(
+        session.execute(
+            select(AuditLog, Usuario.nome, Usuario.email, Organizacao.nome)
+            .outerjoin(Usuario, Usuario.id == AuditLog.usuario_id)
+            .outerjoin(Organizacao, Organizacao.id == AuditLog.org_id)
+            .where(*conds)
+            .order_by(AuditLog.ts.desc())
+            .limit(limit)
+            .offset(offset)
+        ).all()
+    )
+    return [(r[0], r[1], r[2], r[3]) for r in rows], total
 
 
 # --- Licenças (Sprint 19) ---------------------------------------------------
