@@ -237,9 +237,11 @@ que impede a consulta sintaticamente perfeita e semanticamente errada.
 
 ```mermaid
 flowchart LR
-    IA1["IA-1<br/>Camada de ferramentas"] --> IA2["IA-2<br/>Dicionário semântico"]
-    IA2 --> IA3["IA-3<br/>Servidor MCP +<br/>agente interno"]
-    IA3 --> IA4["IA-4<br/>SQL governado"]
+    IA1a["IA-1a<br/>Fatia vertical<br/>(envelope + 2 ferramentas<br/>+ 1º consumo)"] --> IA1b["IA-1b<br/>Ampliação<br/>do catálogo"]
+    IA1a --> IA2["IA-2<br/>Dicionário semântico"]
+    IA1b --> IA3["IA-3<br/>Servidor MCP +<br/>agente interno"]
+    IA2 --> IA3
+    IA3 --> IA4["IA-4<br/>SQL governado<br/>(avaliar §6.1 antes)"]
     IA3 --> IA5["IA-5<br/>IA nas telas"]
     IA3 --> IA6["IA-6<br/>Avaliação contínua"]
 ```
@@ -275,12 +277,82 @@ sempre vence "100% das perguntas com risco de número errado assinado pela insti
 
 ---
 
-### Sprint IA-1 — Camada de ferramentas do domínio
+> **Correção de sequenciamento (2026-08-12), antes da primeira linha de código.** A IA-1
+> como planejada entregava 10 ferramentas + envelope + auditoria **sem nenhum consumidor** —
+> o primeiro resultado visível só apareceria na IA-3, três sprints adiante, e uma surpresa
+> na integração com *function calling* só apareceria lá. Trocada por uma **fatia vertical**:
+> a IA-1a atravessa a arquitetura inteira com duas ferramentas e já liga uma no assistente;
+> a IA-1b amplia o catálogo, que vira trabalho mecânico depois que o contrato está provado.
+> O total de trabalho é o mesmo; o que muda é quando o risco aparece.
+
+### Sprint IA-1a — Fatia vertical: envelope, duas ferramentas e o primeiro consumo
+
+**Objetivo:** provar a arquitetura inteira de ponta a ponta com o menor escopo possível —
+envelope de execução, duas ferramentas e uma delas já sendo chamada pelo assistente via
+*function calling* — de modo que tudo que pode dar errado apareça nesta sprint, não na
+terceira.
+
+**Problema:** o mesmo do §1 (o assistente enxerga 6 famílias de indicador por dicionário de
+palavras-chave), atacado pela ponta mais fina.
+
+**Justificativa:** o risco desta iniciativa não está em escrever 10 ferramentas — está em
+descobrir tarde que o envelope não sustenta escopo, que o `source_ref` se perde no caminho
+até a resposta, ou que o *function calling* do Gemini não conversa bem com o registro. Uma
+fatia fina responde as três perguntas de uma vez.
+
+**Tarefas:**
+- `shared/tooling/` com `Tool` (nome, descrição, JSON Schema de entrada/saída, capacidade
+  RBAC exigida, se recebe ente) e `ToolRegistry`.
+- Envelope `invoke()`: valida entrada; **verifica escopo e licença** quando há ente
+  (chamando `assert_ente_in_scope`, sem reimplementar); aplica `as_of`; cronometra; grava
+  auditoria; valida a saída — inclusive a presença de `source_ref` quando há número fiscal.
+- Duas ferramentas, reusando serviço existente (zero cálculo novo):
+  `indicador_do_ente` e `linhagem_do_indicador`.
+- Migration aditiva e reversível para `op.ia_tool_call`.
+- Adaptador de *function calling* atrás da porta `LLMProvider` já existente, ligando
+  `indicador_do_ente` ao assistente — o domínio continua sem importar SDK.
+
+**Riscos:** regressão silenciosa dos guardrails da Sprint 17. Mitigação: a suíte de
+guardrails existente roda contra o caminho novo **sem afrouxar nenhuma asserção**.
+
+**Critérios de aceite:**
+- Ferramenta com ente fora da carteira ⇒ 403 de escopo; ente sem licença ⇒ 403 de licença —
+  os dois estados distinguíveis, como na E1.
+- Saída com número fiscal sem `source_ref` é rejeitada **pelo envelope**, não por convenção.
+- Toda chamada (inclusive a que falha) aparece em `op.ia_tool_call` com principal,
+  argumentos e duração.
+- Perguntar sobre **garantias** — hoje inalcançável (§1) — passa a ter resposta fundamentada.
+- Sem dado e sem norma, a recusa honesta continua acontecendo **sem** chamar o modelo.
+
+**Testes:** matriz de escopo (dentro/fora da carteira, com/sem licença); `source_ref`
+ausente rejeitado; auditoria registra falha; `as_of` retroativo devolve a versão de então;
+guardrails da Sprint 17 reexecutados contra o caminho novo.
+
+**Evidências:** captura de `op.ia_tool_call` após uma bateria de chamadas; transcrição de
+uma pergunta sobre garantias com a cadeia de ferramenta e o `source_ref` de cada número.
+
+---
+
+### Sprint IA-1b — Ampliação do catálogo de ferramentas
+
+**Objetivo:** com o contrato provado pela IA-1a, levar o catálogo às demais capacidades —
+trabalho mecânico e paralelizável, sem decisão de arquitetura nova.
+
+**Tarefas:** `serie_historica`, `limites_do_ente`, `drill_receita`, `drill_despesa`,
+`cobertura_do_ente`, `qualidade_do_ente`, `alertas_do_ente`, `comparar_com_coorte`; mais a
+**consulta guiada** (catálogo parametrizado da §6.1), que é o que pode dispensar a IA-4.
+
+**Critérios de aceite:** cada ferramenta nova passa pela mesma matriz de escopo da IA-1a
+(o teste é parametrizado sobre o registro — ferramenta nova entra na matriz sozinha);
+nenhuma introduz cálculo fiscal fora de `indicators/`.
+
+---
+
+### Sprint IA-1 (referência) — a camada completa
 
 **Objetivo:** criar o registro único de ferramentas — tipadas, com escopo, `source_ref` e
-auditoria embutidos — sem nenhuma dependência de protocolo ou de provedor de IA. Ao fim
-desta sprint a plataforma tem uma API interna de capacidades que **ainda não é usada por
-nenhum modelo**, e isso é intencional: a fundação é validável sozinha.
+auditoria embutidos — sem nenhuma dependência de protocolo ou de provedor de IA. **Executada
+como IA-1a + IA-1b acima**; mantida aqui como referência do escopo total.
 
 **Problema:** hoje a única forma de a IA obter dado é o pacote fixo montado por
 `retriever.build_context`, com seis famílias de indicador escolhidas por palavra-chave
