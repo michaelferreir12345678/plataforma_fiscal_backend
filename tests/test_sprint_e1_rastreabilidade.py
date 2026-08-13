@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 
 from app.core.db import admin_session
 from app.modules.quality import repository as quality_repo
@@ -121,6 +122,44 @@ def test_retificacao_cria_linha_nova_e_nao_apaga_o_veredito_anterior(
         assert versoes == {"v1", "v2"}
         # O selo mostra **estado**, não série: só o veredito da entrega vigente conta.
         assert quality_service.selo_do_ente(s, ente_de_teste, PERIODO) == []
+
+
+def test_empate_de_carimbo_nao_elege_veredito_por_sorteio(ente_de_teste) -> None:
+    """Regressão da migration 0044 — o desempate é ordem de escrita, não ``uuid4()``.
+
+    A E1 elegia o veredito vigente por ``executado_em`` e desempatava por ``id``, apostando
+    que o relógio da aplicação sempre distinguiria duas execuções. A aposta é falsa onde o
+    relógio é grosso: no Windows, 200 chamadas consecutivas de ``datetime.now(UTC)`` foram
+    medidas com **o mesmo valor**, e aí quem vencia era um UUID — moeda. No acervo real
+    havia 31 de 193 linhas empatadas por chave (nenhuma com veredito divergente, então o
+    sorteio nunca chegou a mudar o que o gestor via — mas elegia por sorte).
+
+    Aqui o empate é **forçado**, não esperado do acaso: os dois vereditos recebem o mesmo
+    carimbo, e a retificação (``v2``, que passou a estar ok) tem de vencer sempre.
+    """
+    _gravar_check(ente_de_teste, versao="v1", status="falha")
+    _gravar_check(ente_de_teste, versao="v2", status="ok")
+
+    with admin_session() as s:
+        # Empata o carimbo das duas linhas: o que sobra para decidir é só o desempate.
+        s.execute(
+            update(DataQualityCheck)
+            .where(DataQualityCheck.cod_ibge == ente_de_teste)
+            .values(executado_em=datetime(2087, 12, 31, 12, 0, tzinfo=UTC))
+        )
+        s.flush()
+        carimbos = set(
+            s.scalars(
+                select(DataQualityCheck.executado_em).where(
+                    DataQualityCheck.cod_ibge == ente_de_teste
+                )
+            )
+        )
+        assert len(carimbos) == 1, "o teste precisa do empate para valer alguma coisa"
+        assert quality_service.selo_do_ente(s, ente_de_teste, PERIODO) == [], (
+            "com carimbos empatados, venceu o veredito da entrega superada — o desempate "
+            "voltou a ser sorteio"
+        )
 
 
 def test_a_falha_da_entrega_vigente_continua_selando_a_pagina(ente_de_teste) -> None:

@@ -7,7 +7,7 @@ from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import and_, func, not_, or_, select
+from sqlalchemy import and_, func, not_, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, aliased
 from sqlalchemy.sql.elements import ColumnElement
@@ -38,7 +38,11 @@ def _somente_vigente() -> ColumnElement[bool]:
                 superior.executado_em > DataQualityCheck.executado_em,
                 and_(
                     superior.executado_em == DataQualityCheck.executado_em,
-                    superior.id > DataQualityCheck.id,
+                    # Ordem de ESCRITA, não ``id`` (migration 0044). O desempate por
+                    # ``uuid4()`` era sorteio, e o relógio empata com mais frequência do
+                    # que a E1 supôs — no Windows, 200 chamadas de ``datetime.now(UTC)``
+                    # medidas com o mesmo valor.
+                    superior.seq > DataQualityCheck.seq,
                 ),
             ),
         )
@@ -57,10 +61,16 @@ def upsert_check(session: Session, valores: dict[str, Any]) -> None:
     """
     # ``executado_em`` é gravado pelo relógio da aplicação também na inserção, e não pelo
     # ``server_default``: em PostgreSQL, ``now()`` é o instante da **transação**, então
-    # dois vereditos gravados no mesmo commit ficariam com o mesmo carimbo — e a eleição
-    # do veredito vigente por chave passaria a depender do desempate por ``id``, que é
-    # aleatório. Com o relógio da aplicação, a ordem é a ordem real das execuções.
+    # dois vereditos gravados no mesmo commit ficariam com o mesmo carimbo.
+    #
+    # Isso **não basta** sozinho, e a E1 supôs que bastava: onde o relógio é grosso, dois
+    # vereditos consecutivos empatam mesmo em transações separadas (Windows, medido: 200
+    # chamadas de ``datetime.now(UTC)`` com o mesmo valor). Por isso a ordem de escrita é
+    # gravada como fato próprio em ``seq`` (migration 0044) e é ela que desempata — o
+    # carimbo continua sendo o instante real da execução, sem falsificação para forçar
+    # unicidade.
     agora = datetime.now(UTC)
+    proximo_seq = text("nextval('gold.dq_check_seq')")
     stmt = pg_insert(DataQualityCheck).values(id=uuid.uuid4(), executado_em=agora, **valores)
     stmt = stmt.on_conflict_do_update(
         constraint="uq_data_quality_check_chave_versao",
@@ -73,6 +83,9 @@ def upsert_check(session: Session, valores: dict[str, Any]) -> None:
             "tolerancia": stmt.excluded.tolerancia,
             "detalhe": stmt.excluded.detalhe,
             "executado_em": agora,
+            # Reescrever é escrever de novo: a linha reexecutada passa a ser a mais
+            # recente também na ordem de escrita, senão o empate voltaria a decidir errado.
+            "seq": proximo_seq,
         },
     )
     session.execute(stmt)

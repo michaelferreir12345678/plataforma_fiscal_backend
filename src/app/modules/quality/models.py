@@ -7,6 +7,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    BigInteger,
     CheckConstraint,
     DateTime,
     Numeric,
@@ -15,6 +16,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -69,6 +71,13 @@ class DataQualityCheck(Base):
     detalhe: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     executado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    #: Ordem de escrita — o desempate da eleição do veredito vigente (migration 0044).
+    #: ``executado_em`` sozinho não basta: onde o relógio é grosso (Windows: 200 chamadas
+    #: de ``datetime.now(UTC)`` medidas com o mesmo valor), dois vereditos da mesma chave
+    #: empatam e o desempate anterior — por ``id``, um ``uuid4()`` — era sorteio.
+    seq: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("nextval('gold.dq_check_seq')")
     )
 
 
