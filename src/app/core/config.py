@@ -98,6 +98,15 @@ class Settings(BaseSettings):
     assistant_request_timeout_s: float = 30.0
     # Nº de dispositivos normativos recuperados por pergunta (RAG).
     assistant_norma_top_k: int = 3
+    # Laço de agente (Sprint IA-3). Um modelo que não converge em 4 rodadas não converge
+    # na quinta, e um laço aberto gasta a cota da organização sem produzir texto. O teto
+    # não derruba a resposta: estourá-lo degrada para uma resposta **parcial declarada**,
+    # composta só dos valores que as ferramentas já devolveram (ver ``assistant/agente.py``).
+    assistant_agente_max_passos: int = 4
+    # Orçamento de tokens do laço inteiro (entrada + saída somadas de todas as voltas).
+    # Existe porque o teto de passos sozinho não limita custo: uma única volta com dez
+    # séries históricas no contexto custa mais que quatro voltas curtas.
+    assistant_agente_max_tokens: int = 60000
 
     # Fontes oficiais de enriquecimento de saude/educacao (Sprint 11).
     # Mantidas configuraveis para permitir espelhos institucionais sem alterar codigo.

@@ -89,6 +89,22 @@ class UsoInfo(BaseModel):
     latencia_ms: int
 
 
+class VerificacaoOut(BaseModel):
+    """Laudo do guardrail G6 — todo número da prosa foi casado com o que a plataforma deu.
+
+    Estruturado **e** visível: o aviso correspondente também é anexado ao texto da
+    resposta. Um campo que a tela pode ignorar seria exatamente "publicar em silêncio".
+    """
+
+    status: str = Field(description="'ok' | 'sinalizado'.")
+    total_citados: int = Field(description="Números fiscais encontrados na prosa.")
+    com_lastro: int = Field(description="Quantos casaram com valor devolvido pela plataforma.")
+    sem_lastro: list[str] = Field(
+        default_factory=list,
+        description="Os que não casaram — sinalizados, nunca publicados em silêncio.",
+    )
+
+
 class RespostaOut(BaseModel):
     """Resposta fundamentada do assistente (perguntar ou resumo-executivo)."""
 
@@ -109,6 +125,12 @@ class RespostaOut(BaseModel):
     dados_incompletos: list[DadoIncompleto] = Field(default_factory=list)
     uso: UsoInfo
     source_refs: list[SourceRef] = Field(default_factory=list)
+    verificacao: VerificacaoOut | None = Field(
+        default=None,
+        description=(
+            "Verificação de saída (G6). Ausente na recusa honesta, que não cita número."
+        ),
+    )
     gerado_em: datetime
 
 

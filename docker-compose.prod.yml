@@ -140,6 +140,47 @@ services:
         limits:
           memory: 2g
 
+  # Quarto processo da mesma imagem (§7.3 do plano de MCP): mesmo código de domínio,
+  # mesmo ToolRegistry, mesmas garantias — porta, autenticação, limites e falha próprios.
+  #
+  # Três razões para não ser mais um router na `api`, todas medidas em incidente alheio:
+  # perfil de carga oposto (laço de agente longo × tela curta e sensível a latência),
+  # raio de explosão (servidor MCP saturado não pode derrubar o Cockpit do gestor) e
+  # superfície de ataque (é a única porta que um cliente externo alcança).
+  mcp-server:
+    build: .
+    restart: always
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    environment: *app-env
+    # Sem `ports`: quem publica é o proxy reverso, que termina TLS. O host externo do MCP
+    # deve ser distinto do da API — o cliente MCP não tem nada a fazer em `/relatorios`.
+    expose:
+      - "8010"
+    command: >
+      uvicorn app.mcp_main:app --host 0.0.0.0 --port 8010
+      --workers ${MCP_WORKERS:-2} --proxy-headers --forwarded-allow-ips '*'
+    logging: *logging
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          # Menor que o da API de propósito: um cliente externo que peça demais bate no
+          # próprio teto antes de disputar memória com quem atende as telas.
+          memory: 768m
+
   scheduler:
     build: .
     restart: always

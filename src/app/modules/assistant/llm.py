@@ -579,11 +579,7 @@ class GeminiProvider:
             )
         raise LLMProviderError(detail=f"Falha na chamada ao Gemini: {ultimo}")
 
-    #: Teto de voltas do laço de ferramentas. Um modelo que não converge em 4 rodadas não
-    #: vai convergir na quinta — e um laço aberto gasta cota do cliente sem produzir texto.
-    _MAX_VOLTAS = 4
-
-    def chat_com_ferramentas(  # pragma: no cover - requer rede/credencial
+    def chat_com_ferramentas(
         self,
         request: LLMRequest,
         ferramentas: Sequence[ToolSpec],
@@ -596,75 +592,129 @@ class GeminiProvider:
         escopo, licença, ``as_of``, ``source_ref`` e auditoria embutidos. Se o executor
         recusar, a recusa volta ao modelo como conteúdo — a conversa segue honesta em vez
         de morrer com um 500.
+
+        Desde a Sprint IA-3 o **laço** não mora mais aqui: quem conta passos, vigia o
+        orçamento e degrada para resposta parcial declarada é ``assistant/agente.py``, que
+        é domínio e roda na suíte sem rede. Este método fornece o motor de um turno — a
+        parte que de fato precisa do SDK.
         """
         if not ferramentas:
             return self.chat(request)
-        client = self._ensure_client()
+        from app.modules.assistant.agente import OrcamentoAgente, executar_laco
+
+        settings = get_settings()
+        motor = _MotorGemini(
+            provider=self,
+            request=request,
+            ferramentas=ferramentas,
+            modelo=self._modelos_a_tentar(request.modelo)[0],
+        )
+        resultado = executar_laco(
+            motor,
+            executar,
+            orcamento=OrcamentoAgente(
+                max_passos=settings.assistant_agente_max_passos,
+                max_tokens=settings.assistant_agente_max_tokens,
+            ),
+        )
+        return resultado.para_llm_result()
+
+
+class _MotorGemini:
+    """Motor de um turno do Gemini — tudo que é específico do SDK, e nada além disso.
+
+    Guarda o histórico porque ele **tem** de ficar aqui: os modelos com raciocínio exigem
+    que a ``Part.thought_signature`` volte no round-trip do *function calling* (foi o que
+    obrigou o pin ``google-genai==1.75.0``), e isso se garante devolvendo o
+    ``candidates[0].content`` original ao histórico. Um laço genérico que remontasse as
+    partes por conta própria perderia a assinatura e receberia 400 na segunda volta.
+    """
+
+    def __init__(
+        self,
+        *,
+        provider: GeminiProvider,
+        request: LLMRequest,
+        ferramentas: Sequence[ToolSpec],
+        modelo: str,
+    ) -> None:
+        self._provider = provider
+        self._request = request
+        self._ferramentas = ferramentas
+        self.modelo = modelo
+        self._conteudos: list[Any] = []
+        self._config: Any = None
+
+    def _preparar(self) -> Any:  # pragma: no cover - requer SDK
+        from google.genai import types
+
+        if self._config is None:
+            declaracoes = [
+                types.FunctionDeclaration(
+                    name=spec.nome, description=spec.descricao, parameters=spec.parametros
+                )
+                for spec in self._ferramentas
+            ]
+            self._config = types.GenerateContentConfig(
+                system_instruction=self._request.system,
+                temperature=self._request.temperatura,
+                max_output_tokens=self._request.max_tokens,
+                tools=[types.Tool(function_declarations=declaracoes)],
+                http_options=types.HttpOptions(timeout=self._provider._timeout_ms),
+            )
+            self._conteudos = [
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part(text=montar_prompt(self._request, com_ferramentas=True))
+                    ],
+                )
+            ]
+        return types
+
+    def gerar(  # pragma: no cover - requer rede/credencial
+        self, respostas: Sequence[tuple[str, dict]] | None
+    ) -> Any:
+        from app.modules.assistant.agente import ChamadaPedida, Turno
+
         try:
-            from google.genai import types
+            types = self._preparar()
         except ImportError as exc:
             raise LLMProviderError(detail=f"SDK google-genai indisponível: {exc}") from exc
 
-        declaracoes = [
-            types.FunctionDeclaration(
-                name=spec.nome, description=spec.descricao, parameters=spec.parametros
-            )
-            for spec in ferramentas
-        ]
-        config = types.GenerateContentConfig(
-            system_instruction=request.system,
-            temperature=request.temperatura,
-            max_output_tokens=request.max_tokens,
-            tools=[types.Tool(function_declarations=declaracoes)],
-            http_options=types.HttpOptions(timeout=self._timeout_ms),
-        )
-        modelo = self._modelos_a_tentar(request.modelo)[0]
-        conteudos: list[Any] = [
-            types.Content(
-                role="user",
-                parts=[types.Part(text=montar_prompt(request, com_ferramentas=True))],
-            )
-        ]
-        entrada = saida = 0
-        for _ in range(self._MAX_VOLTAS):
-            try:
-                response = client.models.generate_content(  # type: ignore[attr-defined]
-                    model=modelo, contents=conteudos, config=config
+        if respostas:
+            self._conteudos.append(
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part.from_function_response(name=nome, response=payload)
+                        for nome, payload in respostas
+                    ],
                 )
-            except Exception as exc:
-                raise LLMProviderError(detail=f"Falha na chamada ao Gemini: {exc}") from exc
-            usage = getattr(response, "usage_metadata", None)
-            entrada += int(getattr(usage, "prompt_token_count", 0) or 0)
-            saida += int(getattr(usage, "candidates_token_count", 0) or 0)
+            )
+        client = self._provider._ensure_client()
+        try:
+            response = client.models.generate_content(  # type: ignore[attr-defined]
+                model=self.modelo, contents=self._conteudos, config=self._config
+            )
+        except Exception as exc:
+            raise LLMProviderError(detail=f"Falha na chamada ao Gemini: {exc}") from exc
 
-            chamadas = list(getattr(response, "function_calls", None) or [])
-            if not chamadas:
-                texto = (getattr(response, "text", None) or "").strip()
-                if not texto:
-                    raise LLMProviderError(
-                        detail=_motivo_resposta_vazia(response, usage, modelo)
-                    )
-                return LLMResult(
-                    texto=texto, modelo=modelo, tokens_entrada=entrada, tokens_saida=saida
-                )
-
+        usage = getattr(response, "usage_metadata", None)
+        chamadas = list(getattr(response, "function_calls", None) or [])
+        if chamadas:
+            # O conteúdo original volta ao histórico **intacto** (ver docstring da classe).
             candidatos = getattr(response, "candidates", None) or []
             if candidatos and getattr(candidatos[0], "content", None) is not None:
-                conteudos.append(candidatos[0].content)
-            respostas = [
-                types.Part.from_function_response(
-                    name=chamada.name,
-                    response=executar(chamada.name, dict(chamada.args or {})),
-                )
-                for chamada in chamadas
-            ]
-            conteudos.append(types.Content(role="user", parts=respostas))
-
-        raise LLMProviderError(
-            detail=(
-                f"O modelo {modelo} pediu ferramentas em {self._MAX_VOLTAS} rodadas sem "
-                "produzir resposta."
-            )
+                self._conteudos.append(candidatos[0].content)
+        return Turno(
+            texto=(getattr(response, "text", None) or "").strip() or None,
+            chamadas=tuple(
+                ChamadaPedida(nome=c.name, argumentos=dict(c.args or {})) for c in chamadas
+            ),
+            tokens_entrada=int(getattr(usage, "prompt_token_count", 0) or 0),
+            tokens_saida=int(getattr(usage, "candidates_token_count", 0) or 0),
+            motivo_vazio=_motivo_resposta_vazia(response, usage, self.modelo),
         )
 
 

@@ -138,6 +138,10 @@ class ToolContext:
     principal: Principal
     origem: str = "api"
     conversa_id: uuid.UUID | None = None
+    #: Identificação de **qual** ator da origem chamou — hoje, a credencial MCP. Sem ela,
+    #: "veio do MCP" é tudo que a trilha diria, e revogar a credencial certa depois de um
+    #: incidente viraria adivinhação entre os clientes externos da organização.
+    origem_ref: str | None = None
 
 
 @dataclass(frozen=True)

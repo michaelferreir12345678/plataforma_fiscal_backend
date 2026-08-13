@@ -28,6 +28,7 @@ from app.modules.indicators.router import router as indicators_router
 from app.modules.ingestion.router import integracoes_router
 from app.modules.ingestion.router import router as ingestion_router
 from app.modules.limits.router import router as limits_router
+from app.modules.mcp.router import router as mcp_admin_router
 from app.modules.personnel.router import router as personnel_router
 from app.modules.platform.router import router as platform_router
 from app.modules.quality.router import router as quality_router
@@ -121,6 +122,9 @@ def create_app() -> FastAPI:
     app.include_router(platform_router)
     app.include_router(coverage_router)
     app.include_router(reconciliation_router)
+    # Só a **administração** das credenciais MCP vive aqui. O protocolo em si é servido
+    # por ``app.mcp_main``, em processo e porta próprios (§7.3 do plano de MCP).
+    app.include_router(mcp_admin_router)
 
     @app.on_event("startup")
     def recover_report_jobs() -> None:

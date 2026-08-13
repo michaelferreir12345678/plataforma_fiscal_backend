@@ -15,6 +15,7 @@ Toda resposta carrega ``source_ref`` por número (calculado × norma) e distingu
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from dataclasses import dataclass
@@ -49,11 +50,15 @@ from app.modules.assistant.schemas import (
     ResumoExecutivoRequest,
     UsoInfo,
     UsoResumoOut,
+    VerificacaoOut,
 )
 from app.modules.tenancy import repository as tenancy_repo
 from app.shared import tooling
 from app.shared.scope import assert_ente_in_scope
 from app.shared.source_ref import SourceRef
+from app.shared.tooling import verificacao
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
     "Você é o assistente fiscal da Plataforma de Inteligência Fiscal, que atende gestores "
@@ -349,7 +354,7 @@ def _run(
     inicio = time.perf_counter()
     # LLMProviderError propaga (RFC 7807). Quando o provedor sabe pedir ferramentas, quem
     # as executa é o envelope — as garantias não mudam por o modelo ter escolhido.
-    result: LLMResult = _chamar_provedor(
+    result, payloads = _chamar_provedor(
         session, principal, provider, request, cod_ibge=cod_ibge, ctx=ctx
     )
     latencia_ms = int((time.perf_counter() - inicio) * 1000)
@@ -365,6 +370,27 @@ def _run(
     incompletos = derivado.incompletos
     dado_disponivel = derivado.dado_disponivel
 
+    # G6 — verificação de saída. Roda **depois** da rederivação, de propósito: o lastro tem
+    # de incluir os fatos que o modelo buscou por ferramenta durante a conversa, senão o
+    # guardrail sinalizaria justamente os números mais bem fundamentados da resposta.
+    # E roda **antes** de persistir: o que vai para ``op.conversa`` é o texto já com o
+    # aviso, para que o histórico e a auditoria mostrem o mesmo que o gestor leu.
+    laudo = verificacao.verificar(
+        result.texto,
+        payloads,
+        [f.model_dump(mode="json") for f in fatos_resp],
+        [n.texto for n in ctx.normas],
+        [v.__dict__ for v in ctx.verbetes],
+    )
+    texto_final = verificacao.anexar_aviso(result.texto, laudo)
+    if not laudo.ok:
+        logger.warning(
+            "G6 sinalizou %s número(s) sem lastro na conversa do ente %s: %s",
+            len(laudo.sem_lastro),
+            cod_ibge,
+            laudo.tokens_sem_lastro(),
+        )
+
     conversa = repository.insert_conversa(
         session,
         org_id=org_id,
@@ -373,7 +399,7 @@ def _run(
         cod_ibge=cod_ibge,
         periodo=ctx.periodo,
         pergunta=pergunta,
-        resposta=result.texto,
+        resposta=texto_final,
         recusa=False,
         dado_disponivel=dado_disponivel,
         modelo=result.modelo,
@@ -410,7 +436,7 @@ def _run(
         as_of=ctx.as_of,
         titulo=titulo,
         pergunta=pergunta,
-        resposta=result.texto,
+        resposta=texto_final,
         recusa=False,
         dado_disponivel=dado_disponivel,
         fatos=fatos_resp,
@@ -424,6 +450,12 @@ def _run(
             latencia_ms=latencia_ms,
         ),
         source_refs=source_refs,
+        verificacao=VerificacaoOut(
+            status=laudo.status,
+            total_citados=laudo.total_citados,
+            com_lastro=laudo.com_lastro,
+            sem_lastro=laudo.tokens_sem_lastro(),
+        ),
         gerado_em=gerado_em,
     )
 
@@ -448,8 +480,12 @@ def _chamar_provedor(
     *,
     cod_ibge: str,
     ctx: retriever.GroundedContext,
-) -> LLMResult:
+) -> tuple[LLMResult, list[dict]]:
     """Chama o provedor — com ferramentas quando ele sabe pedi-las.
+
+    Devolve também os **payloads** das ferramentas executadas, que são o lastro do G6:
+    sem guardá-los, a verificação de saída teria de reconstituir depois o que o modelo
+    recebeu — e reconstituição é exatamente o que o G7 existe para evitar.
 
     O executor entregue ao provedor é o **envelope**: escopo, licença, ``as_of``,
     ``source_ref`` e auditoria são aplicados dentro dele, não aqui. Um modelo que peça um
@@ -458,14 +494,15 @@ def _chamar_provedor(
     o dado.
     """
     if not isinstance(provider, ToolCallingProvider):
-        return provider.chat(request)
+        return provider.chat(request), []
     especificacoes = especificacoes_de_ferramenta()
     if not especificacoes:  # pragma: no cover - registro sempre tem ferramentas
-        return provider.chat(request)
+        return provider.chat(request), []
 
     registro = tooling.registro()
     tool_ctx = tooling.ToolContext(session=session, principal=principal, origem="assistente")
     vistos = {f.codigo for f in ctx.fatos}
+    payloads: list[dict] = []
 
     def executar(nome: str, argumentos: dict) -> dict:
         args = dict(argumentos or {})
@@ -477,7 +514,10 @@ def _chamar_provedor(
         try:
             resultado = tooling.invoke(tool_ctx, registro, nome, args)
         except AppError as exc:
+            # A recusa vira conteúdo para o modelo, mas **não** vira lastro: um 403 não
+            # contém número que possa fundamentar prosa nenhuma.
             return tooling.erro_para_payload(exc)
+        payloads.append(resultado.payload)
         if nome == retriever.FERRAMENTA_INDICADOR:
             fato = retriever.fato_de_ferramenta(resultado.payload)
             if fato.codigo and fato.codigo not in vistos:
@@ -487,7 +527,7 @@ def _chamar_provedor(
                     ctx.source_refs.append(fato.source_ref)
         return resultado.payload
 
-    return provider.chat_com_ferramentas(request, especificacoes, executar)
+    return provider.chat_com_ferramentas(request, especificacoes, executar), payloads
 
 
 def _audit(

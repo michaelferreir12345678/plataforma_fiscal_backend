@@ -75,6 +75,43 @@ services:
       retries: 12
       start_period: 30s
 
+  # Servidor MCP — o quarto processo da mesma imagem (§7.3 do plano de MCP). Em
+  # desenvolvimento ele sobe junto para que o `POST /mcp` seja exercitável com um cliente
+  # real; ele **não** migra o banco (quem faz isso é a `api`), então depende dela.
+  mcp-server:
+    build: .
+    container_name: plataforma_fiscal_mcp
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${APP_DB_ROLE:-plataforma_app}:${APP_DB_PASSWORD:?Defina APP_DB_PASSWORD no arquivo .env}@postgres:5432/${POSTGRES_DB:-plataforma_fiscal}
+      DATABASE_ADMIN_URL: postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD no arquivo .env}@postgres:5432/${POSTGRES_DB:-plataforma_fiscal}
+      DB_NAME: ${POSTGRES_DB:-plataforma_fiscal}
+      APP_DB_ROLE: ${APP_DB_ROLE:-plataforma_app}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Defina APP_DB_PASSWORD no arquivo .env}
+      JWT_SECRET: ${JWT_SECRET:?Defina JWT_SECRET no arquivo .env}
+      REDIS_URL: redis://redis:6379/0
+      APP_ENV: docker
+    ports:
+      - "127.0.0.1:8010:8010"
+    command: ["uvicorn", "app.mcp_main:app", "--host", "0.0.0.0", "--port", "8010"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
   worker:
     build: .
     container_name: plataforma_fiscal_ingest_worker

@@ -276,7 +276,8 @@ def _auditar(ctx: ToolContext, registro: _Registro, *, tolerar_falha: bool) -> u
                 acao=ACAO_AUDITORIA,
                 recurso=(
                     f"tool:{registro.ferramenta};origem={registro.origem};"
-                    f"ente={registro.cod_ibge or '-'};status={registro.status}"
+                    + (f"por={ctx.origem_ref};" if ctx.origem_ref else "")
+                    + f"ente={registro.cod_ibge or '-'};status={registro.status}"
                 ),
             )
             return linha.id
