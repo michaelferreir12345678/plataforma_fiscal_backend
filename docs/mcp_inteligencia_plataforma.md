@@ -8,8 +8,8 @@
 > **Vive em** `backend_plataforma_fiscal/docs/` e é versionado com o código, como o
 > `evolucao_plataforma.md`. As fichas de sprint seguem o mesmo formato daquele documento.
 >
-> **Iniciado em:** 2026-08-12 · **Estado:** IA-1a implementada (ver a ficha); IA-1b em diante,
-> planejadas.
+> **Iniciado em:** 2026-08-12 · **Estado:** IA-1a **em produção** (backend `79bfd52`,
+> migration `0043`); IA-1b em diante, planejadas.
 > **Premissa inegociável:** é plataforma de governo. Um número errado com aparência de
 > certeza é pior que a ausência do número. Todo o desenho abaixo parte disso.
 
@@ -355,6 +355,15 @@ Três decisões que só apareceram na implementação, registradas por serem con
 2. **`extra='forbid'` na entrada de toda ferramenta.** Ignorar um argumento inventado pelo
    modelo (`exercicio=2023` numa ferramenta que só entende `periodo`) produz número certo
    respondendo a pergunta que ninguém fez — o pior modo de falha possível aqui.
+**Em produção desde 2026-08-13** (backend `79bfd52`, migration `0043` aplicada em passo
+isolado com exit 0, `/health` 200). A verificação independente encontrou **dois defeitos
+alheios a esta sprint**, ambos meus e de sprints anteriores do mesmo dia, corrigidos junto:
+o teste de auditoria da H1 comparava data local com carimbo UTC (reprovava todo dia depois
+das 21h) e a eleição do veredito vigente da E1 desempatava por `uuid4()` — os dois estão
+registrados em detalhe no §11 do `evolucao_plataforma.md`. **É o argumento da fatia
+vertical se pagando:** atravessar a arquitetura inteira cedo expôs fragilidades que
+ferramenta nenhuma isolada teria tocado.
+
 3. **A fonte vem da linha do mart, não do detalhe do Monitor de Limites.**
    `limits.build_limite_detail` carimba `RREO/Anexo 03` em todo indicador, porque é dali
    que sai a RCL do denominador. Para `garantias` e `operacoes_credito`, apurados do
