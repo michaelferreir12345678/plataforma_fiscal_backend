@@ -8,11 +8,14 @@
 > **Vive em** `backend_plataforma_fiscal/docs/` e é versionado com o código, como o
 > `evolucao_plataforma.md`. As fichas de sprint seguem o mesmo formato daquele documento.
 >
-> **Iniciado em:** 2026-08-12 · **Estado:** IA-1a, IA-1b e IA-2 **em produção** (backend
-> `adbb0ad`; migrations `0043`, `0044`, `0045`). **14 ferramentas** registradas (4 delas
-> consultas guiadas da §6.1) e o dicionário semeado com **11 verbetes, 132 campos e 14
-> junções** — tudo conferido dentro do contêiner de produção, não pelo relato. IA-3 em
-> diante, planejadas.
+> **Iniciado em:** 2026-08-12 · **Estado:** IA-1a, IA-1b, IA-2 e **IA-3 em produção**
+> (backend `65ba992`; migrations `0043`–`0046`). **14 ferramentas** (4 delas consultas
+> guiadas da §6.1), dicionário semeado (**11 verbetes, 132 campos, 14 junções**) e o
+> **`mcp-server` no ar como quarto processo da mesma imagem** — saudável pela rede interna
+> e com a porta 8010 **não publicada no host**, confirmado por `ss -tlnp`, não por leitura
+> do compose. Publicar para fora segue sendo passo separado do proxy reverso e **decisão
+> humana**. Tudo conferido dentro do contêiner de produção, não pelo relato. IA-5 e IA-6,
+> planejadas; IA-4 depende de decisão (§6.1).
 >
 > **Lacuna de processo encontrada no deploy da IA-2, e que vale para toda sprint futura
 > com seed:** a migration cria a estrutura, mas **não popula**. O `seed_dicionario` só era
