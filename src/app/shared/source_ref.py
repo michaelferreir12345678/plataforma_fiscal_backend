@@ -11,7 +11,7 @@ import hashlib
 import json
 from collections.abc import Sequence
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 COMPOSITE_VERSION_PREFIX = "cmp:v1:"
 
@@ -53,6 +53,26 @@ def composite_version_key(componentes: Sequence[SourceRef]) -> str:
     payload = f"[{','.join(fontes_canonicas)}]"
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     return f"{COMPOSITE_VERSION_PREFIX}{digest}"
+
+
+def fonte_gravada(bruto: dict | None, alternativa: SourceRef) -> SourceRef:
+    """A fonte **gravada na materialização** manda; ``alternativa`` é a reserva.
+
+    Quem materializou o número sabe de onde ele veio; quem o lê depois, no máximo
+    supõe. A suposição usual é carimbar o relatório do denominador — e é ela que erra
+    ``garantias`` e ``operacoes_credito``, apurados do **RGF**, como se fossem RREO
+    (decisão 3 da Sprint IA-1a). Preferir a linha gravada corrige a procedência sem
+    pedir que cada chamador conheça a exceção.
+
+    Um ``source_ref`` gravado fora do contrato (linha antiga, carga manual) não derruba
+    a resposta: cai para a alternativa, que é sempre válida.
+    """
+    if bruto and bruto.get("relatorio"):
+        try:
+            return SourceRef.model_validate(bruto)
+        except ValidationError:
+            pass
+    return alternativa
 
 
 class WithSourceRef(BaseModel):

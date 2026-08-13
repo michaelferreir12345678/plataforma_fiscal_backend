@@ -26,7 +26,7 @@ from app.modules.limits.schemas import (
 )
 from app.shared.ausencia import ausencia_de_entrega
 from app.shared.envelope import DrillNodeRef
-from app.shared.source_ref import SourceRef
+from app.shared.source_ref import SourceRef, fonte_gravada
 
 # Indicadores do semáforo (Módulo 1) e o poder associado (quando houver).
 SEMAFORO_INDICADORES = (
@@ -204,13 +204,25 @@ def _periodo_breadcrumb(session: Session, periodo: str) -> list[DrillNodeRef]:
     return catalog_service.periodo_breadcrumb(session, periodo)
 
 
-def _serie_historica(session: Session, cod_ibge: str, indicador: str) -> list[SerieItem]:
+def serie_historica(
+    session: Session, cod_ibge: str, indicador: str, *, as_of: datetime | None = None
+) -> list[SerieItem]:
+    """Série do indicador, **resolvendo a vigência período a período** (§6.5).
+
+    Público desde a Sprint IA-1b (a ferramenta ``serie_historica`` consome esta mesma
+    função — duas séries do mesmo indicador com réguas diferentes seria pior que nenhuma).
+
+    A vigência é resolvida *dentro* do laço, e é o que impede a família A14/A15: uma
+    versão resolvida uma vez e repetida em todos os períodos misturaria, na mesma linha de
+    gráfico, retificações vigentes com entregas já superadas. Cada ponto declara a entrega
+    de que saiu.
+    """
     serie: list[SerieItem] = []
     for periodo in repository.distinct_periodos_mart(
         session, cod_ibge=cod_ibge, indicador=indicador
     ):
         versao = indicators_repo.resolve_versao_rreo(
-            session, cod_ibge=cod_ibge, periodo=periodo
+            session, cod_ibge=cod_ibge, periodo=periodo, as_of=as_of
         )
         if versao is None:
             continue
@@ -222,6 +234,11 @@ def _serie_historica(session: Session, cod_ibge: str, indicador: str) -> list[Se
                 SerieItem(
                     periodo=periodo, valor_pct_rcl=mart.valor_pct_rcl,
                     faixa=mart.faixa, valor_rs=mart.valor_rs,
+                    versao_entrega=versao,
+                    source_ref=fonte_gravada(
+                        mart.source_ref,
+                        SourceRef(relatorio="RREO", periodo=periodo, versao_entrega=versao),
+                    ),
                 )
             )
     return serie
@@ -287,7 +304,7 @@ def build_limite_detail(
         teto_pct=mart.teto_pct or Decimal(0),
         memoria=memoria,
         providencias=providencias,
-        serie_historica=_serie_historica(session, cod_ibge, indicador),
+        serie_historica=serie_historica(session, cod_ibge, indicador),
         periodo_breadcrumb=_periodo_breadcrumb(session, periodo),
         source_ref=SourceRef(
             relatorio="RREO", anexo="Anexo 03", periodo=periodo, versao_entrega=versao

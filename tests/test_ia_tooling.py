@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
+from pydantic import Field
 from sqlalchemy import delete, select
 
 from app.core.db import admin_session, tenant_session
@@ -59,6 +60,15 @@ PCT_VIGENTE = Decimal("21.40")
 #: aqui **reprova** o teste da matriz — é assim que a IA-1b entra na matriz sozinha.
 ARGS_MINIMOS: dict[str, dict[str, object]] = {
     "indicador_do_ente": {"indicador": "garantias"},
+    # Sprint IA-1b.
+    "serie_historica": {"indicador": "garantias"},
+    "limites_do_ente": {},
+    "drill_receita": {},
+    "drill_despesa": {},
+    "cobertura_do_ente": {"pagina": "limites"},
+    "qualidade_do_ente": {},
+    "alertas_do_ente": {},
+    "comparar_com_coorte": {},
 }
 
 
@@ -243,7 +253,25 @@ def test_registro_recusa_declaracao_incoerente(kwargs: dict, trecho: str) -> Non
 
 def test_registro_da_plataforma_declara_tudo() -> None:
     registro = tooling.construir_registro()
-    assert set(registro.nomes()) == {"indicador_do_ente", "linhagem_do_indicador"}
+    assert set(registro.nomes()) == {
+        # IA-1a
+        "indicador_do_ente",
+        "linhagem_do_indicador",
+        # IA-1b — ferramentas
+        "serie_historica",
+        "limites_do_ente",
+        "drill_receita",
+        "drill_despesa",
+        "cobertura_do_ente",
+        "qualidade_do_ente",
+        "alertas_do_ente",
+        "comparar_com_coorte",
+        # IA-1b — consultas guiadas (§6.1)
+        "entes_que_ultrapassaram_faixa",
+        "ranking_indicador_na_coorte",
+        "serie_do_indicador_por_ente",
+        "entes_sem_entrega_da_fonte",
+    }
     for tool in registro.todas():
         assert tool.capacidade  # RBAC declarado
         assert tool.schema_entrada()["type"] == "object"
@@ -610,3 +638,106 @@ def test_especificacoes_expostas_ao_provedor_cobrem_o_registro() -> None:
     specs = especificacoes_de_ferramenta()
     assert {s.nome for s in specs} == set(tooling.registro().nomes())
     assert all(s.descricao and s.parametros["type"] == "object" for s in specs)
+
+
+@pytest.mark.parametrize("nome", tooling.registro().nomes())
+def test_toda_entrada_do_catalogo_sobrevive_a_traducao_para_o_provedor(nome: str) -> None:
+    """O catálogo só serve se o *function calling* conseguir declará-lo.
+
+    Uma ferramenta cuja entrada o adaptador não traduz é uma ferramenta que o modelo nunca
+    chama — falha silenciosa, e do tipo que só apareceria com o provedor real na frente.
+    Aqui ela vira suíte vermelha: nada de ``$defs``/``anyOf`` (que o SDK recusa) e todo
+    campo com tipo declarado.
+    """
+    limpo = schema_para_provedor(tooling.registro().get(nome).schema_entrada())
+    assert limpo["type"] == "object"
+    assert "$defs" not in limpo
+    assert "anyOf" not in str(limpo)
+    for campo, esquema in limpo["properties"].items():
+        assert esquema.get("type"), f"{nome}.{campo} sem tipo declarado para o provedor"
+
+
+# --------------------------------------------------------------------------- #
+# 9. Sprint IA-1b — a procedência por item
+# --------------------------------------------------------------------------- #
+def test_serie_historica_declara_a_entrega_de_cada_ponto(client, make_org, cenario) -> None:
+    """Cada ponto traz a **sua** entrega — é o que impede a série de misturar versões."""
+    org = make_org(entes=[cenario.ente])
+    resultado = _invocar(org, "serie_historica", {"ente": cenario.ente, "indicador": "garantias"})
+    pontos = resultado.payload["pontos"]
+    assert len(pontos) == 1, "a série contou a versão superada como um segundo ponto"
+    assert pontos[0]["versao_entrega"] == VERSAO_VIGENTE
+    assert Decimal(str(pontos[0]["valor_pct"])) == PCT_VIGENTE
+    assert pontos[0]["source_ref"]["versao_entrega"] == VERSAO_VIGENTE
+
+    historico = _invocar(
+        org,
+        "serie_historica",
+        {
+            "ente": cenario.ente,
+            "indicador": "garantias",
+            "as_of": AS_OF_RETROATIVO.isoformat(),
+        },
+    )
+    assert historico.payload["pontos"][0]["versao_entrega"] == VERSAO_ANTIGA
+    assert Decimal(str(historico.payload["pontos"][0]["valor_pct"])) == PCT_ANTIGO
+
+
+def test_limites_do_ente_usa_a_fonte_gravada_e_nao_a_do_denominador(
+    client, make_org, cenario
+) -> None:
+    """`garantias` é apurado do **RGF**; carimbá-lo como RREO erraria com ar de rigor.
+
+    É a decisão 3 da IA-1a aplicada à lista inteira: a fonte sai da linha do mart, item a
+    item, e não do carimbo único que ``build_limites`` põe na raiz por causa da RCL.
+    """
+    org = make_org(entes=[cenario.ente])
+    resultado = _invocar(org, "limites_do_ente", {"ente": cenario.ente, "periodo": PERIODO})
+    item = next(i for i in resultado.payload["itens"] if i["indicador"] == "garantias")
+    assert item["source_ref"]["relatorio"] == "RGF"
+    assert item["source_ref"]["versao_entrega"] == VERSAO_VIGENTE
+    assert Decimal(str(item["valor_pct"])) == PCT_VIGENTE
+    assert item["rotulo"] == "Garantias e contragarantias"
+
+
+def test_cobertura_do_ente_mede_o_escopo_de_quem_pergunta(client, make_org, cenario) -> None:
+    """Cobertura é metadado da nossa carga — não carrega, e não deve carregar, valor fiscal."""
+    org = make_org(entes=[cenario.ente])
+    resultado = _invocar(
+        org, "cobertura_do_ente", {"ente": cenario.ente, "pagina": "limites"}
+    )
+    assert resultado.payload["entes_no_escopo"] == 1
+    assert resultado.payload["pagina"] == "limites"
+    assert "source_ref" not in resultado.payload
+
+
+def test_qualidade_sem_check_aberto_e_ausencia_declarada(client, make_org, cenario) -> None:
+    org = make_org(entes=[cenario.ente])
+    resultado = _invocar(org, "qualidade_do_ente", {"ente": cenario.ente})
+    assert resultado.payload["checks"] == []
+    assert "atestado de exatidão" in resultado.payload["observacao"]
+
+
+def test_registro_aceita_fonte_por_item_e_recusa_saida_sem_nenhuma() -> None:
+    """A guarda de carga passou a aceitar procedência por item — e só por isso."""
+
+    class _Item(ToolOutput):
+        valor_rs: Decimal = Decimal("1")
+        source_ref: SourceRef | None = None
+
+    class _SaidaComItens(ToolOutput):
+        itens: list[_Item] = Field(default_factory=list)
+
+    class _SaidaSemNada(ToolOutput):
+        itens: list[_SaidaSimples] = Field(default_factory=list)
+
+    registro = tooling.ToolRegistry()
+    registro.register(
+        _tool(nome="fonte_por_item", saida=_SaidaComItens, saida_tem_numero_fiscal=True)
+    )
+    assert "fonte_por_item" in registro
+    with pytest.raises(RegistroInvalidoError) as exc:
+        registro.register(
+            _tool(nome="fonte_nenhuma", saida=_SaidaSemNada, saida_tem_numero_fiscal=True)
+        )
+    assert "source_ref" in str(exc.value)

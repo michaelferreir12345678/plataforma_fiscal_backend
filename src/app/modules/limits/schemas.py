@@ -52,6 +52,12 @@ class SerieItem(BaseModel):
     valor_pct_rcl: Decimal | None = None
     faixa: str | None = None
     valor_rs: Decimal | None = None
+    #: A entrega **daquele período** — não a do período mais recente (Sprint IA-1b).
+    #: Cada ponto da série é lido de uma vigência própria; sem declarar qual, dois pontos
+    #: vizinhos podem vir de versões diferentes sem que nada na resposta o diga, que é a
+    #: forma silenciosa da família A14/A15.
+    versao_entrega: str | None = None
+    source_ref: SourceRef | None = None
 
 
 class LimiteDetail(BaseModel):

@@ -29,18 +29,18 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import Field, ValidationError
+from pydantic import Field
 
 from app.core.errors import AppError
 from app.modules.benchmark.service import unidade_da_metrica
 from app.modules.catalog import service as catalog_service
 from app.modules.indicators import repository as indicators_repo
 from app.modules.indicators import rotulos
-from app.modules.ingestion import repository as ingestion_repo
 from app.modules.limits import service as limits_service
 from app.modules.quality import service as quality_service
 from app.modules.reports.service import formatar_valor
-from app.shared.source_ref import SourceRef
+from app.shared.source_ref import SourceRef, fonte_gravada
+from app.shared.tooling import consultas, ferramentas
 from app.shared.tooling.base import (
     EnteToolInput,
     Tool,
@@ -49,8 +49,7 @@ from app.shared.tooling.base import (
     ToolOutput,
     ToolRegistry,
 )
-
-RELATORIO_ANCORA = "RREO"
+from app.shared.tooling.comum import RELATORIO_ANCORA, periodo_efetivo
 
 #: Unidade do mart → unidade de formatação do relatório (fonte única de formatação).
 _UNIDADE_FORMATO = {
@@ -141,31 +140,16 @@ def _indisponivel(
     )
 
 
-def _fonte_do_indicador(bruto: dict | None, alternativa: SourceRef) -> SourceRef:
-    """A fonte gravada na linha do mart manda; o detalhe do Monitor é a reserva.
-
-    ``limits.build_limite_detail`` compõe o ``source_ref`` como RREO/Anexo 03 para
-    qualquer indicador, porque é dali que sai a RCL do denominador. Está certo para
-    pessoal e DCL sobre a RCL, mas ``garantias`` e ``operacoes_credito`` são apurados do
-    **RGF** — e atribuir ao RREO um número que o ente publicou no RGF é errar a
-    procedência com aparência de rigor. A linha do mart carrega o relatório/anexo que a
-    materializou; é ela que responde "de onde veio".
-    """
-    if bruto and bruto.get("relatorio"):
-        try:
-            return SourceRef.model_validate(bruto)
-        except ValidationError:
-            pass
-    return alternativa
+#: A fonte gravada na linha do mart manda; o detalhe do Monitor é a reserva. A regra virou
+#: ``shared.source_ref.fonte_gravada`` na IA-1b, para que a ampliação do catálogo não
+#: repetisse a exceção do RGF em cada ferramenta nova (ver a docstring de lá).
+_fonte_do_indicador = fonte_gravada
 
 
 def _periodo_efetivo(ctx: ToolContext, entrada: IndicadorDoEnteIn) -> str | None:
-    if entrada.periodo:
-        return entrada.periodo
-    ultima = ingestion_repo.resolve_latest_entrega(
-        ctx.session, cod_ibge=entrada.ente, relatorio=RELATORIO_ANCORA, as_of=entrada.as_of
+    return periodo_efetivo(
+        ctx, ente=entrada.ente, periodo=entrada.periodo, as_of=entrada.as_of
     )
-    return ultima.periodo if ultima else None
 
 
 def executar_indicador_do_ente(ctx: ToolContext, entrada: IndicadorDoEnteIn) -> IndicadorDoEnteOut:
@@ -386,6 +370,12 @@ def construir_registro() -> ToolRegistry:
             saida_tem_numero_fiscal=False,
         )
     )
+    # IA-1b: as oito capacidades restantes e o catálogo de consultas guiadas. Todas passam
+    # pelas mesmas validações de carga — uma declaração incoerente derruba o import, não
+    # a primeira requisição.
+    for tool in ferramentas.ferramentas():
+        registro.register(tool)
+    consultas.registrar(registro)
     return registro
 
 

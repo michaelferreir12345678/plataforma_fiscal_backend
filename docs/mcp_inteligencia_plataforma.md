@@ -9,7 +9,8 @@
 > `evolucao_plataforma.md`. As fichas de sprint seguem o mesmo formato daquele documento.
 >
 > **Iniciado em:** 2026-08-12 · **Estado:** IA-1a **em produção** (backend `79bfd52`,
-> migration `0043`); IA-1b em diante, planejadas.
+> migration `0043`); IA-1b **implementada** (catálogo com 14 ferramentas, incluindo a
+> consulta guiada da §6.1 — sem migration); IA-2 em diante, planejadas.
 > **Premissa inegociável:** é plataforma de governo. Um número errado com aparência de
 > certeza é pior que a ausência do número. Todo o desenho abaixo parte disso.
 
@@ -385,6 +386,89 @@ trabalho mecânico e paralelizável, sem decisão de arquitetura nova.
 **Critérios de aceite:** cada ferramenta nova passa pela mesma matriz de escopo da IA-1a
 (o teste é parametrizado sobre o registro — ferramenta nova entra na matriz sozinha);
 nenhuma introduz cálculo fiscal fora de `indicators/`.
+
+#### Entregue (2026-08-13)
+
+O catálogo saiu de **2** ferramentas para **14**: as oito da ficha mais as quatro consultas
+guiadas da §6.1.
+
+| Peça | Onde |
+|---|---|
+| `serie_historica`, `limites_do_ente`, `drill_receita`, `drill_despesa`, `cobertura_do_ente`, `qualidade_do_ente`, `alertas_do_ente`, `comparar_com_coorte` | `src/app/shared/tooling/ferramentas.py` |
+| Consulta guiada: `entes_que_ultrapassaram_faixa`, `ranking_indicador_na_coorte`, `serie_do_indicador_por_ente`, `entes_sem_entrega_da_fonte` | `src/app/shared/tooling/consultas.py` |
+| Período-âncora, ausência declarada e memória-como-texto, compartilhados pelos três módulos | `src/app/shared/tooling/comum.py` |
+| `fonte_gravada` — a regra "a fonte da materialização manda" promovida a compartilhada | `src/app/shared/source_ref.py` |
+| `declara_fonte` — a guarda de carga passou a aceitar `source_ref` **por item** | `src/app/shared/tooling/base.py` |
+| `limits.serie_historica` pública, com `as_of` e com a entrega de cada ponto | `src/app/modules/limits/service.py` + `schemas.py` |
+| 23 testes de consulta guiada (vigência, matriz de escopo parametrizada, contenção, auditoria) | `tests/test_ia_consultas.py` |
+| Matriz de escopo estendida a 9 ferramentas com ente + 5 testes de procedência por item | `tests/test_ia_tooling.py` |
+
+Sem migration: a sprint não criou tabela — as ferramentas leem o que já está materializado.
+
+**Cinco decisões que só apareceram na implementação, registradas por serem contraintuitivas:**
+
+1. **A vigência é resolvida pelo *join*, não por um filtro.** Toda consulta guiada parte de
+   `entregas_vigentes()`, que devolve **uma** `versao_entrega` por `(ente, período)`, e junta
+   o fato por essa chave composta. A diferença em relação a "filtrar `vigente = true` no
+   fim" é que aqui uma versão superada **não tem como entrar** — não existe chave para ela
+   casar. É a forma estrutural do que o A14/A15 custou duas sprints para corrigir, e é o
+   que o teste `test_consulta_nao_conta_versao_superada` fixa: o cenário tem um ente que
+   estourou o limite de pessoal na entrega superada (56,20%) e não estourou na vigente
+   (48,10%); a consulta devolve **só** o vizinho que estourou de verdade.
+
+2. **Escopo agregado × nominal, aplicado num funil só.** As consultas guiadas atravessam
+   entes, então não recebem `ente` e o gate do envelope (que só age sobre `EnteToolInput`)
+   não as alcança. A garantia foi para `consultas.executar()`: consulta **agregada** é
+   restringida ao conjunto licenciado; consulta **nominal** (o usuário nomeou os entes)
+   *afirma* o escopo com `assert_ente_in_scope`, preservando a distinção entre os dois 403.
+   Omitir em silêncio um ente que o gestor nomeou seria responder outra pergunta. Para que
+   isso não dependa de disciplina, o executor recebe um `Escopo` já resolvido como
+   argumento obrigatório: uma consulta nova **não consegue** rodar sem escopo.
+
+3. **`source_ref` por item, e a guarda de carga teve de mudar para isso.** A IA-1a exigia
+   `source_ref` na raiz da saída. Está certo para o drill (a árvore inteira vem de uma
+   entrega), mas errado para a série histórica (um período por entrega) e para a lista de
+   limites (`garantias` vem do RGF, a dívida do RREO). Um carimbo único na raiz produziria
+   procedência **uniforme e errada** — pior que nenhuma, porque erra com aparência de rigor.
+   `declara_fonte` passou a aceitar a fonte declarada no tipo do item da lista; a guarda de
+   runtime continua conferindo número a número, sem afrouxar nada.
+
+4. **Contagem de entidade não é número fiscal.** `entes_no_escopo`, `entes_com_dado` e os
+   contadores de alerta por severidade entraram em `CHAVES_ESTRUTURAIS`. A defesa: eles
+   contam *entes* e *alertas*, nunca reais, e não existe `versao_entrega` que os fundamente —
+   exigir `source_ref` aí obrigaria a inventar uma procedência. Na mesma linha, dois casos
+   passaram a viajar como **texto**: a memória de cálculo dos alertas e os dois lados do
+   check `freshness`, que mede *dias de atraso* e não se ancora em entrega nenhuma. Um
+   número sem fonte que o modelo citaria como fato apurado é exatamente o que a G4 existe
+   para impedir.
+
+5. **Não existe uma ferramenta `listar_consultas`.** O catálogo já viaja no contexto como a
+   própria lista de ferramentas; transformá-lo numa chamada gastaria um passo do agente
+   para descobrir o que já estava disponível — o erro descrito na §2.3 (dicionário virando
+   ferramenta). A recusa útil da §6.1 ("não sei, e este é o catálogo do que sei responder")
+   sai de graça. Pelo mesmo motivo, cada consulta é uma **ferramenta própria** em vez de um
+   `consulta_guiada(nome, parametros)`: assim cada uma leva o seu JSON Schema ao modelo e o
+   `extra='forbid'` age sobre os parâmetros reais, em vez de devolver a validação ao runtime.
+
+**Fronteira respeitada.** Nenhuma linha nova soma, divide ou classifica valor fiscal. O
+ranking **ordena** e não calcula percentil de propósito: percentil e distribuição já são
+`benchmark/` (expostos por `comparar_com_coorte`), e recalculá-los aqui criaria uma segunda
+régua para o mesmo número — o que a §7 do `CLAUDE.md` proíbe.
+
+**Defeito herdado, ainda aberto.** `limits.build_limite_detail` continua sem repassar o
+`as_of` à série histórica que devolve: o detalhe de uma consulta retroativa traz o número
+do período no `as_of` pedido, mas a série sempre nas versões vigentes de hoje. A função
+agora aceita o parâmetro (a ferramenta `serie_historica` o usa); mudar o comportamento do
+endpoint `GET /entes/{ibge}/limites/{ind}` ficou fora do escopo desta sprint, como o
+carimbo de fonte daquele mesmo endpoint ficou fora da IA-1a.
+
+**O que isto significa para a IA-4.** As quatro consultas cobrem as perguntas do §6.1,
+inclusive a que a ficha da IA-4 usa como exemplo ("quais municípios acima de 50 mil
+habitantes ultrapassaram o prudencial de pessoal em 2024" — é
+`entes_que_ultrapassaram_faixa` com `populacao_minima`). A medição que decide a IA-4 já
+está instrumentada: `op.ia_tool_call` registra toda chamada, e o que cair fora do catálogo
+aparece lá como nome inventado (404 auditado). **A recomendação da §6.1 permanece: medir
+antes de aprovar a IA-4.**
 
 ---
 

@@ -22,6 +22,14 @@ from decimal import Decimal
 from typing import Any
 
 #: Chaves cujo valor numérico **não** é número fiscal: descrevem o envelope, não o dado.
+#:
+#: **Contagem de entidade não é número fiscal.** As entradas acrescentadas na Sprint IA-1b
+#: contam *entes* e *alertas* — nunca reais, nunca percentual de RCL. A distinção não é
+#: estilística: um número fiscal responde "quanto o ente gastou" e precisa de uma entrega
+#: para responder por ele; "para quantos entes esta página responde" é uma medida da nossa
+#: própria carga, e **não existe** ``versao_entrega`` que a fundamente — exigir
+#: ``source_ref`` aí obrigaria a inventar uma procedência, que é pior que não ter nenhuma.
+#: Os nomes são específicos o bastante para não colidirem com dinheiro.
 CHAVES_ESTRUTURAIS: frozenset[str] = frozenset(
     {
         "total",
@@ -37,6 +45,13 @@ CHAVES_ESTRUTURAIS: frozenset[str] = frozenset(
         "linhas",
         "score",
         "dim",
+        # Cobertura: contagem de entes dentro do escopo de quem pergunta (Sprint IA-1b).
+        "entes_no_escopo",
+        "entes_com_dado",
+        # Fila de alertas: contagem por severidade (Sprint IA-1b).
+        "critico",
+        "atencao",
+        "informativo",
     }
 )
 

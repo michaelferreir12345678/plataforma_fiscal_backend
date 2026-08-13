@@ -23,6 +23,7 @@ import, não um 200 silencioso em produção. O registro ainda confere, na carga
 from __future__ import annotations
 
 import re
+import typing
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -38,6 +39,45 @@ from app.shared.tooling.errors import RegistroInvalidoError
 
 #: Nome de ferramenta aceito por clientes MCP e pelo *function calling* do Gemini.
 _NOME_VALIDO = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
+
+#: Nomes que **declaram** procedência numa saída (ver ``fonte.CHAVES_DE_FONTE``).
+_CAMPOS_DE_FONTE = ("source_ref", "source_refs")
+
+
+def _submodelos(anotacao: Any) -> list[type[BaseModel]]:
+    """Modelos Pydantic alcançáveis a partir de uma anotação (``list[X]``, ``X | None``…)."""
+    if isinstance(anotacao, type) and issubclass(anotacao, BaseModel):
+        return [anotacao]
+    achados: list[type[BaseModel]] = []
+    for arg in typing.get_args(anotacao):
+        achados.extend(_submodelos(arg))
+    return achados
+
+
+def declara_fonte(modelo: type[BaseModel], *, profundidade: int = 1) -> bool:
+    """Se o contrato de saída declara ``source_ref`` na raiz **ou em cada item**.
+
+    A IA-1a exigia a fonte na raiz, que é a forma certa quando a resposta inteira sai de
+    uma entrega só. A IA-1b encontrou o caso contrário: uma **série histórica** tem um
+    período por entrega, e uma lista de limites mistura indicadores apurados do RREO com
+    outros apurados do RGF. Nesses contratos a fonte tem de ser por item, e um carimbo
+    único na raiz seria uma procedência uniforme e **errada** — pior que nenhuma, porque
+    erra com aparência de rigor.
+
+    Por isso a exigência é "declara procedência de forma estruturalmente alcançável", não
+    "tem um campo na raiz". A guarda de runtime (``fonte.numeros_sem_fonte``) continua
+    conferindo, número a número, que a declaração foi de fato preenchida.
+    """
+    campos = modelo.model_fields
+    if any(nome in campos for nome in _CAMPOS_DE_FONTE):
+        return True
+    if profundidade <= 0:
+        return False
+    return any(
+        declara_fonte(sub, profundidade=profundidade - 1)
+        for campo in campos.values()
+        for sub in _submodelos(campo.annotation)
+    )
 
 
 class ToolInput(BaseModel):
@@ -157,10 +197,10 @@ class ToolRegistry:
                 f"'{tool.nome}' aceita 'ente' sem declarar recebe_ente=True — seria um "
                 f"caminho para consultar um ente sem passar pelo gate de escopo (A22/E1)."
             )
-        if tool.saida_tem_numero_fiscal and "source_ref" not in tool.saida.model_fields:
+        if tool.saida_tem_numero_fiscal and not declara_fonte(tool.saida):
             raise RegistroInvalidoError(
                 f"'{tool.nome}' devolve número fiscal, então a saída tem de declarar "
-                f"'source_ref' (§6.3)."
+                f"'source_ref' — na raiz ou em cada item da lista (§6.3)."
             )
         self._tools[tool.nome] = tool
         return tool
