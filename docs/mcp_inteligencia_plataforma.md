@@ -573,6 +573,61 @@ como consultável.
 **Evidências:** verbete completo de dois indicadores (um teto, um piso) e a saída da
 catraca antes/depois.
 
+#### Entregue (2026-08-13)
+
+| Peça | Onde |
+|---|---|
+| `gold.dicionario_indicador`, `gold.dicionario_campo`, `gold.dicionario_juncao` (aditivas, reversíveis, com GRANT) | `alembic/versions/0045_dicionario_semantico.py` |
+| **11 verbetes** — os 10 códigos reais do mart + `rcl` (o denominador em si) | `src/app/modules/dictionary/verbetes.py` |
+| **132 colunas** descritas em **12 tabelas consultáveis** (nenhuma de `op`) | `src/app/modules/dictionary/campos.py` |
+| **14 caminhos de junção** sancionados, com a condição de vigência e o que quebra sem ela | `src/app/modules/dictionary/juncoes.py` |
+| Seed idempotente + catraca de completude + busca de vocabulário → código | `src/app/modules/dictionary/service.py` |
+| Introspecção do `information_schema` (a régua da catraca) | `src/app/modules/dictionary/repository.py` |
+| Exposição como **recurso** (`dicionario://indicadores|campos|juncoes`), pronta para virar *resource* MCP na IA-3 | `src/app/shared/tooling/recursos.py` |
+| Bloco de contexto do agente interno (`VerbeteContexto`, render, provedor local) | `assistant/llm.py`, `assistant/retriever.py::retrieve_verbetes`, `assistant/service.py` |
+| 30 testes (catraca nos dois sentidos, `op` barrado pelo banco, recursos, a prova do RAG) | `tests/test_ia_dicionario.py` |
+
+**Quatro decisões que só apareceram na implementação:**
+
+1. **O verbete não guarda percentual de limite.** Teto e piso por esfera já são dado em
+   `gold.dim_limite_legal` desde a Sprint 2; copiá-los para o verbete criaria uma segunda
+   régua para o mesmo limite — e a segunda régua é a que fica desatualizada. O recurso
+   `dicionario://indicadores` **lê** os tetos da dimensão na hora de renderizar. O verbete
+   diz *o que é* e *sobre o que incide*; quanto é, pergunta-se a quem já sabe.
+
+2. **`denominador_fallback` existe porque a plataforma tem esse caso de verdade.** Sem RCL
+   Ajustada publicada, pessoal e DCL caem para a RCL cheia e a linha registra qual usou. Um
+   verbete que declarasse só o denominador canônico estaria mentindo justamente nos entes
+   em que o erro da Sprint 28 ainda é possível. A catraca confronta o declarado com o que o
+   mart **de fato** usa (`SELECT DISTINCT indicador, denominador`): se a apuração mudar e o
+   verbete não, a suíte fica vermelha — é a checagem que a Sprint 28 não tinha.
+
+3. **A proibição de `op` é `CHECK` no banco, não asserção em teste.** O §4.1 proíbe consulta
+   livre sobre dado da organização; uma proibição que depende de alguém lembrar dela na hora
+   de escrever a seed não é proibição. `ck_dicionario_campo_sem_op` faz o `INSERT` falhar, e
+   o teste prova a falha em vez de prová-la por convenção.
+
+4. **O dicionário entra no contexto mas *não* conta como fundamento.** Ele está sempre
+   disponível — tratá-lo como contexto fundamentado faria toda pergunta deixar de ser
+   recusada, esvaziando o G3 sem que nada estourasse. Os verbetes entram no `LLMRequest`
+   **depois** da decisão de recusa, que continua sendo "fato calculado + norma". Verbete
+   explica, não mede. Há teste dedicado a essa regressão.
+
+**A prova do critério 3, e por que ela vale.** A pergunta *"o que é RCL Ajustada e por que
+ela é o denominador do limite de pessoal?"* é respondida com o `LocalGroundedProvider` —
+extrativo, sem conhecimento próprio nenhum: ele só costura o que recebeu. A resposta traz a
+dedução das emendas, o `CF art. 166-A, §2º (EC 105/2019)` e o `art. 20` da LRF. O teste de
+controle negativo fecha o argumento: **nenhum dos 18 dispositivos do corpo normativo
+indexado contém a palavra "ajustada"** — a definição só pode ter vindo do dicionário. O
+número (48,00%) continua vindo do mart, com `source_ref`; o dicionário não trouxe valor
+nenhum.
+
+**Fora do escopo, por decisão.** `mart_benchmark`/`dim_coorte` não entraram nas tabelas
+consultáveis (a comparação tem ferramenta própria e a coorte é versionada — merece verbete
+antes de entrar em consulta livre), nem `fato_msc_saldo` e suas partições, nem os fatos de
+receita/despesa, cujo drill hierárquico já é servido por ferramenta. Não há endpoint HTTP
+do dicionário: a exposição prevista na ficha é **recurso**, e o transporte é a IA-3.
+
 ---
 
 ### Sprint IA-3 — Servidor MCP e agente interno sobre o mesmo registro

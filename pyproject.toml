@@ -21,7 +21,12 @@ dependencies = [
     "pypdf==5.1.0",
     "reportlab==4.2.5",
     "python-pptx==1.0.2",
-    "google-genai==1.16.1",
+    # 1.75.0, não 1.16.1: o SDK antigo não conhecia ``Part.thought_signature`` e o
+    # descartava ao desserializar a resposta. Com *function calling* (Sprint IA-1a) e um
+    # modelo com raciocínio, a assinatura tem de voltar junto do histórico — sem ela a API
+    # recusa com 400 INVALID_ARGUMENT na segunda volta do laço de ferramentas. Sem o
+    # function calling o campo nunca era exigido, por isso o problema só apareceu agora.
+    "google-genai==1.75.0",
     "redis==8.0.1",
     "rq==2.10.0",
 ]

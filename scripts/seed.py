@@ -18,6 +18,7 @@ from app.core.security import hash_password  # noqa: E402
 from app.modules.assistant import norma_seed  # noqa: E402
 from app.modules.assistant.embeddings import get_embedder  # noqa: E402
 from app.modules.catalog import service as catalog_service  # noqa: E402
+from app.modules.dictionary import service as dictionary_service  # noqa: E402
 from app.modules.ingestion import integracoes  # noqa: E402
 from app.modules.limits import service as limits_service  # noqa: E402
 from app.modules.tenancy import repository  # noqa: E402
@@ -37,9 +38,18 @@ def run() -> None:
         limits_service.seed_providencias(s)
         gravados = norma_seed.seed_norma_corpus(s, get_embedder())
         integracoes.seed_integracoes(s)
+        # Dicionário semântico (Sprint IA-2): o significado do dado é dado, e é semeado
+        # aqui — não só preguiçosamente na primeira leitura — para que um ambiente novo
+        # já suba com a definição de cada indicador disponível ao assistente.
+        dicionario = dictionary_service.seed_dicionario(s)
         print("[seed] dimensões (limites + períodos + providências) garantidas")
         print(f"[seed] corpo normativo do assistente indexado ({gravados} dispositivos)")
         print(f"[seed] integrações semeadas ({len(integracoes.FAMILIES)} fontes)")
+        print(
+            "[seed] dicionário semântico: "
+            f"{dicionario['indicadores']} verbetes, {dicionario['campos']} campos, "
+            f"{dicionario['juncoes']} junções"
+        )
 
     with admin_session() as s:
         if repository.get_usuario_by_email(s, ADMIN_MUNICIPIO_EMAIL) is not None:

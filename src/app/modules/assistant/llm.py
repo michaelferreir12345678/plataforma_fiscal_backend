@@ -92,6 +92,29 @@ class NormaContexto:
 
 
 @dataclass(frozen=True)
+class VerbeteContexto:
+    """Um verbete do dicionário semântico (Sprint IA-2) — o significado, não o valor.
+
+    Entra no contexto como **recurso**: não custa chamada de ferramenta, não tem escopo a
+    verificar e não carrega número de ente nenhum. É o que impede o modelo de responder
+    "qual é o denominador do limite de pessoal?" pela memória — a resposta é dado da
+    plataforma, e errá-la já custou uma migration corretiva (Sprint 28).
+    """
+
+    codigo: str
+    rotulo: str
+    definicao: str
+    formula: str
+    denominador: str
+    denominador_definicao: str
+    base_legal: str
+    sentido: str
+    armadilha: str | None = None
+    fonte_definicao: str | None = None
+    atualizado_em: str | None = None
+
+
+@dataclass(frozen=True)
 class LLMRequest:
     """Requisição fundamentada enviada à porta — contexto estruturado, não texto solto."""
 
@@ -101,6 +124,10 @@ class LLMRequest:
     periodo: str | None = None
     fatos: tuple[FatoContexto, ...] = ()
     normas: tuple[NormaContexto, ...] = ()
+    #: Definições do dicionário semântico (Sprint IA-2). Deliberadamente **não** contam
+    #: como fundamento para responder: um verbete explica o que é o indicador, nunca
+    #: quanto ele vale. A recusa honesta da §9 continua decidida por fato + norma.
+    verbetes: tuple[VerbeteContexto, ...] = ()
     modelo: str | None = None
     temperatura: float = 0.2
     #: Teto de saída. Precisa acomodar o **raciocínio** dos modelos 3.x, que sai do mesmo
@@ -286,6 +313,13 @@ def render_grounding(request: LLMRequest) -> str:
         linhas.append("\nSEM DADO MATERIALIZADO (NÃO afirme valores — sinalize a ausência):")
         for fato in indisponiveis:
             linhas.append(f"- {fato.rotulo} ({fato.periodo})")
+    if request.verbetes:
+        linhas.append(
+            "\nDICIONÁRIO DA PLATAFORMA (definições oficiais — prevalecem sobre "
+            "conhecimento geral):"
+        )
+        for verbete in request.verbetes:
+            linhas.extend(_linhas_do_verbete(verbete))
     if request.normas:
         linhas.append("\nDISPOSITIVOS NORMATIVOS (explicação geral da norma):")
         for norma in request.normas:
@@ -293,6 +327,29 @@ def render_grounding(request: LLMRequest) -> str:
     if not disponiveis and not request.normas:
         linhas.append("\n(NENHUM dado nem dispositivo relevante foi recuperado.)")
     return "\n".join(linhas)
+
+
+def _linhas_do_verbete(verbete: VerbeteContexto) -> list[str]:
+    """Serializa um verbete. O denominador vem junto **sempre**: é o campo que erra caro."""
+    linhas = [
+        f"- {verbete.rotulo} ({verbete.codigo}): {verbete.definicao}",
+        f"  Fórmula: {verbete.formula}",
+    ]
+    if verbete.denominador:
+        linhas.append(
+            f"  Denominador ({verbete.denominador}): {verbete.denominador_definicao}"
+        )
+    else:
+        linhas.append(f"  Observação: {verbete.denominador_definicao}")
+    linhas.append(f"  Sentido: {verbete.sentido}. Base legal: {verbete.base_legal}")
+    if verbete.armadilha:
+        linhas.append(f"  Atenção: {verbete.armadilha}")
+    if verbete.fonte_definicao or verbete.atualizado_em:
+        linhas.append(
+            f"  (definição de {verbete.fonte_definicao or 'origem não declarada'}; "
+            f"revisada em {verbete.atualizado_em or 'data não declarada'})"
+        )
+    return linhas
 
 
 # --------------------------------------------------------------------------- #
@@ -335,6 +392,22 @@ class LocalGroundedProvider:
                 f"{rotulos}. Não é possível afirmar esses valores para o período informado — "
                 "recomenda-se verificar a entrega/retificação no SICONFI."
             )
+
+        if request.verbetes:
+            # Extrativo como o resto do provedor: as definições saem do dicionário da
+            # plataforma, não de conhecimento do adaptador — que não tem nenhum.
+            blocos.append("Definições da plataforma (dicionário semântico):")
+            for verbete in request.verbetes:
+                blocos.append(f"• {verbete.rotulo} ({verbete.codigo}): {verbete.definicao}")
+                blocos.append(f"  Fórmula: {verbete.formula}")
+                if verbete.denominador:
+                    blocos.append(
+                        f"  Denominador — {verbete.denominador}: "
+                        f"{verbete.denominador_definicao}"
+                    )
+                blocos.append(f"  Base legal: {verbete.base_legal}")
+                if verbete.armadilha:
+                    blocos.append(f"  Atenção: {verbete.armadilha}")
 
         if request.normas:
             blocos.append("Fundamentação normativa:")

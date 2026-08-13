@@ -20,7 +20,8 @@ from app.core.deps import Principal
 from app.core.errors import AppError
 from app.modules.assistant import repository, vectors
 from app.modules.assistant.embeddings import Embedder
-from app.modules.assistant.llm import FatoContexto, NormaContexto
+from app.modules.assistant.llm import FatoContexto, NormaContexto, VerbeteContexto
+from app.modules.dictionary import service as dictionary_service
 from app.modules.indicators.rotulos import ROTULOS
 from app.modules.ingestion import repository as ingestion_repo
 from app.modules.reports import service as reports_service
@@ -66,6 +67,9 @@ class GroundedContext:
     as_of: datetime
     fatos: list[FatoContexto] = field(default_factory=list)
     normas: list[NormaContexto] = field(default_factory=list)
+    #: Definições do dicionário semântico (IA-2). Recurso, não fato: entram no contexto
+    #: sem chamada de ferramenta e **não** contam para a decisão de recusa.
+    verbetes: list[VerbeteContexto] = field(default_factory=list)
     dados_incompletos: list[dict] = field(default_factory=list)
     source_refs: list[dict] = field(default_factory=list)
 
@@ -420,4 +424,36 @@ def build_context(
     ctx.normas = retrieve_normas(
         session, embedder, pergunta=pergunta, indicadores=alvos, top_k=top_k
     )
+    ctx.verbetes = retrieve_verbetes(
+        session, pergunta=pergunta, codigos={f.codigo for f in ctx.fatos} | alvos
+    )
     return ctx
+
+
+def retrieve_verbetes(
+    session: Session, *, pergunta: str, codigos: set[str]
+) -> list[VerbeteContexto]:
+    """Definições do dicionário semântico relevantes à pergunta (Sprint IA-2).
+
+    Recuperar a definição junto do número é o que fecha a lacuna do §3: sem isso, a prosa
+    em volta do valor sai do conhecimento geral do modelo — e "o denominador do limite de
+    pessoal é a RCL" é uma frase plausível, corrente na literatura, e **errada** nesta
+    plataforma desde a Sprint 28.
+    """
+    achados = dictionary_service.verbetes_para_pergunta(session, pergunta, codigos=codigos)
+    return [
+        VerbeteContexto(
+            codigo=v.codigo,
+            rotulo=v.rotulo,
+            definicao=v.definicao,
+            formula=v.formula,
+            denominador=v.denominador,
+            denominador_definicao=v.denominador_definicao,
+            base_legal=v.base_legal,
+            sentido=v.sentido,
+            armadilha=v.armadilha,
+            fonte_definicao=v.fonte_definicao,
+            atualizado_em=v.atualizado_em.isoformat(),
+        )
+        for v in achados
+    ]

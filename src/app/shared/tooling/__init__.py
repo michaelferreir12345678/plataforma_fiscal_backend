@@ -34,12 +34,17 @@ from app.shared.tooling.errors import (
     SaidaInvalidaError,
 )
 from app.shared.tooling.fonte import numeros_sem_fonte
+from app.shared.tooling.recursos import Recurso, RecursoRegistry
+from app.shared.tooling.recursos import ler as ler_recurso
+from app.shared.tooling.recursos import registro as registro_de_recursos
 
 __all__ = [
     "EnteToolInput",
     "EntradaInvalidaError",
     "FerramentaDesconhecidaError",
     "FonteAusenteError",
+    "Recurso",
+    "RecursoRegistry",
     "RegistroInvalidoError",
     "SaidaInvalidaError",
     "Tool",
@@ -51,6 +56,8 @@ __all__ = [
     "construir_registro",
     "erro_para_payload",
     "invoke",
+    "ler_recurso",
     "numeros_sem_fonte",
     "registro",
+    "registro_de_recursos",
 ]

@@ -67,6 +67,11 @@ SYSTEM_PROMPT = (
     "4. Se um dado necessário está ausente ou desatualizado, diga isso explicitamente e "
     "não estime — sinalize a lacuna.\n"
     "5. Considere a esfera (municipal/estadual) do ente ao explicar limites.\n"
+    "5.1. Quando o contexto trouxer o DICIONÁRIO DA PLATAFORMA, ele PREVALECE sobre o seu "
+    "conhecimento geral para fórmula, denominador, unidade e sentido de um indicador — "
+    "inclusive quando divergir do que você sabe (ex.: o denominador dos limites de pessoal "
+    "e dívida é a RCL Ajustada, não a RCL cheia). Sem verbete no contexto, diga que a "
+    "definição não foi fornecida em vez de recorrer à memória.\n"
     "6. Não emita parecer jurídico ou contábil definitivo; explique e aponte o dispositivo "
     "aplicável.\n"
     "Escreva em português, de forma objetiva e útil para a decisão do gestor."
@@ -334,6 +339,11 @@ def _run(
         periodo=ctx.periodo,
         fatos=tuple(ctx.fatos),
         normas=tuple(ctx.normas),
+        # Sprint IA-2: o significado viaja junto do número. Note que os verbetes entram
+        # **depois** da decisão de recusa acima — definição não é fundamento para
+        # responder, e um dicionário sempre presente jamais poderia virar "dado
+        # disponível" sem esvaziar o guardrail G3.
+        verbetes=tuple(ctx.verbetes),
         modelo=modelo_desejado,
     )
     inicio = time.perf_counter()
