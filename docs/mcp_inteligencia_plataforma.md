@@ -8,10 +8,21 @@
 > **Vive em** `backend_plataforma_fiscal/docs/` e é versionado com o código, como o
 > `evolucao_plataforma.md`. As fichas de sprint seguem o mesmo formato daquele documento.
 >
-> **Iniciado em:** 2026-08-12 · **Estado:** IA-1a e IA-1b **em produção** (backend
-> `f717cbb`; migrations `0043` e `0044`). Catálogo com **14 ferramentas registradas**,
-> incluindo as 4 consultas guiadas da §6.1 — conferido dentro do contêiner de produção,
-> não pelo relato. IA-2 em diante, planejadas.
+> **Iniciado em:** 2026-08-12 · **Estado:** IA-1a, IA-1b e IA-2 **em produção** (backend
+> `adbb0ad`; migrations `0043`, `0044`, `0045`). **14 ferramentas** registradas (4 delas
+> consultas guiadas da §6.1) e o dicionário semeado com **11 verbetes, 132 campos e 14
+> junções** — tudo conferido dentro do contêiner de produção, não pelo relato. IA-3 em
+> diante, planejadas.
+>
+> **Lacuna de processo encontrada no deploy da IA-2, e que vale para toda sprint futura
+> com seed:** a migration cria a estrutura, mas **não popula**. O `seed_dicionario` só era
+> chamado por `scripts/seed.py`, que é o seed de *demonstração* e **não pode rodar em
+> produção** (cria organizações de exemplo e um operador com senha conhecida — runbook §2).
+> Resultado: as três tabelas subiram vazias, e só apareceu porque a verificação foi feita
+> **contra o banco de produção**, não contra o de desenvolvimento. Semeado à parte, com
+> chamada isolada da função idempotente. **Toda sprint que introduzir dado de referência
+> precisa de um passo de seed explícito no deploy** — a checagem "migration aplicou com
+> exit 0" não cobre isso.
 > **Premissa inegociável:** é plataforma de governo. Um número errado com aparência de
 > certeza é pior que a ausência do número. Todo o desenho abaixo parte disso.
 
