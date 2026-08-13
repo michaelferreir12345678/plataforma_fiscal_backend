@@ -8,9 +8,10 @@
 > **Vive em** `backend_plataforma_fiscal/docs/` e é versionado com o código, como o
 > `evolucao_plataforma.md`. As fichas de sprint seguem o mesmo formato daquele documento.
 >
-> **Iniciado em:** 2026-08-12 · **Estado:** IA-1a **em produção** (backend `79bfd52`,
-> migration `0043`); IA-1b **implementada** (catálogo com 14 ferramentas, incluindo a
-> consulta guiada da §6.1 — sem migration); IA-2 em diante, planejadas.
+> **Iniciado em:** 2026-08-12 · **Estado:** IA-1a e IA-1b **em produção** (backend
+> `f717cbb`; migrations `0043` e `0044`). Catálogo com **14 ferramentas registradas**,
+> incluindo as 4 consultas guiadas da §6.1 — conferido dentro do contêiner de produção,
+> não pelo relato. IA-2 em diante, planejadas.
 > **Premissa inegociável:** é plataforma de governo. Um número errado com aparência de
 > certeza é pior que a ausência do número. Todo o desenho abaixo parte disso.
 
