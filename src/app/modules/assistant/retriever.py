@@ -10,18 +10,22 @@ Sprint 16. As normas vêm do *vector store* (``gold.norma_chunk``) por busca hí
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
 from app.core.deps import Principal
+from app.core.errors import AppError
 from app.modules.assistant import repository, vectors
 from app.modules.assistant.embeddings import Embedder
 from app.modules.assistant.llm import FatoContexto, NormaContexto
+from app.modules.indicators.rotulos import ROTULOS
 from app.modules.ingestion import repository as ingestion_repo
 from app.modules.reports import service as reports_service
 from app.modules.reports.models import Relatorio
+from app.shared import tooling
 
 # Seções do modelo executivo → códigos de métrica emitidos por build_document.
 _SECOES_EXECUTIVO = ("rcl", "pessoal", "divida", "resultado", "saude", "educacao")
@@ -103,6 +107,133 @@ def indicadores_relevantes(pergunta: str, pagina: str | None = None) -> set[str]
     if alvos & {"pessoal_executivo", "divida_consolidada_liquida"}:
         alvos.add("rcl")
     return alvos
+
+
+# Teto de chamadas de ferramenta por pergunta. Uma pergunta que nomeia sete indicadores é
+# um pedido de resumo executivo, e para isso existe o outro endpoint.
+MAX_FERRAMENTAS_POR_PERGUNTA = 3
+
+#: Ferramenta usada para alcançar indicador fora do pacote fixo do relatório executivo.
+FERRAMENTA_INDICADOR = "indicador_do_ente"
+
+
+def indicadores_nomeados(pergunta: str) -> set[str]:
+    """Indicadores que a pergunta nomeia, resolvidos pelo **registro canônico de rótulos**.
+
+    O dicionário de palavras-chave (``_KEYWORD_INDICADOR``) cobre as seis famílias do
+    relatório executivo e continua valendo — ele traduz linguagem de gestor ("folha",
+    "endividamento") para código. O que falta nele é tudo o mais que a plataforma apura:
+    ``garantias``, ``operacoes_credito``, ``fundeb_profissionais``, ``investimento_rcl``,
+    ``rcl_per_capita`` existem em ``gold.mart_indicador``, aparecem em tela e **nunca**
+    chegavam ao assistente, porque nenhuma palavra-chave os alcançava (§1 do plano).
+
+    Aqui o alcance deixa de ser uma lista escrita à mão e passa a ser derivado de
+    ``indicators.rotulos.ROTULOS``, que já é a fonte única do nome de cada indicador: um
+    indicador novo entra no assistente no dia em que ganha rótulo, sem ninguém lembrar de
+    editar um dicionário.
+
+    A exigência é de **todos** os termos do código (ou do rótulo) na pergunta — "operações
+    de crédito" casa ``operacoes_credito``, mas "crédito" sozinho não, para não sequestrar
+    uma pergunta sobre crédito tributário.
+    """
+    tokens = set(vectors.tokenize(pergunta))
+    if not tokens:
+        return set()
+    alvos: set[str] = set()
+    for codigo, rotulo_legivel in ROTULOS.items():
+        termos_codigo = set(vectors.tokenize(codigo.replace("_", " ")))
+        termos_rotulo = set(vectors.tokenize(rotulo_legivel))
+        if (termos_codigo and termos_codigo <= tokens) or (
+            termos_rotulo and termos_rotulo <= tokens
+        ):
+            alvos.add(codigo)
+    return alvos
+
+
+def fato_de_ferramenta(payload: dict) -> FatoContexto:
+    """Converte a saída de ``indicador_do_ente`` no contexto estruturado do provedor."""
+    disponivel = bool(payload.get("disponivel"))
+    valor = payload.get("valor_pct")
+    if valor is None:
+        valor = payload.get("valor_rs")
+    return FatoContexto(
+        codigo=str(payload.get("indicador") or ""),
+        rotulo=str(payload.get("rotulo") or ""),
+        valor_formatado=str(payload.get("valor_formatado") or "Dado não disponível"),
+        unidade=str(payload.get("unidade") or ""),
+        status="calculado" if disponivel else "dado_incompleto",
+        disponivel=disponivel,
+        periodo=str(payload.get("periodo") or ""),
+        # Sem número não há fonte a exibir — e um chip de fonte para um valor que não
+        # existe seria rastreabilidade de mentira.
+        source_ref=(payload.get("source_ref") or {}) if disponivel else {},
+        as_of=payload.get("as_of"),
+        faixa=payload.get("faixa"),
+        valor=str(valor) if disponivel and valor is not None else None,
+        memoria=payload.get("memoria") or {},
+    )
+
+
+def fatos_por_ferramenta(
+    session: Session,
+    principal: Principal,
+    *,
+    cod_ibge: str,
+    codigos: Sequence[str],
+    periodo: str | None,
+    as_of: datetime | None,
+    conversa_id: uuid.UUID | None = None,
+) -> tuple[list[FatoContexto], list[dict]]:
+    """Busca indicadores **pela camada de ferramentas** — com escopo, fonte e auditoria.
+
+    Chamar o envelope (e não o repositório direto) é o ponto: mesmo neste caminho
+    determinístico, a leitura passa por ``assert_ente_in_scope``, exige ``source_ref`` na
+    saída e vira linha em ``op.ia_tool_call``. Quando o Gemini decidir sozinho o que
+    chamar, será exatamente o mesmo código executando as mesmas verificações.
+    """
+    fatos: list[FatoContexto] = []
+    incompletos: list[dict] = []
+    ctx = tooling.ToolContext(
+        session=session, principal=principal, origem="assistente", conversa_id=conversa_id
+    )
+    for codigo in list(codigos)[:MAX_FERRAMENTAS_POR_PERGUNTA]:
+        try:
+            resultado = tooling.invoke(
+                ctx,
+                tooling.registro(),
+                FERRAMENTA_INDICADOR,
+                {"ente": cod_ibge, "indicador": codigo, "periodo": periodo, "as_of": as_of},
+            )
+        except AppError as exc:
+            # A recusa da ferramenta não derruba a pergunta: ela vira ausência declarada.
+            # (O 403 de escopo/licença já foi aplicado antes, na borda; aqui sobram os
+            # casos de dado — esfera desconhecida, por exemplo.)
+            incompletos.append(
+                {
+                    "tipo": "indisponivel",
+                    "codigo": codigo,
+                    "mensagem": exc.detail or exc.title,
+                    "periodo_esperado": periodo,
+                    "periodo_encontrado": None,
+                }
+            )
+            continue
+        fato = fato_de_ferramenta(resultado.payload)
+        fatos.append(fato)
+        if not fato.disponivel:
+            incompletos.append(
+                {
+                    "tipo": "ausente",
+                    "codigo": codigo,
+                    "mensagem": str(
+                        resultado.payload.get("observacao")
+                        or f"{fato.rotulo} não está materializado."
+                    ),
+                    "periodo_esperado": periodo or fato.periodo or None,
+                    "periodo_encontrado": None,
+                }
+            )
+    return fatos, incompletos
 
 
 def _metric_to_fato(metric: dict) -> FatoContexto:
@@ -264,6 +395,27 @@ def build_context(
             ctx.fatos = [f for f in fatos if f.codigo in alvos]
             if not ctx.fatos:  # nenhum casou o filtro — não deixe o gestor sem contexto
                 ctx.fatos = fatos
+
+        # Sprint IA-1a: o que a pergunta nomeia e o relatório executivo não emite é
+        # buscado **pela camada de ferramentas**. É o que tira `garantias` e companhia da
+        # invisibilidade — sem alargar o pacote fixo, que continua sendo o mesmo.
+        if not todos_indicadores:
+            ja_no_contexto = {f.codigo for f in ctx.fatos}
+            pedidos = [c for c in sorted(indicadores_nomeados(pergunta)) if c not in ja_no_contexto]
+            if pedidos:
+                extras, incompletos = fatos_por_ferramenta(
+                    session,
+                    principal,
+                    cod_ibge=cod_ibge,
+                    codigos=pedidos,
+                    periodo=resolved_periodo,
+                    as_of=as_of,
+                )
+                ctx.fatos.extend(extras)
+                ctx.dados_incompletos = list(ctx.dados_incompletos) + incompletos
+                ctx.source_refs = list(ctx.source_refs) + [
+                    f.source_ref for f in extras if f.disponivel and f.source_ref
+                ]
 
     ctx.normas = retrieve_normas(
         session, embedder, pergunta=pergunta, indicadores=alvos, top_k=top_k

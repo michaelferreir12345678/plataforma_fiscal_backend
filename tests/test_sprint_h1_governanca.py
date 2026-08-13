@@ -13,7 +13,7 @@ Cobre os critérios de aceite da ficha (docs/evolucao_plataforma.md):
 from __future__ import annotations
 
 import uuid
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -346,7 +346,10 @@ def test_admin_auditoria_filtra_por_autor_e_por_periodo(client, make_org) -> Non
     ).json()
     assert vazio["total"] == 0
 
-    futuro = (date.today() + timedelta(days=1)).isoformat()
+    # UTC, não fuso local: `op.audit_log.ts` é gravado em UTC, e com o Brasil em UTC-3 o
+    # "amanhã local" já é passado em UTC depois das 21h — o filtro passava a incluir as
+    # entradas recém-criadas e o teste reprovava por três horas todo dia.
+    futuro = (datetime.now(UTC).date() + timedelta(days=1)).isoformat()
     nada_no_futuro = client.get(
         "/admin/auditoria", headers=h, params={"de": f"{futuro}T00:00:00Z"}
     ).json()

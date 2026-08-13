@@ -425,7 +425,13 @@ def _delivery(
     return versao, efetivo
 
 
-def _format_value(value: Decimal | None, unidade: str) -> str:
+def formatar_valor(value: Decimal | None, unidade: str) -> str:
+    """Valor formatado para leitura humana — fonte única (relatório, assistente, ferramenta).
+
+    Público desde a Sprint IA-1a: a camada de ferramentas devolve ao modelo o mesmo texto
+    que o relatório imprime. Duas formatações do mesmo número em canais diferentes é um
+    convite a discussão sobre qual está certa.
+    """
     if value is None:
         return "Dado não disponível"
     number = float(value)
@@ -455,7 +461,7 @@ def _metric(
             "codigo": codigo,
             "rotulo": rotulo,
             "valor": valor,
-            "valor_formatado": _format_value(valor, unidade),
+            "valor_formatado": formatar_valor(valor, unidade),
             "unidade": unidade,
             "status": status,
             "faixa": faixa,

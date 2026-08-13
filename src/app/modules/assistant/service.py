@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
@@ -32,6 +33,9 @@ from app.modules.assistant.llm import (
     LLMRequest,
     LLMResult,
     NormaContexto,
+    ToolCallingProvider,
+    ToolSpec,
+    schema_para_provedor,
 )
 from app.modules.assistant.schemas import (
     ConversaResumo,
@@ -47,6 +51,7 @@ from app.modules.assistant.schemas import (
     UsoResumoOut,
 )
 from app.modules.tenancy import repository as tenancy_repo
+from app.shared import tooling
 from app.shared.scope import assert_ente_in_scope
 from app.shared.source_ref import SourceRef
 
@@ -210,6 +215,41 @@ def _refusal_text(cod_ibge: str, periodo: str | None) -> str:
     )
 
 
+@dataclass
+class _Derivado:
+    """Tudo que a resposta expõe sobre o fundamento — recalculável depois das ferramentas."""
+
+    fatos: list[FatoResposta]
+    normas: list[NormaResposta]
+    chips: list[FonteChip]
+    source_refs: list[SourceRef]
+    incompletos: list[DadoIncompleto]
+    dado_disponivel: bool
+
+
+def _derivar(
+    ctx: retriever.GroundedContext, *, codigos_visiveis: set[str] | None
+) -> _Derivado:
+    """Deriva fatos/chips/fontes do contexto corrente.
+
+    É uma função, e não um trecho no meio do fluxo, porque o contexto pode **crescer
+    durante** a conversa: quando o provedor faz *function calling*, os fatos chegam depois
+    da chamada, e os chips e ``source_ref`` da resposta têm de incluí-los. Derivar duas
+    vezes do mesmo lugar garante que a resposta e a sua rastreabilidade não divirjam.
+    """
+    disponiveis = [f for f in ctx.fatos if f.disponivel]
+    return _Derivado(
+        fatos=[_fato_to_resposta(f) for f in ctx.fatos],
+        normas=[_norma_to_resposta(n) for n in ctx.normas],
+        chips=_chips(disponiveis, ctx.normas),
+        source_refs=_source_refs(ctx.source_refs, ctx.normas),
+        incompletos=_dados_incompletos(
+            ctx.dados_incompletos, codigos_visiveis=codigos_visiveis
+        ),
+        dado_disponivel=bool(disponiveis),
+    )
+
+
 def _run(
     session: Session,
     principal: Principal,
@@ -227,13 +267,14 @@ def _run(
     org_id = _org(principal)
     disponiveis = [f for f in ctx.fatos if f.disponivel]
     tem_norma = bool(ctx.normas)
-    dado_disponivel = bool(disponiveis)
 
-    fatos_resp = [_fato_to_resposta(f) for f in ctx.fatos]
-    normas_resp = [_norma_to_resposta(n) for n in ctx.normas]
-    chips = _chips(disponiveis, ctx.normas)
-    source_refs = _source_refs(ctx.source_refs, ctx.normas)
-    incompletos = _dados_incompletos(ctx.dados_incompletos, codigos_visiveis=codigos_visiveis)
+    derivado = _derivar(ctx, codigos_visiveis=codigos_visiveis)
+    fatos_resp = derivado.fatos
+    normas_resp = derivado.normas
+    chips = derivado.chips
+    source_refs = derivado.source_refs
+    incompletos = derivado.incompletos
+    dado_disponivel = derivado.dado_disponivel
     gerado_em = datetime.now(UTC)
 
     if not disponiveis and not tem_norma:
@@ -296,8 +337,23 @@ def _run(
         modelo=modelo_desejado,
     )
     inicio = time.perf_counter()
-    result: LLMResult = provider.chat(request)  # LLMProviderError propaga (RFC 7807)
+    # LLMProviderError propaga (RFC 7807). Quando o provedor sabe pedir ferramentas, quem
+    # as executa é o envelope — as garantias não mudam por o modelo ter escolhido.
+    result: LLMResult = _chamar_provedor(
+        session, principal, provider, request, cod_ibge=cod_ibge, ctx=ctx
+    )
     latencia_ms = int((time.perf_counter() - inicio) * 1000)
+
+    # O contexto pode ter crescido durante a chamada (fatos pedidos pelo modelo): a
+    # resposta declara os fatos e as fontes que realmente sustentaram a prosa.
+    derivado = _derivar(ctx, codigos_visiveis=None if codigos_visiveis is None else
+                        codigos_visiveis | {f.codigo for f in ctx.fatos})
+    fatos_resp = derivado.fatos
+    normas_resp = derivado.normas
+    chips = derivado.chips
+    source_refs = derivado.source_refs
+    incompletos = derivado.incompletos
+    dado_disponivel = derivado.dado_disponivel
 
     conversa = repository.insert_conversa(
         session,
@@ -360,6 +416,68 @@ def _run(
         source_refs=source_refs,
         gerado_em=gerado_em,
     )
+
+
+def especificacoes_de_ferramenta() -> list[ToolSpec]:
+    """Traduz o registro de ferramentas para a porta do provedor (sem SDK, sem regra)."""
+    return [
+        ToolSpec(
+            nome=tool.nome,
+            descricao=tool.descricao,
+            parametros=schema_para_provedor(tool.schema_entrada()),
+        )
+        for tool in tooling.registro().todas()
+    ]
+
+
+def _chamar_provedor(
+    session: Session,
+    principal: Principal,
+    provider: LLMProvider,
+    request: LLMRequest,
+    *,
+    cod_ibge: str,
+    ctx: retriever.GroundedContext,
+) -> LLMResult:
+    """Chama o provedor — com ferramentas quando ele sabe pedi-las.
+
+    O executor entregue ao provedor é o **envelope**: escopo, licença, ``as_of``,
+    ``source_ref`` e auditoria são aplicados dentro dele, não aqui. Um modelo que peça um
+    ente fora do escopo recebe a recusa como conteúdo e segue a conversa dizendo que não
+    pode acessar aquele ente — em vez de derrubar a requisição inteira ou, pior, receber
+    o dado.
+    """
+    if not isinstance(provider, ToolCallingProvider):
+        return provider.chat(request)
+    especificacoes = especificacoes_de_ferramenta()
+    if not especificacoes:  # pragma: no cover - registro sempre tem ferramentas
+        return provider.chat(request)
+
+    registro = tooling.registro()
+    tool_ctx = tooling.ToolContext(session=session, principal=principal, origem="assistente")
+    vistos = {f.codigo for f in ctx.fatos}
+
+    def executar(nome: str, argumentos: dict) -> dict:
+        args = dict(argumentos or {})
+        ferramenta = registro.get(nome)
+        if ferramenta is not None and ferramenta.recebe_ente:
+            # O ente da conversa é o default; o modelo pode nomear outro, e aí o gate de
+            # escopo decide — não este código.
+            args.setdefault("ente", cod_ibge)
+        try:
+            resultado = tooling.invoke(tool_ctx, registro, nome, args)
+        except AppError as exc:
+            return tooling.erro_para_payload(exc)
+        if nome == retriever.FERRAMENTA_INDICADOR:
+            fato = retriever.fato_de_ferramenta(resultado.payload)
+            if fato.codigo and fato.codigo not in vistos:
+                vistos.add(fato.codigo)
+                ctx.fatos.append(fato)
+                if fato.disponivel and fato.source_ref:
+                    ctx.source_refs.append(fato.source_ref)
+        return resultado.payload
+
+    return provider.chat_com_ferramentas(request, especificacoes, executar)
 
 
 def _audit(

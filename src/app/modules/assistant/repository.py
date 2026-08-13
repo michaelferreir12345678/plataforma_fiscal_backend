@@ -11,7 +11,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.modules.assistant.models import Conversa, ConversaUso, NormaChunk
+from app.modules.assistant.models import Conversa, ConversaUso, IaToolCall, NormaChunk
 
 
 # --------------------------------------------------------------------------- #
@@ -143,6 +143,62 @@ def insert_conversa_uso(
     session.add(row)
     session.flush()
     return row
+
+
+def insert_ia_tool_call(
+    session: Session,
+    *,
+    org_id: uuid.UUID,
+    usuario_id: uuid.UUID | None,
+    conversa_id: uuid.UUID | None,
+    ferramenta: str,
+    origem: str,
+    cod_ibge: str | None,
+    argumentos: dict[str, Any],
+    as_of: datetime | None,
+    status: str,
+    erro_tipo: str | None,
+    erro_detalhe: str | None,
+    http_status: int | None,
+    linhas: int,
+    duracao_ms: int,
+    source_refs: list[dict[str, Any]],
+) -> IaToolCall:
+    """Grava a auditoria de uma chamada de ferramenta (G7) — sucesso **ou** falha."""
+    row = IaToolCall(
+        org_id=org_id,
+        usuario_id=usuario_id,
+        conversa_id=conversa_id,
+        ferramenta=ferramenta,
+        origem=origem,
+        cod_ibge=cod_ibge,
+        argumentos=argumentos,
+        as_of=as_of,
+        status=status,
+        erro_tipo=erro_tipo,
+        erro_detalhe=erro_detalhe,
+        http_status=http_status,
+        linhas=linhas,
+        duracao_ms=duracao_ms,
+        source_refs=source_refs,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def list_ia_tool_calls(
+    session: Session, *, org_id: uuid.UUID, limit: int = 50
+) -> list[IaToolCall]:
+    """Chamadas recentes da organização (auditoria consultável, RLS por org_id)."""
+    return list(
+        session.scalars(
+            select(IaToolCall)
+            .where(IaToolCall.org_id == org_id)
+            .order_by(IaToolCall.criado_em.desc())
+            .limit(limit)
+        )
+    )
 
 
 def list_conversas(session: Session, *, org_id: uuid.UUID, limit: int = 20) -> list[Conversa]:

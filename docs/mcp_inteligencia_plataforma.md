@@ -8,7 +8,8 @@
 > **Vive em** `backend_plataforma_fiscal/docs/` e é versionado com o código, como o
 > `evolucao_plataforma.md`. As fichas de sprint seguem o mesmo formato daquele documento.
 >
-> **Iniciado em:** 2026-08-12 · **Estado:** planejado, nenhuma linha implementada.
+> **Iniciado em:** 2026-08-12 · **Estado:** IA-1a implementada (ver a ficha); IA-1b em diante,
+> planejadas.
 > **Premissa inegociável:** é plataforma de governo. Um número errado com aparência de
 > certeza é pior que a ausência do número. Todo o desenho abaixo parte disso.
 
@@ -330,6 +331,36 @@ guardrails da Sprint 17 reexecutados contra o caminho novo.
 
 **Evidências:** captura de `op.ia_tool_call` após uma bateria de chamadas; transcrição de
 uma pergunta sobre garantias com a cadeia de ferramenta e o `source_ref` de cada número.
+
+#### Entregue (2026-08-12)
+
+| Peça | Onde |
+|---|---|
+| `Tool`/`ToolRegistry` com validação **na carga** | `src/app/shared/tooling/base.py` |
+| Envelope `invoke()` (capacidade → escopo/licença → entrada → `as_of` → execução → saída → auditoria) | `src/app/shared/tooling/envelope.py` |
+| Guarda estrutural de `source_ref` (G4) | `src/app/shared/tooling/fonte.py` |
+| `indicador_do_ente` e `linhagem_do_indicador` | `src/app/shared/tooling/catalogo.py` |
+| `op.ia_tool_call` (aditiva, com RLS) | `alembic/versions/0043_ia_tool_call.py` |
+| Porta de *function calling* (`ToolSpec`, `ToolCallingProvider`, `schema_para_provedor`) + laço no adaptador Gemini | `src/app/modules/assistant/llm.py` |
+| Alcance do assistente derivado de `ROTULOS` em vez de dicionário fixo | `assistant/retriever.py::indicadores_nomeados` |
+| 31 testes (matriz de escopo parametrizada sobre o registro, fonte ausente, auditoria da falha, `as_of` retroativo) | `tests/test_ia_tooling.py` |
+
+Três decisões que só apareceram na implementação, registradas por serem contraintuitivas:
+
+1. **A auditoria grava em transação própria.** O caminho que mais importa auditar é o que
+   falha — e é o que se perderia, porque a exceção sobe até o handler e o `get_db` faz
+   *rollback* da sessão da requisição, levando junto a linha de auditoria. No caminho de
+   sucesso a auditoria é condição de entrega (falha nela ⇒ falha a chamada); no de falha,
+   ela é registrada e nunca mascara o erro original.
+2. **`extra='forbid'` na entrada de toda ferramenta.** Ignorar um argumento inventado pelo
+   modelo (`exercicio=2023` numa ferramenta que só entende `periodo`) produz número certo
+   respondendo a pergunta que ninguém fez — o pior modo de falha possível aqui.
+3. **A fonte vem da linha do mart, não do detalhe do Monitor de Limites.**
+   `limits.build_limite_detail` carimba `RREO/Anexo 03` em todo indicador, porque é dali
+   que sai a RCL do denominador. Para `garantias` e `operacoes_credito`, apurados do
+   **RGF**, isso erra a procedência com aparência de rigor. A ferramenta prefere o
+   `source_ref` gravado na materialização. **O endpoint `GET /entes/{ibge}/limites/{ind}`
+   continua com o carimbo antigo** — é defeito aberto, fora do escopo desta sprint.
 
 ---
 

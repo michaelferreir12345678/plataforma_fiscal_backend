@@ -17,10 +17,10 @@ from __future__ import annotations
 
 import importlib.util
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from app.core.config import Settings, get_settings
 from app.core.errors import AppError
@@ -132,6 +132,103 @@ class LLMProvider(Protocol):
 
 
 # --------------------------------------------------------------------------- #
+# Function calling (Sprint IA-1a) — o modelo **pede** o dado em vez de recebê-lo pronto.
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class ToolSpec:
+    """Declaração de uma ferramenta para o provedor — dado puro, sem SDK.
+
+    É a tradução mínima do ``Tool`` do registro (``shared/tooling``) para o que um
+    provedor precisa saber: nome, para que serve e o esquema dos argumentos. O adaptador
+    converte isto no formato do seu SDK; o domínio nunca vê o formato do SDK.
+    """
+
+    nome: str
+    descricao: str
+    parametros: dict
+
+
+#: O que o provedor recebe para executar uma ferramenta: nome + argumentos ⇒ payload JSON.
+#: Quem implementa este *callable* é o **domínio** (o envelope de ``shared/tooling``), de
+#: modo que escopo, licença, ``as_of``, ``source_ref`` e auditoria são aplicados mesmo
+#: quando quem decidiu chamar foi o modelo. O provedor não tem acesso ao banco.
+ExecutorFerramenta = Callable[[str, dict], dict]
+
+
+@runtime_checkable
+class ToolCallingProvider(Protocol):
+    """Provedor capaz de pedir ferramentas antes de responder (opcional).
+
+    Deliberadamente **separado** de :class:`LLMProvider`: adaptadores que não fazem
+    *function calling* (o local determinístico, os falsos dos testes) continuam válidos
+    implementando só ``chat``. Quem sabe pedir, implementa os dois — e o serviço escolhe
+    o caminho por ``isinstance``.
+    """
+
+    name: str
+
+    def chat_com_ferramentas(
+        self,
+        request: LLMRequest,
+        ferramentas: Sequence[ToolSpec],
+        executar: ExecutorFerramenta,
+    ) -> LLMResult:
+        """Responde podendo chamar ferramentas pelo ``executar`` recebido."""
+        ...
+
+
+def schema_para_provedor(schema: dict) -> dict:
+    """Reduz um JSON Schema do Pydantic ao subconjunto que os provedores aceitam.
+
+    O Pydantic emite ``$defs``, ``anyOf`` com ``null`` (o jeito dele de dizer "opcional"),
+    ``title`` e ``default`` — e a API de *function calling* do Gemini rejeita boa parte
+    disso. A tradução acontece **aqui**, em função pura e testável, e não no meio da
+    chamada de rede: um esquema recusado pelo provedor apareceria como "falha do modelo",
+    que é o diagnóstico mais caro possível.
+
+    O que sai: ``type``/``properties``/``items``/``required``/``description``/``enum``,
+    com ``anyOf: [X, null]`` achatado em ``X`` (a obrigatoriedade já é dita por
+    ``required``).
+    """
+    defs = schema.get("$defs") or {}
+    return _reduzir(schema, defs)
+
+
+_CHAVES_MANTIDAS = ("description", "enum", "format")
+
+
+def _reduzir(no: dict, defs: dict) -> dict:
+    if "$ref" in no:
+        nome = str(no["$ref"]).rsplit("/", 1)[-1]
+        return _reduzir(dict(defs.get(nome, {})), defs)
+
+    variantes = no.get("anyOf") or no.get("oneOf")
+    if variantes:
+        concretas = [v for v in variantes if v.get("type") != "null"]
+        base = _reduzir(dict(concretas[0]), defs) if concretas else {"type": "string"}
+        if descricao := no.get("description"):
+            base.setdefault("description", descricao)
+        return base
+
+    saida: dict = {}
+    tipo = no.get("type")
+    if tipo:
+        saida["type"] = tipo
+    for chave in _CHAVES_MANTIDAS:
+        if chave in no:
+            saida[chave] = no[chave]
+    if propriedades := no.get("properties"):
+        saida["properties"] = {k: _reduzir(dict(v), defs) for k, v in propriedades.items()}
+        saida.setdefault("type", "object")
+    if itens := no.get("items"):
+        saida["items"] = _reduzir(dict(itens), defs)
+        saida.setdefault("type", "array")
+    if obrigatorios := no.get("required"):
+        saida["required"] = list(obrigatorios)
+    return saida
+
+
+# --------------------------------------------------------------------------- #
 # Renderização compartilhada do contexto para provedores textuais (LLMs).
 # --------------------------------------------------------------------------- #
 def _fmt_source(ref: dict) -> str:
@@ -143,6 +240,28 @@ def _fmt_source(ref: dict) -> str:
     if ref.get("versao_entrega"):
         partes.append(f"versão {ref['versao_entrega']}")
     return ", ".join(partes)
+
+
+def montar_prompt(request: LLMRequest, *, com_ferramentas: bool = False) -> str:
+    """Contexto + pergunta + as instruções que repetem os guardrails no corpo do pedido."""
+    instrucoes = (
+        "Responda em português, de forma objetiva e fundamentada. Cite a fonte de "
+        "cada número (relatório/anexo/período/versão). Distinga o que é 'calculado "
+        "dos dados do ente' do que é 'explicação geral da norma'. Se um dado não foi "
+        "fornecido acima, diga que não está disponível — não estime nem invente."
+    )
+    if com_ferramentas:
+        instrucoes += (
+            "\nVocê tem ferramentas para buscar indicadores já calculados deste ente e a "
+            "procedência deles. Use-as sempre que a pergunta pedir um número que não está "
+            "no contexto acima. Nunca invente o valor que a ferramenta não devolveu: se "
+            "ela responder 'disponivel: false', diga que o dado não foi apurado."
+        )
+    return (
+        f"{render_grounding(request)}\n\n"
+        f"PERGUNTA DO GESTOR:\n{request.pergunta}\n\n"
+        f"{instrucoes}"
+    )
 
 
 def render_grounding(request: LLMRequest) -> str:
@@ -345,14 +464,7 @@ class GeminiProvider:
     def chat(self, request: LLMRequest) -> LLMResult:  # pragma: no cover - requer rede/credencial
         client = self._ensure_client()
         candidatos = self._modelos_a_tentar(request.modelo)
-        prompt = (
-            f"{render_grounding(request)}\n\n"
-            f"PERGUNTA DO GESTOR:\n{request.pergunta}\n\n"
-            "Responda em português, de forma objetiva e fundamentada. Cite a fonte de "
-            "cada número (relatório/anexo/período/versão). Distinga o que é 'calculado "
-            "dos dados do ente' do que é 'explicação geral da norma'. Se um dado não foi "
-            "fornecido acima, diga que não está disponível — não estime nem invente."
-        )
+        prompt = montar_prompt(request)
         try:
             from google.genai import types
         except ImportError as exc:  # pragma: no cover - depende do ambiente
@@ -393,6 +505,94 @@ class GeminiProvider:
                 tokens_saida=int(getattr(usage, "candidates_token_count", 0) or 0),
             )
         raise LLMProviderError(detail=f"Falha na chamada ao Gemini: {ultimo}")
+
+    #: Teto de voltas do laço de ferramentas. Um modelo que não converge em 4 rodadas não
+    #: vai convergir na quinta — e um laço aberto gasta cota do cliente sem produzir texto.
+    _MAX_VOLTAS = 4
+
+    def chat_com_ferramentas(  # pragma: no cover - requer rede/credencial
+        self,
+        request: LLMRequest,
+        ferramentas: Sequence[ToolSpec],
+        executar: ExecutorFerramenta,
+    ) -> LLMResult:
+        """Laço de *function calling*: o modelo pede, o domínio executa, o modelo responde.
+
+        O adaptador **não** toca no banco nem decide o que pode ser lido: ele traduz o
+        pedido do modelo para ``executar``, que é o envelope de ``shared/tooling`` com
+        escopo, licença, ``as_of``, ``source_ref`` e auditoria embutidos. Se o executor
+        recusar, a recusa volta ao modelo como conteúdo — a conversa segue honesta em vez
+        de morrer com um 500.
+        """
+        if not ferramentas:
+            return self.chat(request)
+        client = self._ensure_client()
+        try:
+            from google.genai import types
+        except ImportError as exc:
+            raise LLMProviderError(detail=f"SDK google-genai indisponível: {exc}") from exc
+
+        declaracoes = [
+            types.FunctionDeclaration(
+                name=spec.nome, description=spec.descricao, parameters=spec.parametros
+            )
+            for spec in ferramentas
+        ]
+        config = types.GenerateContentConfig(
+            system_instruction=request.system,
+            temperature=request.temperatura,
+            max_output_tokens=request.max_tokens,
+            tools=[types.Tool(function_declarations=declaracoes)],
+            http_options=types.HttpOptions(timeout=self._timeout_ms),
+        )
+        modelo = self._modelos_a_tentar(request.modelo)[0]
+        conteudos: list[Any] = [
+            types.Content(
+                role="user",
+                parts=[types.Part(text=montar_prompt(request, com_ferramentas=True))],
+            )
+        ]
+        entrada = saida = 0
+        for _ in range(self._MAX_VOLTAS):
+            try:
+                response = client.models.generate_content(  # type: ignore[attr-defined]
+                    model=modelo, contents=conteudos, config=config
+                )
+            except Exception as exc:
+                raise LLMProviderError(detail=f"Falha na chamada ao Gemini: {exc}") from exc
+            usage = getattr(response, "usage_metadata", None)
+            entrada += int(getattr(usage, "prompt_token_count", 0) or 0)
+            saida += int(getattr(usage, "candidates_token_count", 0) or 0)
+
+            chamadas = list(getattr(response, "function_calls", None) or [])
+            if not chamadas:
+                texto = (getattr(response, "text", None) or "").strip()
+                if not texto:
+                    raise LLMProviderError(
+                        detail=_motivo_resposta_vazia(response, usage, modelo)
+                    )
+                return LLMResult(
+                    texto=texto, modelo=modelo, tokens_entrada=entrada, tokens_saida=saida
+                )
+
+            candidatos = getattr(response, "candidates", None) or []
+            if candidatos and getattr(candidatos[0], "content", None) is not None:
+                conteudos.append(candidatos[0].content)
+            respostas = [
+                types.Part.from_function_response(
+                    name=chamada.name,
+                    response=executar(chamada.name, dict(chamada.args or {})),
+                )
+                for chamada in chamadas
+            ]
+            conteudos.append(types.Content(role="user", parts=respostas))
+
+        raise LLMProviderError(
+            detail=(
+                f"O modelo {modelo} pediu ferramentas em {self._MAX_VOLTAS} rodadas sem "
+                "produzir resposta."
+            )
+        )
 
 
 def build_provider(settings: Settings) -> LLMProvider:

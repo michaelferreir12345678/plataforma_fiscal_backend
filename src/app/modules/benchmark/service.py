@@ -149,7 +149,7 @@ def _label(indicador: str) -> str:
     return _LABELS.get(indicador) or rotulos.rotulo(indicador)
 
 
-def _unidade(mart: MartIndicador) -> str:
+def unidade_da_metrica(mart: MartIndicador) -> str:
     """Unidade declarada da métrica — a base vem da linha, não de uma suposição.
 
     Antes da Sprint 25C todo percentual do mart era da RCL. Com ASPS/MDE/FUNDEB no mart,
@@ -641,7 +641,7 @@ def _indicadores_disponiveis(
             ).get(ente.cod_ibge)
         if effective is None:
             continue
-        unidade = _unidade(effective.mart)
+        unidade = unidade_da_metrica(effective.mart)
         result.append(
             IndicadorDisponivel(
                 codigo=codigo,
@@ -1054,7 +1054,7 @@ def _build_snapshot(
 
     use_pct = target.mart.valor_pct_rcl is not None
     denominador = target.mart.denominador
-    unidade = _unidade(target.mart)
+    unidade = unidade_da_metrica(target.mart)
     rows: list[tuple[_EffectiveMart, _BenchmarkEnte, Decimal]] = []
     base_divergente = 0
     for peer_code, peer in effective.items():
