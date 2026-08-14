@@ -18,8 +18,15 @@
 > `index-6fnj6kXD.js`): a IA saiu da página do Assistente e virou camada do produto —
 > explique-este-número, explicação da fila de alertas (com a **ordenação ainda
 > determinística**), narrativa do relatório e busca em linguagem natural na Central de
-> Dados. Tudo conferido dentro do contêiner de produção, não pelo relato. Falta **IA-6**
-> (avaliação contínua); **IA-4 depende de decisão** (§6.1).
+> Dados. **IA-6 também em produção** (backend `087bfd8`): a avaliação roda por comando
+> único **dentro do contêiner de produção** — 74/74 aprovadas, **alucinação numérica 0%**,
+> recusa 25/25, defasagem 12/12, adversária 12/12, `exit=0`; e o log mostra o G6 pegando os
+> números do controle negativo (`777.777.777,77`, `88,88%`) no ambiente real, não só no
+> relatório. Tudo conferido dentro do contêiner, não pelo relato.
+>
+> **O plano original está concluído.** Aberto: **IA-7** (linguagem natural, conversa
+> multi-turno e explicação em todas as telas — nasceu de feedback de uso real) e **IA-4**,
+> que continua **dependendo de decisão** (§6.1).
 >
 > **Lacuna de processo encontrada no deploy da IA-2, e que vale para toda sprint futura
 > com seed:** a migration cria a estrutura, mas **não popula**. O `seed_dicionario` só era
