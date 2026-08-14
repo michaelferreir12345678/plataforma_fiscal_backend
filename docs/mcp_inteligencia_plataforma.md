@@ -14,8 +14,12 @@
 > **`mcp-server` no ar como quarto processo da mesma imagem** — saudável pela rede interna
 > e com a porta 8010 **não publicada no host**, confirmado por `ss -tlnp`, não por leitura
 > do compose. Publicar para fora segue sendo passo separado do proxy reverso e **decisão
-> humana**. Tudo conferido dentro do contêiner de produção, não pelo relato. IA-5 e IA-6,
-> planejadas; IA-4 depende de decisão (§6.1).
+> humana**. **IA-5 também em produção** (backend `d56049c`, frontend `7bacaca`, bundle
+> `index-6fnj6kXD.js`): a IA saiu da página do Assistente e virou camada do produto —
+> explique-este-número, explicação da fila de alertas (com a **ordenação ainda
+> determinística**), narrativa do relatório e busca em linguagem natural na Central de
+> Dados. Tudo conferido dentro do contêiner de produção, não pelo relato. Falta **IA-6**
+> (avaliação contínua); **IA-4 depende de decisão** (§6.1).
 >
 > **Lacuna de processo encontrada no deploy da IA-2, e que vale para toda sprint futura
 > com seed:** a migration cria a estrutura, mas **não popula**. O `seed_dicionario` só era
