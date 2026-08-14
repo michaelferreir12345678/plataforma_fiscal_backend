@@ -898,6 +898,149 @@ acontece; troca de modelo produz comparação lado a lado antes de ir para produ
 **Evidências:** relatório de avaliação de duas execuções (antes/depois de uma troca de
 modelo) com as métricas lado a lado.
 
+#### Entregue (2026-08-14)
+
+Nota técnica completa em [`sprint_ia6_avaliacao.md`](sprint_ia6_avaliacao.md). **Sem
+migration e sem seed novo** — a próxima migration continua sendo a `0047`, e o conjunto é
+arquivo dentro do pacote, não tabela.
+
+| Peça | Onde |
+|---|---|
+| Conjunto dourado — **74 perguntas** (37 existe · 25 ausente · 12 defasado) + 12 ataques | `src/app/modules/evaluation/conjunto_dourado.json` |
+| Cenário canônico sintético (prefixo `94`), criado e derrubado pela execução | `src/app/modules/evaluation/cenario.py` |
+| Oráculo **derivado do banco**, com SQL independente do caminho do assistente | `src/app/modules/evaluation/gabarito.py` |
+| Régua das três categorias + conferência de valor contra `gold` | `src/app/modules/evaluation/criterios.py` |
+| Bateria adversária (4 famílias) + `ProvedorAlucinante` (controle negativo) | `src/app/modules/evaluation/adversarial.py` |
+| Métricas com denominador declarado (fundamentação, alucinação, recusa, defasagem, latência, custo) | `src/app/modules/evaluation/metricas.py` |
+| Relatório versionado + comparação lado a lado que trava regressão | `src/app/modules/evaluation/relatorio.py` |
+| Comando único `python -m scripts.avaliar_ia` (exit 1 reprova) | `scripts/avaliar_ia.py` |
+| 16 testes | `tests/test_ia_avaliacao.py` |
+| Relatórios de evidência (execução base + troca de modelo) | `docs/avaliacao_ia.md`, `docs/avaliacao_ia_troca_de_modelo.md` |
+
+**Medido (provedor local, conjunto `ia6-1`):** aprovação 74/74 · fundamentação 72/72 ·
+**alucinação numérica 0/72** · recusa correta 25/25 · defasagem sinalizada 12/12 · bateria
+adversária 12/12 · latência p50/p95 ≈ 21/45 ms · custo US$ 0.
+
+**Quatro decisões que só apareceram na implementação:**
+
+1. **Duas verificações de alucinação, não uma.** O G6 pergunta "esse número apareceu em algo
+   que a plataforma entregou?" e deixa passar um caso: citar o *54% do teto* como se fosse o
+   percentual apurado do ente — tem lastro (está na norma) e está errado. A segunda
+   verificação confere o valor **contra o banco**, indicador a indicador. Reportar só o G6
+   daria a taxa zero fácil, e taxa de alucinação fácil de zerar não mede nada.
+
+2. **Controle negativo em toda execução.** Um provedor que alucina de propósito roda junto e
+   a avaliação **exige** que a verificação o reprove. Sem isso, "zero alucinações" é
+   indistinguível de "medidor quebrado" — e o relatório diz, em letras grandes, quando o
+   controle falha.
+
+3. **O conjunto encontrou um defeito real no primeiro uso.** "Qual o gasto com **servidores**
+   do Executivo?" não trazia `pessoal_executivo`: o mapa de palavras-chave do `retriever`
+   conhecia o singular e `tokenize` não radicaliza. Corrigido declarando os plurais — e não
+   com radicalizador, que casaria "credito" com "creditado" e trocaria erro de recall por
+   erro de precisão, pior porque traz o indicador errado com a fonte certa.
+
+4. **A comparação é assimétrica.** As seis métricas de qualidade travam a troca; latência e
+   custo aparecem com a variação medida e não travam. Ficar mais caro é decisão de
+   orçamento, e tem de ser tomada com o número à vista; ficar menos correto não é decisão.
+
+**Honestidade sobre o provedor local:** ele é extrativo e não redige, então a bateria
+adversária **não** mede a obediência do modelo — mede que a plataforma não carrega texto do
+usuário para a resposta, que o gate de escopo mata a exfiltração antes de qualquer modelo
+(`adv-010` morre com 403 na borda) e que a ressalva do §9 é estrutural. A parte
+comportamental só sai com `--provedor gemini`, que **não foi executado** nesta entrega.
+
+---
+
+### Sprint IA-7 — A resposta que o gestor lê (linguagem, continuidade e alcance)
+
+**Origem:** feedback de uso real, 2026-08-14. Três queixas, todas confirmadas por
+investigação antes de virar tarefa: *"as respostas estão muito travadas, muito fechadas"*,
+*"não está conversando sobre um determinado assunto e continuando"* e *"queria essas
+explicações em todas as telas, no indicador específico"*.
+
+**Objetivo:** tornar a resposta legível para quem de fato usa a plataforma — auditor,
+gestor público, servidor não-técnico — sem afrouxar **nada** da fidedignidade.
+
+> #### A tese desta sprint
+>
+> **Fidedignidade é sobre o número, não sobre o tom.** O `SYSTEM_PROMPT` de hoje
+> (`assistant/service.py:53-68`) trata as duas coisas como a mesma: para garantir que o
+> modelo não invente valor, ele o instrui a ser telegráfico — e o resultado é uma resposta
+> defensiva, que não erra e também não ensina.
+>
+> Uma resposta pode ser **acolhedora, explicativa e pedagógica** e ainda assim jamais citar
+> um número que não veio de ferramenta. As duas coisas não competem: o número é travado
+> pela **arquitetura** (ferramenta → `source_ref` → G6 verificando a prosa), não pelo estilo
+> do texto. Hoje estamos pagando o preço de legibilidade duas vezes pela mesma garantia.
+>
+> Corolário incômodo, e que precisa estar dito: **se a prosa fica mais rica, o G6 fica mais
+> importante, não menos.** Texto mais longo é mais superfície para um número sem lastro
+> aparecer. Esta sprint só é segura porque a IA-3 já entregou a verificação de saída e a
+> IA-6 já mede alucinação com controle negativo.
+
+**Diagnóstico — o que foi verificado (e o que foi descartado):**
+
+| Hipótese | Verificação | Resultado |
+|---|---|---|
+| Está caindo no provedor local (extrativo, monta de template) | `use_gemini()` em produção + `op.conversa` por modelo | ❌ **Descartado** — provedor efetivo é `gemini`, modelo `gemini-3.5-flash`, 21 conversas reais |
+| Não há continuidade de conversa | Contrato de `PerguntaRequest` × `RespostaOut` | ✅ **Confirmado** — `conversa_id` só existe na **saída**; a entrada não aceita histórico. Cada pergunta é isolada por construção |
+| A explicação só existe em parte das telas | `grep ExplicacaoIA src/pages/` | ✅ **Confirmado** — 4 de 12+ telas (Limites, Alertas, Relatórios, Central de Dados) |
+| O prompt otimiza contra erro, não a favor de compreensão | Leitura de `SYSTEM_PROMPT` | ✅ **Confirmado** — 6 regras, todas proibitivas; nenhuma sobre *explicar bem* |
+
+**Tarefas:**
+
+1. **Tom e didática no prompt** — reescrever o `SYSTEM_PROMPT` mantendo as 6 regras
+   invioláveis **intactas** e somando instrução de redação para público não-técnico:
+   explicar o que o indicador significa antes de dar o número, dizer o que ele implica na
+   prática, evitar sigla sem expansão na primeira ocorrência, e fechar com o que o gestor
+   pode fazer a respeito. **Nenhuma regra de fidedignidade sai.**
+2. **Conversa multi-turno** — `conversa_id` opcional na **entrada**, com o histórico
+   recuperado de `op.conversa` (que já persiste tudo) e enviado ao modelo. Escopo/licença
+   revalidados a cada turno (a conversa não é passe livre); teto de turnos no contexto para
+   não estourar orçamento; e a pergunta de acompanhamento herda o ente/período do turno
+   anterior quando não os nomeia.
+3. **Explicação em todas as telas com indicador** — Receita, Despesa, Pessoal, Dívida,
+   Resultado, Caixa, Patrimônio, Saúde/Educação, Benchmarking, Previsões e Cockpit, sempre
+   **no indicador específico**, reusando o `ExplicacaoIA` que a IA-5 já entregou. Sem
+   caminho paralelo: continua sendo ferramenta com escopo, licença e `source_ref`.
+4. **Identidade visual de IA** — símbolo próprio (no espírito do que o Google usa para o
+   Gemini), estado de carregamento que não trava a tela, e a resposta apresentada como
+   texto legível — não bloco técnico. O `source_ref` continua visível, porque é requisito
+   de produto (§6.3), mas apresentado como procedência, não como despejo de metadado.
+5. **Escolha de modelo por tarefa** — hoje o chat usa `gemini-3.5-flash` (rápido e barato) e
+   o resumo executivo usa `gemini-2.5-pro`. Avaliar, **com o conjunto dourado da IA-6**, se
+   a explicação didática merece o modelo maior: é decisão de custo × qualidade que agora
+   tem instrumento para ser tomada com número, não por impressão.
+
+**Riscos:**
+- **Prosa mais longa = mais superfície para número sem lastro.** Mitigado pelo G6, que
+  passa a ser critério de aceite explícito desta sprint, não herança silenciosa.
+- **Multi-turno vira vetor de vazamento** se o histórico atravessar organização ou ente fora
+  de escopo. Mitigado revalidando escopo a cada turno e testando isolamento no padrão E1.
+- **Custo por resposta sobe** (mais tokens de contexto e de saída). Mitigado pela medição da
+  IA-6 e pela cota por organização que já existe.
+
+**Critérios de aceite:**
+- Uma pergunta de acompanhamento (*"e por que isso aconteceu?"*) é respondida **no contexto
+  da anterior**, sem repetir o ente/período.
+- A explicação de um número aparece em **todas** as telas que mostram indicador, no
+  indicador específico.
+- A resposta explica o significado do indicador em linguagem de gestor **antes** do número.
+- **Taxa de alucinação numérica continua zero** no conjunto dourado — sem exceção; se subir,
+  a sprint não entra.
+- Histórico de conversa não atravessa organização nem ente fora de escopo.
+- Acessibilidade não regride (a plataforma está em Lighthouse a11y 99).
+
+**Testes:** acompanhamento herda contexto; histórico de outra organização é recusado;
+conjunto dourado da IA-6 reexecutado com o prompt novo, comparando lado a lado; axe-core na
+superfície visual nova; e um teste de legibilidade objetivo (sigla expandida na primeira
+ocorrência, número sempre acompanhado do que significa).
+
+**Evidências:** transcrição de uma conversa de 3 turnos com o contexto sendo mantido;
+antes/depois da mesma pergunta com o prompt antigo e o novo; captura da explicação em duas
+telas que hoje não a têm.
+
 ---
 
 ## 7. Isso deve ser um serviço à parte?
