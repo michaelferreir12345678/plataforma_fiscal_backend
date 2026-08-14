@@ -115,6 +115,27 @@ class VerbeteContexto:
 
 
 @dataclass(frozen=True)
+class NotaContexto:
+    """Um bloco de contexto **textual** devolvido por ferramenta (Sprint IA-5).
+
+    A IA nas telas precisa fundamentar prosa em coisas que não são valor de indicador:
+    a linhagem de onde o número veio, a providência legal da faixa, a cobertura da fonte,
+    o prazo da obrigação. Nada disso cabe em :class:`FatoContexto` — que é um número com
+    ``source_ref`` — e mandar como parte da pergunta seria o modelo lendo instrução onde
+    deveria ler dado.
+
+    As linhas são **produzidas pela plataforma** a partir do payload das ferramentas, e
+    entram no lastro do G6 junto com os payloads. O modelo compõe em volta delas; não as
+    completa.
+    """
+
+    titulo: str
+    linhas: tuple[str, ...]
+    #: De onde a nota saiu (ferramenta ou tabela) — aparece no prompt e na auditoria.
+    origem: str | None = None
+
+
+@dataclass(frozen=True)
 class LLMRequest:
     """Requisição fundamentada enviada à porta — contexto estruturado, não texto solto."""
 
@@ -124,6 +145,8 @@ class LLMRequest:
     periodo: str | None = None
     fatos: tuple[FatoContexto, ...] = ()
     normas: tuple[NormaContexto, ...] = ()
+    #: Contexto textual já apurado (linhagem, providência, cobertura, prazo) — Sprint IA-5.
+    notas: tuple[NotaContexto, ...] = ()
     #: Definições do dicionário semântico (Sprint IA-2). Deliberadamente **não** contam
     #: como fundamento para responder: um verbete explica o que é o indicador, nunca
     #: quanto ele vale. A recusa honesta da §9 continua decidida por fato + norma.
@@ -320,11 +343,19 @@ def render_grounding(request: LLMRequest) -> str:
         )
         for verbete in request.verbetes:
             linhas.extend(_linhas_do_verbete(verbete))
+    if request.notas:
+        linhas.append(
+            "\nAPURADO PELA PLATAFORMA (use como está — não complete nem reordene):"
+        )
+        for nota in request.notas:
+            origem = f" [via {nota.origem}]" if nota.origem else ""
+            linhas.append(f"- {nota.titulo}{origem}:")
+            linhas.extend(f"  · {linha}" for linha in nota.linhas)
     if request.normas:
         linhas.append("\nDISPOSITIVOS NORMATIVOS (explicação geral da norma):")
         for norma in request.normas:
             linhas.append(f"- {norma.dispositivo} ({norma.fonte}): {norma.texto}")
-    if not disponiveis and not request.normas:
+    if not disponiveis and not request.normas and not request.notas:
         linhas.append("\n(NENHUM dado nem dispositivo relevante foi recuperado.)")
     return "\n".join(linhas)
 
@@ -409,6 +440,13 @@ class LocalGroundedProvider:
                 if verbete.armadilha:
                     blocos.append(f"  Atenção: {verbete.armadilha}")
 
+        if request.notas:
+            # Sprint IA-5: linhagem, providência, cobertura e prazo já vêm apurados das
+            # ferramentas. O provedor local os **repete**; compor é o que ele faz.
+            for apurado in request.notas:
+                blocos.append(f"{apurado.titulo}:")
+                blocos.extend(f"• {linha}" for linha in apurado.linhas)
+
         if request.normas:
             blocos.append("Fundamentação normativa:")
             for norma in request.normas:
@@ -417,7 +455,7 @@ class LocalGroundedProvider:
                     texto = texto[:317].rstrip() + "…"
                 blocos.append(f"• {norma.dispositivo} ({norma.fonte}): {texto}")
 
-        if not disponiveis and not request.normas:
+        if not disponiveis and not request.normas and not request.notas:
             blocos.append(
                 "Não localizei indicadores calculados nem dispositivos normativos "
                 "aplicáveis à sua pergunta. Não vou inferir números sem fonte."

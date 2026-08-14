@@ -40,7 +40,7 @@ from app.modules.limits import service as limits_service
 from app.modules.quality import service as quality_service
 from app.modules.reports.service import formatar_valor
 from app.shared.source_ref import SourceRef, fonte_gravada
-from app.shared.tooling import consultas, ferramentas
+from app.shared.tooling import consultas, ferramentas, telas
 from app.shared.tooling.base import (
     EnteToolInput,
     Tool,
@@ -376,6 +376,11 @@ def construir_registro() -> ToolRegistry:
     for tool in ferramentas.ferramentas():
         registro.register(tool)
     consultas.registrar(registro)
+    # IA-5: as duas capacidades que a IA nas telas exigiu (documento do relatório e
+    # calendário de obrigações). Entram no mesmo registro — e, com ele, na mesma matriz
+    # de isolamento — porque a garantia mora na ferramenta, não em quem a chama.
+    for tool in telas.ferramentas():
+        registro.register(tool)
     return registro
 
 

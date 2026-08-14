@@ -163,6 +163,53 @@ def prioridade(severidade: str, categoria: str) -> int:
     return _SEV_PESO.get(severidade, 3) * 100 + _CAT_PESO.get(categoria, 9)
 
 
+#: Rótulo legível de cada severidade e categoria — para **explicar** a ordem, nunca para
+#: produzi-la. A ordem sai de :func:`prioridade`, que é a mesma função que a fila usa.
+_SEV_ROTULO = {
+    SEV_CRITICO: "crítico",
+    SEV_ATENCAO: "atenção",
+    SEV_INFORMATIVO: "informativo",
+}
+_CAT_ROTULO = {
+    "limite": "limite legal ultrapassado ou em risco",
+    "qualidade_dado": "divergência de qualidade no número publicado",
+    "prazo": "prazo de entrega de obrigação",
+    "falha_ingestao": "falha na carga da fonte",
+    "defasagem_fonte": "fonte complementar defasada",
+    "preditivo": "projeção indicando risco futuro",
+    "publicacao": "obrigação de transparência/publicação",
+    "anomalia": "variação atípica detectada",
+}
+
+
+def criterio_ordenacao() -> tuple[str, ...]:
+    """A regra de ordenação da fila, em texto — derivada dos pesos, não redigida à parte.
+
+    Existe para a Sprint IA-5: a IA **explica** por que o primeiro é o primeiro, e a
+    explicação tem de ser a regra que de fato ordenou, não uma paráfrase que envelhece
+    sozinha. Se a ordem de ``_CAT_PESO`` mudar, esta frase muda junto.
+    """
+    severidades = " > ".join(
+        _SEV_ROTULO.get(sev, sev) for sev, _ in sorted(_SEV_PESO.items(), key=lambda p: p[1])
+    )
+    categorias = " > ".join(
+        cat for cat, _ in sorted(_CAT_PESO.items(), key=lambda par: par[1])
+    )
+    return (
+        f"A fila é ordenada por severidade ({severidades}) e, dentro da mesma severidade, "
+        f"por categoria nesta ordem: {categorias}.",
+        "A ordenação é determinística e reproduzível (alerts/rules.py::prioridade); "
+        "nenhum modelo de linguagem participa dela.",
+    )
+
+
+def explicar_posicao(severidade: str, categoria: str) -> str:
+    """Por que um alerta ocupa a posição que ocupa — em uma frase, sem inventar peso."""
+    sev = _SEV_ROTULO.get(severidade, severidade)
+    cat = _CAT_ROTULO.get(categoria, categoria)
+    return f"severidade {sev}; categoria '{categoria}' ({cat})"
+
+
 @dataclass(frozen=True)
 class Defasagem:
     """Resultado da avaliação de defasagem de uma fonte complementar."""

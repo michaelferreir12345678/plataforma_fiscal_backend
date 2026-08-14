@@ -110,14 +110,14 @@ def test_initialize_declara_ferramentas_e_recursos(client, mcp_client, make_org)
 
 
 def test_tools_list_expoe_o_registro_inteiro_sem_curadoria(client, mcp_client, make_org) -> None:
-    """As 14 ferramentas do registro, 1:1. Uma lista curada aqui seria regra na borda."""
+    """As 16 ferramentas do registro, 1:1. Uma lista curada aqui seria regra na borda."""
     from app.shared import tooling
 
     fx = make_org(entes=[FORTALEZA])
     token = emitir_credencial(client, fx)
     ferramentas = rpc(mcp_client, token, "tools/list").json()["result"]["tools"]
     assert {f["name"] for f in ferramentas} == set(tooling.registro().nomes())
-    assert len(ferramentas) == 14, "o catálogo da IA-1a/1b tem 14 ferramentas"
+    assert len(ferramentas) == 16, "14 da IA-1a/1b + as 2 da IA-5 (telas)"
     for ferramenta in ferramentas:
         assert ferramenta["description"].strip()
         assert ferramenta["inputSchema"]["type"] == "object"
@@ -301,6 +301,9 @@ FERRAMENTAS_COM_ENTE = [
     ("qualidade_do_ente", {}),
     ("alertas_do_ente", {}),
     ("comparar_com_coorte", {"indicador": "pessoal_executivo"}),
+    # Sprint IA-5: as duas ferramentas da IA nas telas entram na mesma matriz.
+    ("documento_do_relatorio", {"modelo": "executivo"}),
+    ("calendario_do_ente", {}),
 ]
 
 

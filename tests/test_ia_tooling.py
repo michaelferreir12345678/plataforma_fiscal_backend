@@ -69,6 +69,9 @@ ARGS_MINIMOS: dict[str, dict[str, object]] = {
     "qualidade_do_ente": {},
     "alertas_do_ente": {},
     "comparar_com_coorte": {},
+    # Sprint IA-5 (IA nas telas).
+    "documento_do_relatorio": {},
+    "calendario_do_ente": {},
 }
 
 
@@ -271,6 +274,9 @@ def test_registro_da_plataforma_declara_tudo() -> None:
         "ranking_indicador_na_coorte",
         "serie_do_indicador_por_ente",
         "entes_sem_entrega_da_fonte",
+        # IA-5 — o que a IA nas telas exigiu
+        "documento_do_relatorio",
+        "calendario_do_ente",
     }
     for tool in registro.todas():
         assert tool.capacidade  # RBAC declarado

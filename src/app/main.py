@@ -27,6 +27,7 @@ from app.modules.hierarchy_demo.router import router as hierarchy_router
 from app.modules.indicators.router import router as indicators_router
 from app.modules.ingestion.router import integracoes_router
 from app.modules.ingestion.router import router as ingestion_router
+from app.modules.insights.router import router as insights_router
 from app.modules.limits.router import router as limits_router
 from app.modules.mcp.router import router as mcp_admin_router
 from app.modules.personnel.router import router as personnel_router
@@ -113,6 +114,8 @@ def create_app() -> FastAPI:
     app.include_router(alerts_router)
     app.include_router(reports_router)
     app.include_router(assistant_router)
+    # IA nas telas (Sprint IA-5): explique-este-número, alertas, relatório e Central de Dados.
+    app.include_router(insights_router)
     app.include_router(health_edu_router)
     app.include_router(dashboard_router)
     app.include_router(carteira_router)

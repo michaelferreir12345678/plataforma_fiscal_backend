@@ -112,7 +112,7 @@ def invoke(
     registro.duracao_ms = int((time.perf_counter() - inicio) * 1000)
     registro.status = STATUS_OK
     registro.linhas = resultado.linhas
-    registro.source_refs = _fontes(resultado.payload)
+    registro.source_refs = fontes_do_payload(resultado.payload)
     # No caminho de sucesso a auditoria é condição de entrega: um número fundamentado que
     # ninguém consegue rastrear depois vale menos que um erro honesto.
     call_id = _auditar(ctx, registro, tolerar_falha=False)
@@ -216,8 +216,13 @@ def _sanear(args: dict[str, Any]) -> dict[str, Any]:
     return saneado
 
 
-def _fontes(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Extrai os ``source_ref`` do payload — o lastro do que a ferramenta devolveu."""
+def fontes_do_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extrai os ``source_ref`` do payload — o lastro do que a ferramenta devolveu.
+
+    Pública desde a Sprint IA-5: as telas precisam exibir a procedência de cada número que
+    a resposta usou, e reimplementar a varredura na camada de apresentação faria a tela
+    mostrar um conjunto de fontes diferente do que a auditoria gravou. Uma varredura só.
+    """
     encontrados: list[dict[str, Any]] = []
 
     def _andar(valor: Any) -> None:

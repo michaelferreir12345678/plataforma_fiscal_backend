@@ -116,7 +116,13 @@ def _parse_as_of(valor: str | None) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
-def _fato_to_resposta(fato: FatoContexto) -> FatoResposta:
+def fato_para_resposta(fato: FatoContexto) -> FatoResposta:
+    """Fato do contexto → fato da resposta. Pública desde a IA-5.
+
+    A IA nas telas devolve os mesmos fatos com a mesma forma — é o que permite ao
+    frontend renderizar as quatro superfícies novas com o componente que já ancora número
+    em fonte (``RespostaMarkdown``, Sprint B3). Duas conversões produziriam duas formas.
+    """
     return FatoResposta(
         codigo=fato.codigo,
         rotulo=fato.rotulo,
@@ -209,7 +215,8 @@ def _dados_incompletos(
     return resultado
 
 
-def _ente_label(nome: str | None, cod_ibge: str, esfera: str | None) -> str:
+def ente_label(nome: str | None, cod_ibge: str, esfera: str | None) -> str:
+    """Rótulo do ente para o prompt (nome, código e esfera). Pública desde a IA-5."""
     base = nome or f"ente {cod_ibge}"
     detalhe = f" ({cod_ibge}" + (f", esfera {esfera}" if esfera else "") + ")"
     return base + detalhe
@@ -249,7 +256,7 @@ def _derivar(
     """
     disponiveis = [f for f in ctx.fatos if f.disponivel]
     return _Derivado(
-        fatos=[_fato_to_resposta(f) for f in ctx.fatos],
+        fatos=[fato_para_resposta(f) for f in ctx.fatos],
         normas=[_norma_to_resposta(n) for n in ctx.normas],
         chips=_chips(disponiveis, ctx.normas),
         source_refs=_source_refs(ctx.source_refs, ctx.normas),
@@ -340,7 +347,7 @@ def _run(
     request = LLMRequest(
         system=SYSTEM_PROMPT,
         pergunta=pergunta,
-        ente_label=_ente_label(ctx.ente_nome, cod_ibge, ctx.esfera),
+        ente_label=ente_label(ctx.ente_nome, cod_ibge, ctx.esfera),
         periodo=ctx.periodo,
         fatos=tuple(ctx.fatos),
         normas=tuple(ctx.normas),

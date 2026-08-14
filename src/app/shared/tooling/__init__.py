@@ -25,7 +25,7 @@ from app.shared.tooling.base import (
     ToolRegistry,
 )
 from app.shared.tooling.catalogo import construir_registro, erro_para_payload, registro
-from app.shared.tooling.envelope import ToolCallResult, invoke
+from app.shared.tooling.envelope import ToolCallResult, fontes_do_payload, invoke
 from app.shared.tooling.errors import (
     EntradaInvalidaError,
     FerramentaDesconhecidaError,
@@ -55,6 +55,7 @@ __all__ = [
     "ToolRegistry",
     "construir_registro",
     "erro_para_payload",
+    "fontes_do_payload",
     "invoke",
     "ler_recurso",
     "numeros_sem_fonte",

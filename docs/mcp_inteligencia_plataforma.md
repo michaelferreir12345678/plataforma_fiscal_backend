@@ -805,6 +805,67 @@ escopo, licença e `as_of`.
 **Testes:** contrato de cada capacidade; ausência de dado vira ausência declarada, nunca
 prosa vaga; a4y das novas superfícies (a plataforma está em Lighthouse 99, não regride).
 
+#### Entregue (2026-08-13)
+
+As quatro capacidades da ficha, **sem migration** — a sprint não criou tabela, e por isso
+não há passo de seed novo no deploy (a lacuna de processo da IA-2 não se repete aqui).
+
+| Peça | Onde |
+|---|---|
+| Módulo de orquestração (4 capacidades, um envelope só) | `src/app/modules/insights/{schemas,service,router}.py` |
+| Rotas `POST /ia/explicar-numero`, `/explicar-alertas`, `/narrar-relatorio`, `/central-dados` (capacidade `usar_ia`) | `src/app/modules/insights/router.py` |
+| **Duas ferramentas novas** no registro: `documento_do_relatorio` e `calendario_do_ente` | `src/app/shared/tooling/telas.py` |
+| `NotaContexto` na porta `LLMProvider` — contexto textual apurado (linhagem, providência, cobertura, prazo) | `src/app/modules/assistant/llm.py` |
+| `criterio_ordenacao()` / `explicar_posicao()` — a regra de ordenação **em texto, derivada dos pesos** | `src/app/modules/alerts/rules.py` |
+| `fontes_do_payload` promovida a pública (a tela mostra as mesmas fontes que a auditoria grava) | `src/app/shared/tooling/envelope.py` |
+| Superfície única de tela + busca em linguagem natural na Central de Dados | `src/components/ExplicacaoIA.tsx`, `pages/{Limites,Alertas,Relatorios,CentralDados}Page.tsx` |
+| 27 testes de backend + 8 de frontend (axe nas quatro superfícies) | `tests/test_ia_telas.py`, `src/test/sprint-ia5.test.tsx` |
+
+**Cinco decisões que só apareceram na implementação:**
+
+1. **A orquestração é determinística — o laço de agente ficou de fora, de propósito.** O
+   laço (`assistant/agente.py`) é o certo para pergunta aberta. Aqui a pergunta é fixa
+   ("explique *este* número"), então deixar o modelo escolher ferramentas custaria mais
+   tokens para chegar à mesma cadeia, e a cadeia deixaria de ser previsível. Tela precisa
+   de custo e latência estáveis, e o gestor precisa poder conferir que a explicação olhou
+   exatamente o que a tela mostra.
+
+2. **Isto não é conversa, e não vira linha em `op.conversa`.** Não há histórico nem turno
+   seguinte, e `ck_conversa_tipo` só admite `pergunta`/`resumo_executivo` — alargar o
+   `CHECK` custaria uma migration para guardar o que ninguém vai consultar. O consumo entra
+   em `op.conversa_uso` com `conversa_id = NULL` (é ali que a cota e a fatura contam, via
+   `count_conversa_uso_competencia`), e a cadeia de ferramentas em `op.ia_tool_call` com
+   `origem='tela'` — que é, pela própria ficha, o instrumento de medir se a superfície é
+   usada.
+
+3. **"O que mudaria a faixa" não é conta nova.** Distância ao teto e ao gatilho de alerta
+   já saem de `limits.build_limites` (fonte única, §7); a capacidade só as veste de frase —
+   e inverte a leitura quando o indicador é **piso**, onde a distância é folga acima do
+   mínimo. Chamar isso de "distância até o teto" num mínimo constitucional diria ao gestor
+   o contrário do que a norma exige.
+
+4. **O 403 chega à tela como 403.** O envelope recusa escopo/licença e a exceção **sobe**;
+   não vira parágrafo dizendo que não foi possível. Quem pediu a explicação pediu de um
+   ente específico — responder outra coisa seria pior que recusar. É o oposto da escolha do
+   assistente, onde a recusa vira conteúdo para o modelo seguir a conversa, e a diferença é
+   o consumidor: lá o LLM decide o próximo passo, aqui quem decide é a tela.
+
+5. **Contador de obrigação ficou fora da saída da ferramenta.** `calendario_do_ente` não
+   devolve "2 pendentes": seria mais um número sem `source_ref` pedindo exceção na guarda
+   da G4 (`CHAVES_ESTRUTURAIS`), e esconderia **quais** estão pendentes — que é sobre o que
+   o gestor age. A situação vai por obrigação; quem quiser o total, conta.
+
+**Fronteira respeitada.** Nenhuma linha nova soma, divide ou classifica valor fiscal, e a
+**ordenação da fila continua em `alerts/rules.py`**: a IA recebe a fila pronta com a regra
+que a produziu e explica; o teste compara a ordem explicada com a ordem que `GET /alertas`
+devolveu, e o critério exibido é o texto derivado dos próprios pesos — muda a ordem de
+`_CAT_PESO`, muda a frase.
+
+**Sem seed novo.** Nenhuma tabela de referência foi criada. As capacidades leem o que já
+está semeado: `gold.dim_providencia_legal` (Sprint 3), `gold.lineage_edge` (26),
+`gold.dicionario_indicador` (IA-2, semeado à parte em produção) e `gold.calendario_obrigacao`
+(materializado on-read pelo motor de alertas).
+
 ---
 
 ### Sprint IA-6 — Avaliação e verificação contínua
