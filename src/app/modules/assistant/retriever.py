@@ -32,16 +32,33 @@ from app.shared import tooling
 _SECOES_EXECUTIVO = ("rcl", "pessoal", "divida", "resultado", "saude", "educacao")
 
 # Palavras da pergunta → indicadores relevantes (para filtrar fatos e ponderar normas).
+#
+# **O plural conta como palavra diferente** (Sprint IA-6). ``vectors.tokenize`` não faz
+# radicalização: ele devolve o token como escrito. O mapa só tinha as formas no singular,
+# então "qual o gasto com **servidores** do Executivo?" — o jeito mais natural de um
+# gestor perguntar — caía fora do mapa, o filtro de fatos não trazia
+# ``pessoal_executivo``, e a resposta falava de tudo menos do que foi perguntado. O
+# conjunto dourado (``exi-006``) encontrou isso; não havia teste que pegasse, porque
+# todos os anteriores perguntavam no singular.
+#
+# A correção é declarar as duas formas, e não radicalizar: um radicalizador aqui casaria
+# "credito" com "creditado" e "conta" com "contabil", trocando um erro de recall por um
+# erro de precisão — pior, porque traria o indicador errado com a fonte certa.
 _KEYWORD_INDICADOR: dict[str, str] = {
     "pessoal": "pessoal_executivo",
     "folha": "pessoal_executivo",
+    "folhas": "pessoal_executivo",
     "servidor": "pessoal_executivo",
+    "servidores": "pessoal_executivo",
     "salario": "pessoal_executivo",
+    "salarios": "pessoal_executivo",
     "prudencial": "pessoal_executivo",
     "divida": "divida_consolidada_liquida",
+    "dividas": "divida_consolidada_liquida",
     "endividamento": "divida_consolidada_liquida",
     "dcl": "divida_consolidada_liquida",
     "credito": "divida_consolidada_liquida",
+    "creditos": "divida_consolidada_liquida",
     "rcl": "rcl",
     "corrente": "rcl",
     "resultado": "resultado_primario",

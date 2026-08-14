@@ -47,6 +47,11 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# O conjunto dourado da IA-6 é dado versionado dentro do pacote (não é seed de banco).
+# Sem isto ele fica de fora do wheel e a avaliação só rodaria a partir do checkout.
+[tool.setuptools.package-data]
+"app.modules.evaluation" = ["*.json"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
