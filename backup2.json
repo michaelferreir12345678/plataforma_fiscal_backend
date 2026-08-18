@@ -1,0 +1,4 @@
+{"commands":[
+ "docker exec backend-postgres-1 psql -U postgres -tAc 'select rolname from pg_roles' 2>/dev/null | head -6 || true",
+ "grep -iE 'POSTGRES_USER|POSTGRES_DB' /opt/plataforma/backend/.env 2>/dev/null | head -5"
+]}

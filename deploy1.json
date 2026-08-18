@@ -1,0 +1,7 @@
+{"commands":[
+ "set -e",
+ "cd /opt/plataforma/backend && git pull --ff-only 2>&1 | tail -3 && git log --oneline -1",
+ "cd /opt/plataforma/frontend && git pull --ff-only 2>&1 | tail -3 && git log --oneline -1",
+ "echo '=== build backend ==='",
+ "cd /opt/plataforma/backend && docker compose -f docker-compose.prod.yml -f docker-compose.ec2.yml build 2>&1 | tail -12"
+]}

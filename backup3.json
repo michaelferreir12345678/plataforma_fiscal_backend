@@ -1,0 +1,8 @@
+{"commands":[
+ "set -e",
+ "STAMP=$(date +%Y%m%d-%H%M%S)",
+ "docker exec backend-postgres-1 pg_dump -U postgres -d plataforma_fiscal -t op.conversa > /opt/plataforma/backup-conversa-$STAMP.sql",
+ "ls -la /opt/plataforma/backup-conversa-*.sql | tail -2",
+ "echo -n 'linhas em op.conversa: '",
+ "docker exec backend-postgres-1 psql -U postgres -d plataforma_fiscal -tAc 'select count(*) from op.conversa'"
+]}

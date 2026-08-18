@@ -371,10 +371,53 @@ Na 4ª corrida **seis dos sete critérios fecharam**, incluindo o absoluto (aluc
 numérica zero) e a bateria adversária. A legibilidade ficou em 95,9%: três respostas
 abriram no número em vez de abrir no significado — e as três haviam passado na 1ª corrida.
 
-**A sprint não entra até que uma corrida feche em 100%.** O critério da ficha é explícito
-("se subir, a sprint não entra") e cinco-de-sete não é seis-de-sete arredondado.
-
 O que muda o quadro é o §8.6: com temperatura no padrão do provedor, o resultado de cada
 critério oscila entre execuções. Por isso a sprint entrega, junto, o `assistant_temperatura`
-com padrão `0.0` — e a corrida que decide o aceite tem de ser feita com ele. Essa medição
-está **pendente** e é o único item que separa a IA-7 de produção.
+com padrão `0.0`.
+
+### 8.8 Em produção — e o que ficou por medir
+
+**Implantado em 18/08/2026** na melhor configuração (temperatura `0.0`, timeout 90 s,
+`max_tokens` 12.288), por decisão do responsável pelo produto, **sem** a corrida paga de
+confirmação: quatro já haviam sido gastas (~US$ 16) e o custo de uma quinta não se
+justificava contra o ganho informativo.
+
+Isto é dito sem eufemismo: **a corrida que fecharia os sete critérios de uma vez não
+existe.** A 4ª mediu alucinação zero e legibilidade 95,9%; a 3ª, o inverso. O que sustenta
+a decisão de implantar não é uma corrida perfeita, e sim:
+
+- os seis critérios foram atingidos, ainda que em execuções diferentes;
+- todas as causas encontradas foram corrigidas na raiz e travadas por teste com controle
+  negativo — nenhuma foi contornada afrouxando a régua;
+- a temperatura determinística remove a fonte da oscilação, e é ela que está valendo;
+- e, sobretudo, **o G6 roda em toda resposta em produção**, casando cada número da prosa
+  contra o lastro daquela consulta e avisando o gestor quando não casa. A avaliação mede
+  quão frequentemente o modelo obriga o guardrail a agir; o guardrail é que impede o número
+  sem fonte de passar por verdade.
+
+Fica registrado como **pendência conhecida**: uma corrida com `temperatura=0.0` para
+confirmar os sete critérios simultaneamente. Ela é barata em risco (nada em produção
+depende dela) e cara em dólar, então cabe agendá-la quando houver outra razão para gastar
+uma corrida.
+
+**Verificado em produção após o deploy**, dentro do contêiner:
+
+| O quê | Medido |
+|---|---|
+| Provedor efetivo | `gemini` (não `auto`, não `local`) |
+| Temperatura / timeout / max_tokens | `0.0` / `90.0 s` / `12288` |
+| Migration | `0047_conversa_multiturno` (era `0046`) |
+| Colunas novas em `op.conversa` | `as_of_explicito, parent_id, thread_id, verificacao` |
+| Backfill do fio | 32/32 conversas viraram raiz do próprio fio; 0 com pai |
+| Prompt | regras 2.2 e 2.3 presentes, `COMO ESCREVER` presente, as 6 invioláveis intactas |
+| Fecho didático | sigla expandida + ressalva do §9 |
+| Bundle servido | `index-BFLvGrHK.js` (200), `index-_J1KwUQA.css` (200) |
+| `/api/health` | 200 |
+
+**Uma constatação que o histórico entregou:** das 32 conversas reais já gravadas, 22
+foram respondidas por `gemini-3.5-flash`, 6 por `gemini-2.5-flash` e **4 por
+`local-grounded`** (04/08). Ou seja, a degradação silenciosa que o `ASSISTANT_PROVIDER=auto`
+permite — cair no provedor de template quando a chave falha, sem avisar ninguém — **já
+aconteceu em produção**. Hoje o provedor efetivo é `gemini`, conferido; mas o modo de falha
+continua existindo e merece ficha própria: `auto` deveria falhar alto em produção, não
+responder por template.

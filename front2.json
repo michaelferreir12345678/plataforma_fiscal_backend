@@ -1,0 +1,8 @@
+{"commands":[
+ "set -e",
+ "cd /opt/plataforma/frontend",
+ "npm ci --silent 2>&1 | tail -3 || npm install --silent 2>&1 | tail -3",
+ "VITE_API_BASE_URL=/api npm run build 2>&1 | tail -8",
+ "echo '=== hashes gerados ==='",
+ "ls -la dist/assets/ dist/index.html"
+]}

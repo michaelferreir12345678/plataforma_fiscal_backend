@@ -1,0 +1,7 @@
+{"commands":[
+ "set -e",
+ "for i in 1 2 3 4 5 6; do code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost/api/health); echo \"tentativa $i: health=$code\"; [ \"$code\" = \"200\" ] && break; sleep 10; done",
+ "docker ps --filter name=backend-api-1 --format '{{.Status}}'",
+ "echo '=== provedor efetivo apos o deploy ==='",
+ "docker exec backend-api-1 python -c \"from app.core.config import get_settings; from app.modules.assistant.llm import build_provider; s=get_settings(); p=build_provider(s); print('provider configurado:', s.assistant_provider); print('provedor EFETIVO:', p.name); print('temperatura:', s.assistant_temperatura); print('timeout_s:', s.assistant_request_timeout_s)\""
+]}
