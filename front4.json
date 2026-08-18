@@ -1,6 +1,0 @@
-{"commands":[
- "find / -maxdepth 6 -name 'npm' -type f 2>/dev/null | head -5",
- "find / -maxdepth 6 -name 'node' -type f -perm -u+x 2>/dev/null | grep -v node_modules | head -5",
- "cat /opt/plataforma/frontend/../deploy*.sh 2>/dev/null | head -20",
- "ls /opt/plataforma/*.sh 2>/dev/null"
-]}

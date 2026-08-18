@@ -1,5 +1,0 @@
-{"commands":[
- "ls /opt/plataforma/frontend | head",
- "grep -rnE 'root|alias' /etc/nginx/sites-enabled/ 2>/dev/null | head -6",
- "ls -la /var/www/ 2>/dev/null | head -6"
-]}

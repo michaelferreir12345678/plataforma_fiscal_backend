@@ -1,8 +1,0 @@
-{"commands":[
- "set -e",
- "cd /opt/plataforma/backend",
- "docker compose -f docker-compose.prod.yml -f docker-compose.ec2.yml up -d 2>&1 | tail -12",
- "sleep 20",
- "docker ps --format '{{.Names}}\t{{.Status}}'",
- "curl -s -o /dev/null -w 'health=%{http_code}\n' http://localhost/api/health"
-]}

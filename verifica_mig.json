@@ -1,3 +1,0 @@
-{"commands":[
- "docker exec backend-postgres-1 psql -U postgres -d plataforma_fiscal -c \"select count(*) as linhas, count(thread_id) as com_fio, count(*) filter (where thread_id = id) as raiz_do_proprio_fio, count(parent_id) as com_pai, count(*) filter (where as_of_explicito) as as_of_explicito from op.conversa\""
-]}

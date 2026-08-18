@@ -1,5 +1,0 @@
-{"commands":[
- "ls /usr/local/bin/node /usr/bin/node 2>/dev/null",
- "ls -d /home/ubuntu/.nvm/versions/node/* 2>/dev/null | tail -2",
- "su - ubuntu -c 'which node npm; node -v; npm -v' 2>&1 | head -6"
-]}
