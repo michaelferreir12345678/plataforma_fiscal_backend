@@ -10,6 +10,7 @@ from sqlalchemy import (
     BigInteger,
     CheckConstraint,
     DateTime,
+    ForeignKey,
     Numeric,
     String,
     Text,
@@ -105,3 +106,75 @@ class LineageEdge(Base):
     destino: Mapped[str] = mapped_column(Text, nullable=False)
     tipo: Mapped[str] = mapped_column(String(24), nullable=False)
     detalhe: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+
+class QualidadeTratativa(Base):
+    """op.qualidade_tratativa — o que se fez com uma falha de qualidade e como terminou.
+
+    A Sprint 26 entregou a metade que **detecta**; esta é a que **resolve**. Sem registro
+    de tratativa, o mesmo caso é triado do zero a cada visita — e um aviso permanente que
+    ninguém consegue encerrar é um aviso que todos aprendem a ignorar, que é o pior
+    desfecho possível para um selo de qualidade.
+
+    Vive em ``op`` por uma razão de fronteira: o **veredito** é dado público e
+    compartilhado (a mesma falha do mesmo ente vale para toda organização que o
+    acompanha), mas a **decisão sobre o que fazer** é operacional e privada. Duas
+    consultorias que acompanham o mesmo município podem ler a mesma divergência de formas
+    diferentes, e nenhuma delas escreve na leitura da outra.
+    """
+
+    __tablename__ = "qualidade_tratativa"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('aberta', 'diagnosticada', 'acao_aplicada', 'resolvida', "
+            "'aceita_como_fato')",
+            name="ck_qualidade_tratativa_status",
+        ),
+        CheckConstraint(
+            "classe IS NULL OR classe IN ('plataforma', 'fonte', 'misto', 'cobertura')",
+            name="ck_qualidade_tratativa_classe",
+        ),
+        CheckConstraint(
+            "status <> 'aceita_como_fato' OR (justificativa IS NOT NULL AND "
+            "length(btrim(justificativa)) >= 10)",
+            name="ck_qualidade_tratativa_justificativa",
+        ),
+        UniqueConstraint(
+            "org_id",
+            "check_codigo",
+            "cod_ibge",
+            "periodo",
+            name="uq_qualidade_tratativa_caso",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organizacao.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: A chave do **caso**, sem ``versao_entrega`` de propósito: uma retificação cria
+    #: veredito novo (0044/A26), mas zerar a análise a cada retificação faria o gestor
+    #: recomeçar a triagem de um problema que ele já conhece.
+    check_codigo: Mapped[str] = mapped_column(Text, nullable=False)
+    cod_ibge: Mapped[str | None] = mapped_column(String(7), nullable=True)
+    periodo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="aberta")
+    #: De quem é o número que não fechou — é o que decide a ação cabível (``causa.py``).
+    classe: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    diagnostico: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    #: Obrigatória para aceitar como fato. Aceitar **não** apaga o selo: ele passa a
+    #: exibir este motivo e quem o assinou — esconder divergência conhecida seria pior
+    #: que exibi-la.
+    justificativa: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Cada ação aplicada e o veredito que ela produziu. Sem isto, uma falha que resiste a
+    #: três reprocessamentos parece nunca ter sido tratada.
+    tentativas: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    usuario_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("usuario.id", ondelete="SET NULL"), nullable=True
+    )
+    criado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    atualizado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

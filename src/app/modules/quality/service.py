@@ -27,20 +27,24 @@ from app.core.deps import Principal
 from app.core.errors import AppError
 from app.modules.ingestion.models import DimEntrega
 from app.modules.quality import checks as checks_mod
-from app.modules.quality import lineage_seed, repository
+from app.modules.quality import lineage_seed, repository, resolucao
 from app.modules.quality.checks import ResultadoCheck
 from app.modules.quality.models import DataQualityCheck
 from app.modules.quality.schemas import (
+    AcaoRequest,
     CheckOut,
     ExecucaoChecksOut,
     LineageAresta,
     LineageNo,
     LineageResponse,
+    OcorrenciaQualidade,
+    OcorrenciasResponse,
     QualidadeResponse,
     ResumoQualidade,
+    TratativaResumo,
 )
 from app.shared import periodo as periodo_util
-from app.shared.scope import carteira_scope_ibges
+from app.shared.scope import assert_ente_in_scope, carteira_scope_ibges
 from app.shared.source_ref import SourceRef
 
 ROTULOS: dict[str, str] = {
@@ -567,3 +571,79 @@ def tolerancia_padrao() -> dict[str, str]:
         "pontos_percentuais": str(checks_mod.TOL_PONTOS),
         "fator_aviso": str(Decimal(checks_mod.FATOR_AVISO)),
     }
+
+
+# --------------------------------------------------------------------------- #
+# Sprint Q1 — resolução
+# --------------------------------------------------------------------------- #
+def _ocorrencia_para_schema(oc: resolucao.Ocorrencia) -> OcorrenciaQualidade:
+    tratativa = None
+    if oc.tratativa is not None:
+        tratativa = TratativaResumo(
+            status=oc.tratativa.status,
+            classe=oc.tratativa.classe,
+            justificativa=oc.tratativa.justificativa,
+            tentativas=list(oc.tratativa.tentativas or []),
+            atualizado_em=oc.tratativa.atualizado_em,
+        )
+    return OcorrenciaQualidade(
+        check_codigo=oc.check_codigo,
+        cod_ibge=oc.cod_ibge,
+        periodo=oc.periodo,
+        fonte=oc.fonte,
+        status_check=oc.status_check,
+        esquerda=oc.esquerda,
+        direita=oc.direita,
+        diferenca=oc.diferenca,
+        tolerancia=oc.tolerancia,
+        classe=oc.classe,
+        lado_esquerdo=oc.lado_esquerdo,
+        lado_direito=oc.lado_direito,
+        porque=oc.porque,
+        diagnostico=oc.diagnostico,
+        acoes=list(oc.acoes),
+        tratativa=tratativa,
+    )
+
+
+def painel_ocorrencias(
+    session: Session,
+    principal: Principal,
+    *,
+    cod_ibge: str | None = None,
+    incluir_encerradas: bool = False,
+) -> OcorrenciasResponse:
+    """Falhas do escopo com classe, evidência e ações — o painel de resolução (§6.4)."""
+    escopo = carteira_scope_ibges(session, principal)
+    ocorrencias = resolucao.listar_ocorrencias(
+        session,
+        principal,
+        cods_escopo=escopo,
+        cod_ibge=cod_ibge,
+        incluir_encerradas=incluir_encerradas,
+    )
+    por_classe: dict[str, int] = {}
+    for oc in ocorrencias:
+        por_classe[oc.classe] = por_classe.get(oc.classe, 0) + 1
+    return OcorrenciasResponse(
+        data=[_ocorrencia_para_schema(o) for o in ocorrencias],
+        total=len(ocorrencias),
+        por_classe=por_classe,
+    )
+
+
+def aplicar_acao_ocorrencia(
+    session: Session, principal: Principal, body: AcaoRequest
+) -> OcorrenciaQualidade:
+    """Aplica a ação no ente — **conferindo o escopo antes**, como toda rota por ente."""
+    assert_ente_in_scope(session, principal, body.cod_ibge)
+    oc = resolucao.aplicar_acao(
+        session,
+        principal,
+        check_codigo=body.check_codigo,
+        cod_ibge=body.cod_ibge,
+        periodo=body.periodo,
+        acao=body.acao,
+        justificativa=body.justificativa,
+    )
+    return _ocorrencia_para_schema(oc)

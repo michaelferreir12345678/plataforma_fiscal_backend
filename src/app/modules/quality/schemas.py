@@ -106,3 +106,77 @@ class LineageResponse(BaseModel):
     nos: list[LineageNo] = Field(default_factory=list)
     arestas: list[LineageAresta] = Field(default_factory=list)
     total_arestas: int = 0
+
+
+# --------------------------------------------------------------------------- #
+# Sprint Q1 — resolução: o que se faz com a falha
+# --------------------------------------------------------------------------- #
+class TratativaResumo(BaseModel):
+    """O que já se fez sobre esta ocorrência, e como terminou."""
+
+    status: str = Field(
+        description=(
+            "aberta | diagnosticada | acao_aplicada | resolvida | aceita_como_fato"
+        )
+    )
+    classe: str | None = None
+    justificativa: str | None = Field(
+        default=None,
+        description=(
+            "Motivo do aceite. O selo continua aparecendo com este texto: aceitar uma "
+            "divergência não a esconde, apenas registra por que ela é conhecida."
+        ),
+    )
+    tentativas: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Ações aplicadas e o veredito que cada uma produziu. Uma falha que resiste a "
+            "três reprocessamentos precisa parecer o que é."
+        ),
+    )
+    atualizado_em: datetime | None = None
+
+
+class OcorrenciaQualidade(BaseModel):
+    """Uma verificação em falha com classe da causa, evidência e ações cabíveis."""
+
+    check_codigo: str
+    cod_ibge: str | None = None
+    periodo: str | None = None
+    fonte: str
+    status_check: str
+    esquerda: Decimal | None = None
+    direita: Decimal | None = None
+    diferenca: Decimal | None = None
+    tolerancia: Decimal | None = None
+    #: De quem é o número que não fechou — decide a ação (ver `quality/causa.py`).
+    classe: str = Field(description="plataforma | fonte | misto | cobertura")
+    lado_esquerdo: str
+    lado_direito: str
+    porque: str = Field(description="Por que a classe é essa — sustenta a ação oferecida.")
+    diagnostico: dict[str, Any] = Field(default_factory=dict)
+    #: **Só** as ações que existem para esta classe. Oferecer "reprocessar" numa
+    #: divergência da fonte gastaria o tempo do gestor sem mudar o resultado.
+    acoes: list[str] = Field(default_factory=list)
+    tratativa: TratativaResumo | None = None
+
+
+class OcorrenciasResponse(BaseModel):
+    data: list[OcorrenciaQualidade] = Field(default_factory=list)
+    total: int = 0
+    por_classe: dict[str, int] = Field(default_factory=dict)
+
+
+class AcaoRequest(BaseModel):
+    """Pedido de ação sobre uma ocorrência."""
+
+    check_codigo: str
+    cod_ibge: str
+    periodo: str | None = None
+    acao: str = Field(
+        description="rematerializar | verificar_na_fonte | aceitar_como_fato",
+    )
+    justificativa: str | None = Field(
+        default=None,
+        description="Obrigatória (≥10 caracteres) para 'aceitar_como_fato'.",
+    )
