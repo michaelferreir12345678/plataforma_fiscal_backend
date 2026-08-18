@@ -71,6 +71,17 @@ class Conversa(Base):
     org_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("organizacao.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    #: Fio da conversa (Sprint IA-7): todos os turnos de um mesmo diálogo compartilham este
+    #: valor, e o primeiro turno o recebe igual ao próprio ``id``. É o que permite
+    #: reconstruir o histórico numa consulta só, em vez de subir a cadeia turno a turno.
+    thread_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("conversa.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: A âncora causal desta continuação. O fio agrupa; o pai impede que dois ramos criados
+    #: a partir do mesmo turno sejam tratados como uma sequência única.
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("conversa.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     usuario_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("usuario.id", ondelete="SET NULL"), nullable=True
     )
@@ -86,7 +97,15 @@ class Conversa(Base):
     fatos: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     source_refs: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     dados_incompletos: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    verificacao: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     as_of: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: O gestor **pediu** o corte, ou este é só o instante resolvido da leitura?
+    #: ``as_of`` é sempre preenchido (auditoria: qual fotografia respondeu), então ele
+    #: sozinho não distingue as duas coisas — e herdar o instante resolvido fazia toda
+    #: continuação virar reprodução histórica presa ao relógio do primeiro turno.
+    as_of_explicito: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False
+    )
     criado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -107,9 +126,7 @@ class IaToolCall(Base):
     """
 
     __tablename__ = "ia_tool_call"
-    __table_args__ = (
-        CheckConstraint("status IN ('ok', 'erro')", name="ck_ia_tool_call_status"),
-    )
+    __table_args__ = (CheckConstraint("status IN ('ok', 'erro')", name="ck_ia_tool_call_status"),)
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     org_id: Mapped[uuid.UUID] = mapped_column(

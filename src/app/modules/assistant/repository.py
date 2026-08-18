@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, literal, select, update
+from sqlalchemy.orm import Session, aliased
 
 from app.modules.assistant.models import Conversa, ConversaUso, IaToolCall, NormaChunk
 
@@ -26,9 +26,7 @@ def list_norma_chunks(session: Session, *, fontes: Sequence[str] | None = None) 
 
 def get_norma_chunk(session: Session, *, fonte: str, dispositivo: str) -> NormaChunk | None:
     return session.scalar(
-        select(NormaChunk).where(
-            NormaChunk.fonte == fonte, NormaChunk.dispositivo == dispositivo
-        )
+        select(NormaChunk).where(NormaChunk.fonte == fonte, NormaChunk.dispositivo == dispositivo)
     )
 
 
@@ -98,8 +96,21 @@ def insert_conversa(
     source_refs: list[dict[str, Any]],
     dados_incompletos: list[dict[str, Any]],
     as_of: datetime | None,
+    as_of_explicito: bool = False,
+    thread_id: uuid.UUID | None = None,
+    parent_id: uuid.UUID | None = None,
+    verificacao: dict[str, Any] | None = None,
 ) -> Conversa:
+    # Sem fio informado, a conversa **é** o fio: o id é gerado aqui (em vez de deixado ao
+    # default da coluna) justamente para que ``thread_id`` possa apontar para ele na mesma
+    # inserção. Toda linha nasce com fio; nenhuma precisa de um segundo UPDATE.
+    novo_id = uuid.uuid4()
+    if parent_id is not None and thread_id is None:
+        raise ValueError("parent_id exige thread_id: um turno causal precisa pertencer a um fio")
     row = Conversa(
+        id=novo_id,
+        thread_id=thread_id or novo_id,
+        parent_id=parent_id,
         org_id=org_id,
         usuario_id=usuario_id,
         tipo=tipo,
@@ -114,7 +125,9 @@ def insert_conversa(
         fatos=fatos,
         source_refs=source_refs,
         dados_incompletos=dados_incompletos,
+        verificacao=verificacao,
         as_of=as_of,
+        as_of_explicito=as_of_explicito,
     )
     session.add(row)
     session.flush()
@@ -187,9 +200,7 @@ def insert_ia_tool_call(
     return row
 
 
-def list_ia_tool_calls(
-    session: Session, *, org_id: uuid.UUID, limit: int = 50
-) -> list[IaToolCall]:
+def list_ia_tool_calls(session: Session, *, org_id: uuid.UUID, limit: int = 50) -> list[IaToolCall]:
     """Chamadas recentes da organização (auditoria consultável, RLS por org_id)."""
     return list(
         session.scalars(
@@ -201,14 +212,104 @@ def list_ia_tool_calls(
     )
 
 
-def list_conversas(session: Session, *, org_id: uuid.UUID, limit: int = 20) -> list[Conversa]:
+def get_conversa(session: Session, *, conversa_id: uuid.UUID, org_id: uuid.UUID) -> Conversa | None:
+    """Uma conversa da organização. O ``org_id`` no WHERE é redundante com a RLS — e fica.
+
+    Redundância aqui é barata e o modo de falha do contrário é caríssimo: bastaria uma
+    consulta feita por sessão administrativa (``admin_session``, que a RLS deixa passar)
+    para o ``conversa_id`` de outra organização virar histórico desta.
+    """
+    return session.scalar(
+        select(Conversa).where(Conversa.id == conversa_id, Conversa.org_id == org_id)
+    )
+
+
+def list_ancestrais_da_conversa(
+    session: Session,
+    *,
+    conversa_id: uuid.UUID,
+    thread_id: uuid.UUID,
+    org_id: uuid.UUID,
+    limit: int,
+) -> list[Conversa]:
+    """Ancestrais causais da âncora, do mais antigo ao turno informado.
+
+    O CTE sobe por ``parent_id`` e nunca seleciona um irmão criado depois em outra aba.
+    ``thread_id`` e ``org_id`` ficam em cada passo como defesa contra linha corrompida ou
+    sessão administrativa que contorne a RLS.
+    """
+    if limit <= 0:
+        return []
+    cadeia = (
+        select(
+            Conversa.id.label("id"),
+            Conversa.parent_id.label("parent_id"),
+            literal(0).label("profundidade"),
+        )
+        .where(
+            Conversa.id == conversa_id,
+            Conversa.thread_id == thread_id,
+            Conversa.org_id == org_id,
+        )
+        .cte("ancestrais_conversa", recursive=True)
+    )
+    pai = aliased(Conversa)
+    cadeia = cadeia.union_all(
+        select(
+            pai.id,
+            pai.parent_id,
+            (cadeia.c.profundidade + 1).label("profundidade"),
+        )
+        .join(cadeia, pai.id == cadeia.c.parent_id)
+        .where(
+            pai.thread_id == thread_id,
+            pai.org_id == org_id,
+            cadeia.c.profundidade + 1 < limit,
+        )
+    )
     return list(
         session.scalars(
             select(Conversa)
-            .where(Conversa.org_id == org_id)
+            .join(cadeia, Conversa.id == cadeia.c.id)
+            .order_by(cadeia.c.profundidade.desc())
+        )
+    )
+
+
+def list_conversas(
+    session: Session, *, org_id: uuid.UUID, cod_ibges: set[str], limit: int = 20
+) -> list[Conversa]:
+    """Histórico da organização já restrito aos entes licenciados do principal."""
+    # Fail closed: linha legada sem ente não tem classificação que permita decidir se o
+    # usuário pode vê-la. Todos os fluxos atuais gravam ``cod_ibge``; até que exista um
+    # tipo explicitamente global, ``NULL`` não é atalho para conteúdo org-wide.
+    if not cod_ibges:
+        return []
+    return list(
+        session.scalars(
+            select(Conversa)
+            .where(Conversa.org_id == org_id, Conversa.cod_ibge.in_(cod_ibges))
             .order_by(Conversa.criado_em.desc())
             .limit(limit)
         )
+    )
+
+
+def associar_tool_calls_a_conversa(
+    session: Session,
+    *,
+    org_id: uuid.UUID,
+    call_ids: Sequence[uuid.UUID],
+    conversa_id: uuid.UUID,
+) -> None:
+    """Fecha o elo G7 depois que a resposta recebe seu id definitivo."""
+    ids = list(dict.fromkeys(call_ids))
+    if not ids:
+        return
+    session.execute(
+        update(IaToolCall)
+        .where(IaToolCall.org_id == org_id, IaToolCall.id.in_(ids))
+        .values(conversa_id=conversa_id)
     )
 
 

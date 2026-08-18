@@ -41,8 +41,8 @@ from sqlalchemy.orm import Session
 from app.core.deps import Principal
 from app.core.errors import AppError
 from app.modules.alerts import rules as alert_rules
+from app.modules.assistant import didatica, retriever
 from app.modules.assistant import repository as assistant_repo
-from app.modules.assistant import retriever
 from app.modules.assistant.llm import (
     FatoContexto,
     LLMProvider,
@@ -349,14 +349,21 @@ def _responder(
     latencia_ms = int((time.perf_counter() - inicio) * 1000)
 
     fatos_resp = [fato_para_resposta(f) for f in coleta.fatos]
+    # Mesmo fecho didático do assistente, e pela mesma razão: esta é a superfície que a
+    # IA-7 levou a doze telas, com o mesmo prompt e o mesmo provedor. Uma garantia que
+    # valesse só em ``/assistant`` consertaria a tela menos usada e não as mais usadas.
+    # Roda antes do G6 para que o texto conferido seja o texto lido; nenhuma das duas
+    # reescritas introduz número (verificado: nenhuma expansão da tabela de siglas contém
+    # algarismo), então o lastro conferido é o mesmo.
+    texto_fechado = didatica.fechar_resposta(resultado.texto)
     laudo = verificacao.verificar(
-        resultado.texto,
+        texto_fechado,
         coleta.payloads,
         [f.model_dump(mode="json") for f in fatos_resp],
         [list(n.linhas) for n in coleta.notas],
         [v.__dict__ for v in verbetes],
     )
-    texto = verificacao.anexar_aviso(resultado.texto, laudo)
+    texto = verificacao.anexar_aviso(texto_fechado, laudo)
     if not laudo.ok:
         logger.warning(
             "G6 sinalizou %s número(s) sem lastro em %s (ente %s): %s",

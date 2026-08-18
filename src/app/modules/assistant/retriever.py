@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
@@ -24,6 +24,7 @@ from app.modules.assistant.llm import FatoContexto, NormaContexto, VerbeteContex
 from app.modules.dictionary import service as dictionary_service
 from app.modules.indicators.rotulos import ROTULOS
 from app.modules.ingestion import repository as ingestion_repo
+from app.modules.limits import service as limits_service
 from app.modules.reports import service as reports_service
 from app.modules.reports.models import Relatorio
 from app.shared import tooling
@@ -82,6 +83,11 @@ class GroundedContext:
     esfera: str | None
     periodo: str | None
     as_of: datetime
+    #: ``True`` quando o corte veio da requisição ou foi herdado de um turno anterior.
+    #: O instante de ``as_of`` sempre é efetivo, inclusive numa consulta corrente; esta
+    #: marca distingue essa fotografia operacional de um corte que precisa ser reproduzido
+    #: exatamente por ferramentas que não mantêm histórico próprio.
+    as_of_fixo: bool = False
     fatos: list[FatoContexto] = field(default_factory=list)
     normas: list[NormaContexto] = field(default_factory=list)
     #: Definições do dicionário semântico (IA-2). Recurso, não fato: entram no contexto
@@ -89,19 +95,67 @@ class GroundedContext:
     verbetes: list[VerbeteContexto] = field(default_factory=list)
     dados_incompletos: list[dict] = field(default_factory=list)
     source_refs: list[dict] = field(default_factory=list)
+    #: Auditorias de ferramenta abertas antes de existir a linha ``op.conversa``. O
+    #: serviço associa todas ao id definitivo logo após persistir a resposta (G7).
+    tool_call_ids: list[uuid.UUID] = field(default_factory=list)
 
 
 # Página do produto → indicadores que ela mostra (Sprint 25E). "Pergunte sobre esta
 # tela" só é honesto se a tela realmente restringir o contexto recuperado.
 _PAGINA_INDICADORES: dict[str, set[str]] = {
+    "/dashboard": {
+        "pessoal_executivo",
+        "divida_consolidada_liquida",
+        "resultado_primario",
+        "saude_asps",
+        "saude_minimo",
+        "educacao_mde",
+        "rcl",
+    },
+    "/cockpit": {
+        "pessoal_executivo",
+        "divida_consolidada_liquida",
+        "resultado_primario",
+        "saude_asps",
+        "saude_minimo",
+        "educacao_mde",
+        "rcl",
+    },
     "/pessoal": {"pessoal_executivo", "rcl"},
     "/divida": {"divida_consolidada_liquida", "rcl"},
-    "/resultado": {"resultado_primario", "rcl"},
-    "/saude-educacao": {"saude_asps", "educacao_mde"},
+    "/resultado": {"resultado_primario", "resultado_primario_rcl", "rcl"},
+    "/saude-educacao": {
+        "saude_asps",
+        "saude_minimo",
+        "educacao_mde",
+        "fundeb_profissionais",
+    },
+    "/saude": {"saude_asps", "saude_minimo"},
+    "/educacao": {"educacao_mde", "fundeb_profissionais"},
     "/receita": {"rcl"},
     "/despesa": {"pessoal_executivo", "rcl"},
-    "/limites": {"pessoal_executivo", "divida_consolidada_liquida", "rcl"},
-    "/caixa": {"rcl"},
+    "/limites": {
+        "pessoal_executivo",
+        "divida_consolidada_liquida",
+        "saude_minimo",
+        "educacao_mde",
+        "fundeb_profissionais",
+        "rcl",
+    },
+    "/caixa": {"disponibilidade", "rcl"},
+    "/benchmarking": {
+        "pessoal_executivo",
+        "divida_consolidada_liquida",
+        "rcl_per_capita",
+    },
+    "/benchmark": {
+        "pessoal_executivo",
+        "divida_consolidada_liquida",
+        "rcl_per_capita",
+    },
+    "/previsoes": {"rcl", "pessoal_executivo", "divida_consolidada_liquida"},
+    "/previsao": {"rcl", "pessoal_executivo", "divida_consolidada_liquida"},
+    "/carteira": {"pessoal_executivo", "divida_consolidada_liquida", "rcl"},
 }
 
 
@@ -109,7 +163,11 @@ def indicadores_da_pagina(pagina: str | None) -> set[str]:
     """Indicadores da tela de onde veio a pergunta (rota do frontend)."""
     if not pagina:
         return set()
-    return set(_PAGINA_INDICADORES.get(pagina.strip().rstrip("/").lower() or "/", set()))
+    chave = pagina.strip().lower()
+    if not chave.startswith("/"):
+        chave = f"/{chave}"
+    chave = chave.rstrip("/") or "/"
+    return set(_PAGINA_INDICADORES.get(chave, set()))
 
 
 def indicadores_relevantes(pergunta: str, pagina: str | None = None) -> set[str]:
@@ -204,7 +262,7 @@ def fatos_por_ferramenta(
     periodo: str | None,
     as_of: datetime | None,
     conversa_id: uuid.UUID | None = None,
-) -> tuple[list[FatoContexto], list[dict]]:
+) -> tuple[list[FatoContexto], list[dict], list[uuid.UUID]]:
     """Busca indicadores **pela camada de ferramentas** — com escopo, fonte e auditoria.
 
     Chamar o envelope (e não o repositório direto) é o ponto: mesmo neste caminho
@@ -254,7 +312,53 @@ def fatos_por_ferramenta(
                     "periodo_encontrado": None,
                 }
             )
-    return fatos, incompletos
+    return fatos, incompletos, list(ctx.call_ids)
+
+
+def _limiares_do_indicador(
+    session: Session, *, cod_ibge: str, indicador: str
+) -> tuple[str | None, str | None, str | None]:
+    """Teto/alerta/prudencial do indicador para a esfera do ente, já formatados.
+
+    Lidos de ``gold.dim_limite_legal`` (nunca constante: 54% no município, 49% no estado).
+    Indicador gerencial sem limite legal e ente sem esfera devolvem nulos — ausência é a
+    resposta honesta, e um zero seria lido pelo modelo como "teto de 0%".
+    """
+    try:
+        esfera = limits_service._esfera_do_ente(session, cod_ibge)
+        dim = limits_service._limite_dim(session, indicador, esfera)
+    except AppError:
+        return None, None, None
+    if dim is None:
+        return None, None, None
+    return (
+        reports_service.formatar_valor(dim.teto_pct, "PERCENTUAL"),
+        reports_service.formatar_valor(dim.alerta_pct, "PERCENTUAL"),
+        reports_service.formatar_valor(dim.prudencial_pct, "PERCENTUAL"),
+    )
+
+
+def _com_limiares(session: Session, cod_ibge: str, fato: FatoContexto) -> FatoContexto:
+    """Anexa os limiares ao fato — inclusive quando **não há valor apurado**.
+
+    Condicionar isto à existência de ``faixa`` (que só existe com valor) blindava o caso
+    fácil e deixava aberto o difícil: é justamente na ausência que o modelo explica a norma
+    e deriva dela ("o limite de alerta, 90% do teto, equivalente a 48,6%"). O teto do
+    Executivo municipal é 54% havendo ou não RGF entregue.
+    """
+    if not fato.codigo:
+        return fato
+    teto, alerta, prudencial = _limiares_do_indicador(
+        session, cod_ibge=cod_ibge, indicador=fato.codigo
+    )
+    if teto is None:
+        return fato
+    return replace(
+        fato,
+        teto_formatado=teto,
+        alerta_formatado=alerta,
+        prudencial_formatado=prudencial,
+    )
 
 
 def _metric_to_fato(metric: dict) -> FatoContexto:
@@ -318,7 +422,10 @@ def retrieve_indicadores(
         criado_por=principal.usuario_id,
     )
     document = reports_service.build_document(session, row, datetime.now(UTC))
-    fatos = [_metric_to_fato(m) for m in document.get("metricas", [])]
+    fatos = [
+        _com_limiares(session, cod_ibge, _metric_to_fato(m))
+        for m in document.get("metricas", [])
+    ]
     cabecalho = document.get("cabecalho") or {}
     header = {
         "ente_nome": cabecalho.get("ente"),
@@ -387,21 +494,29 @@ def build_context(
     top_k: int,
     todos_indicadores: bool = False,
     pagina: str | None = None,
+    pergunta_recuperacao: str | None = None,
 ) -> GroundedContext:
-    """Monta o contexto fundamentado (fatos + normas + incompletudes) para o serviço."""
+    """Monta o contexto fundamentado (fatos + normas + incompletudes) para o serviço.
+
+    ``pergunta_recuperacao`` (Sprint IA-7) é o texto usado **para buscar** — pergunta atual
+    somada à do turno anterior, quando o acompanhamento não nomeia indicador. O modelo
+    continua recebendo ``pergunta`` como o gestor a escreveu; o que muda é o que a busca
+    considera relevante. Separar as duas é o que evita o pior dos mundos: recuperar pelo
+    assunto certo e responder a uma pergunta reescrita por nós.
+    """
     effective_as_of = as_of or datetime.now(UTC)
-    resolved_periodo = _resolve_periodo(
-        session, cod_ibge=cod_ibge, periodo=periodo, as_of=as_of
-    )
+    texto_busca = pergunta_recuperacao or pergunta
+    resolved_periodo = _resolve_periodo(session, cod_ibge=cod_ibge, periodo=periodo, as_of=as_of)
     ctx = GroundedContext(
         ente=cod_ibge,
         ente_nome=None,
         esfera=None,
         periodo=resolved_periodo,
         as_of=effective_as_of,
+        as_of_fixo=as_of is not None,
     )
 
-    alvos = indicadores_relevantes(pergunta, pagina)
+    alvos = indicadores_relevantes(texto_busca, pagina)
     if resolved_periodo is not None:
         fatos, source_refs, header = retrieve_indicadores(
             session, principal, cod_ibge=cod_ibge, periodo=resolved_periodo, as_of=effective_as_of
@@ -422,9 +537,16 @@ def build_context(
         # invisibilidade — sem alargar o pacote fixo, que continua sendo o mesmo.
         if not todos_indicadores:
             ja_no_contexto = {f.codigo for f in ctx.fatos}
-            pedidos = [c for c in sorted(indicadores_nomeados(pergunta)) if c not in ja_no_contexto]
+            # O indicador pode vir do texto **ou da tela de origem**. Sem unir ``alvos``,
+            # páginas como benchmarking/caixa conheciam o assunto, mas indicadores fora
+            # do pacote executivo nunca chegavam à ferramenta canônica.
+            pedidos = [
+                c
+                for c in sorted(indicadores_nomeados(texto_busca) | alvos)
+                if c not in ja_no_contexto
+            ]
             if pedidos:
-                extras, incompletos = fatos_por_ferramenta(
+                extras, incompletos, call_ids = fatos_por_ferramenta(
                     session,
                     principal,
                     cod_ibge=cod_ibge,
@@ -433,16 +555,17 @@ def build_context(
                     as_of=as_of,
                 )
                 ctx.fatos.extend(extras)
+                ctx.tool_call_ids.extend(call_ids)
                 ctx.dados_incompletos = list(ctx.dados_incompletos) + incompletos
                 ctx.source_refs = list(ctx.source_refs) + [
                     f.source_ref for f in extras if f.disponivel and f.source_ref
                 ]
 
     ctx.normas = retrieve_normas(
-        session, embedder, pergunta=pergunta, indicadores=alvos, top_k=top_k
+        session, embedder, pergunta=texto_busca, indicadores=alvos, top_k=top_k
     )
     ctx.verbetes = retrieve_verbetes(
-        session, pergunta=pergunta, codigos={f.codigo for f in ctx.fatos} | alvos
+        session, pergunta=texto_busca, codigos={f.codigo for f in ctx.fatos} | alvos
     )
     return ctx
 

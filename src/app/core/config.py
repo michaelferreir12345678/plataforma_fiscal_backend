@@ -87,7 +87,17 @@ class Settings(BaseSettings):
     #: cai para outro modelo, senão uma configuração errada ficaria escondida atrás de
     #: um degrade silencioso. A resposta sempre declara qual modelo respondeu.
     assistant_chat_fallback_models: tuple[str, ...] = ("gemini-2.5-flash",)
-    assistant_summary_model: str = "gemini-2.5-pro"
+    #: Modelo do resumo executivo. O antigo ``gemini-2.5-pro`` deixou de estar disponível
+    #: para esta conta e fazia a rota terminar em 502. A IA-7 usa o ``3.5-flash`` porque
+    #: ele é estável, já é exercitado pelo mesmo laço de ferramentas do chat e restaura a
+    #: disponibilidade sem introduzir um modelo *preview* no caminho de produção.
+    #:
+    #: Esta é uma decisão de compatibilidade e operação, não uma conclusão de que um A/B
+    #: pequeno do chat prova a qualidade do resumo. O relatório da sprint separa as duas
+    #: tarefas e registra explicitamente a evidência que ainda falta. O ``3.6-flash`` só
+    #: deve substituir este padrão depois da migração das regras de function calling e
+    #: dos parâmetros depreciados do ``generateContent``.
+    assistant_summary_model: str = "gemini-3.5-flash"
     assistant_embedding_model: str = "gemini-embedding-001"
     # Backend do vector store normativo, independente do provedor de chat:
     # ``local`` (default) = embedder determinístico (reprodutível, offline, custo zero por
@@ -95,7 +105,33 @@ class Settings(BaseSettings):
     # pgvector). Manter local evita chamadas de embedding a cada pergunta e churn no store
     # compartilhado; o chat continua no Gemini.
     assistant_embedding_backend: str = "local"
-    assistant_request_timeout_s: float = 30.0
+    #: Temperatura de geração. **0.0 por decisão de produto, não por acaso.**
+    #:
+    #: Até a Sprint IA-7 nenhuma temperatura era enviada, então valia o padrão do
+    #: provedor. Quatro corridas do conjunto dourado contra o mesmo modelo, mesmo
+    #: código e mesmo banco mostraram as falhas **se movendo**: uma corrida com 2
+    #: alucinações e legibilidade 100%, outra com 0 alucinações e 3 falhas de
+    #: legibilidade — nas mesmas perguntas que haviam passado antes.
+    #:
+    #: Isso é fatal para duas coisas ao mesmo tempo. Para a avaliação, um critério
+    #: absoluto medido sobre sistema estocástico vira loteria. Para o produto, é
+    #: pior: esta plataforma trata reprodutibilidade como requisito — o `as_of`
+    #: bitemporal existe para reproduzir um relatório *como ele era* —, e um
+    #: assistente que explica o mesmo número de duas formas em duas consultas
+    #: contradiz o próprio motivo pelo qual a bitemporalidade foi construída.
+    #:
+    #: Configurável porque é decisão de produto, não verdade eterna.
+    assistant_temperatura: float = Field(default=0.0, ge=0.0, le=2.0)
+
+    #: Teto de espera por request ao provedor. Era 30 s — **abaixo** do p95 medido
+    #: na primeira corrida ao vivo contra o `gemini-3.5-flash` (p95 32,7 s, máximo
+    #: 37,4 s por pergunta). Um teto dentro da distribuição garante que uma fatia
+    #: das perguntas termine em 502: foram os pedidos de parecer, que geram texto
+    #: longo, os que esgotaram as três tentativas da avaliação. Falhar em 30 s não
+    #: é mais rápido que responder em 45 — é só pior. Produção não retenta (a
+    #: retentativa vive no runner da avaliação), então este teto é a espera máxima
+    #: de fato, não um múltiplo dela.
+    assistant_request_timeout_s: float = 90.0
     # Nº de dispositivos normativos recuperados por pergunta (RAG).
     assistant_norma_top_k: int = 3
     # Laço de agente (Sprint IA-3). Um modelo que não converge em 4 rodadas não converge

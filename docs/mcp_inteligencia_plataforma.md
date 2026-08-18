@@ -24,9 +24,18 @@
 > números do controle negativo (`777.777.777,77`, `88,88%`) no ambiente real, não só no
 > relatório. Tudo conferido dentro do contêiner, não pelo relato.
 >
-> **O plano original está concluído.** Aberto: **IA-7** (linguagem natural, conversa
-> multi-turno e explicação em todas as telas — nasceu de feedback de uso real) e **IA-4**,
-> que continua **dependendo de decisão** (§6.1).
+> **O plano original está concluído.** A **IA-7 está implementada** (não implantada):
+> `SYSTEM_PROMPT` com as seis regras invioláveis intactas + seção de redação; conversa
+> multi-turno com `conversa_id` na entrada, fio em `op.conversa.thread_id` (migration
+> `0047`) e escopo revalidado a cada turno; explicação por IA em **15 telas**; marca de IA
+> própria. Conjunto dourado reexecutado com o prompt novo: **alucinação numérica segue 0%
+> (0/72)**, 74/74 aprovadas, e a métrica nova de legibilidade em 100%. Dois defeitos de
+> produção caíram junto: as respostas do Gemini vinham **truncadas em silêncio** (teto de
+> saída 2048 competindo com o raciocínio — 5 de 8 conversas gravadas terminam no meio da
+> frase) e o `assistant_summary_model` apontava para um `gemini-2.5-pro` que a API **recusa**
+> (`NOT_FOUND`), o que fazia todo resumo executivo terminar em 502. Detalhes em
+> `sprint_ia7_resposta_gestor.md`. Aberto: **IA-4**, que continua **dependendo de decisão**
+> (§6.1).
 >
 > **Lacuna de processo encontrada no deploy da IA-2, e que vale para toda sprint futura
 > com seed:** a migration cria a estrutura, mas **não popula**. O `seed_dicionario` só era

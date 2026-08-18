@@ -104,6 +104,9 @@ class Preco:
     saida_usd_por_milhao: Decimal
     fonte: str
     declarado_em: str
+    #: Algumas tabelas mudam de tarifa acima de um tamanho de prompt. O custo agregado só
+    #: pode usar esta faixa se **cada request** estiver dentro do limite.
+    max_tokens_entrada_por_request: int | None = None
 
     def custo_usd(self, tokens_entrada: int, tokens_saida: int) -> Decimal:
         milhao = Decimal(1_000_000)
@@ -200,6 +203,11 @@ def carregar_conjunto(caminho: Path | None = None) -> Conjunto:
             saida_usd_por_milhao=Decimal(str(item["saida_usd_por_milhao"])),
             fonte=str(item.get("fonte", "não declarada")),
             declarado_em=str(item.get("declarado_em", "não declarado")),
+            max_tokens_entrada_por_request=(
+                int(item["max_tokens_entrada_por_request"])
+                if item.get("max_tokens_entrada_por_request") is not None
+                else None
+            ),
         )
         for modelo, item in (bruto.get("precos") or {}).items()
     }

@@ -105,7 +105,13 @@ def build_cobertura_pagina(
     periodo: str | None,
     entes_do_escopo: set[str],
 ) -> CoberturaPagina:
-    """Cobertura real da página, medida dentro do escopo de quem pergunta."""
+    """Cobertura real da página, medida dentro do escopo e do período pedidos.
+
+    ``periodo`` não é mero rótulo: quando informado, todas as contagens e o selo do ente
+    são restritos a ele. Sem esse predicado, pedir 2024-B6 podia devolver ``tem_dado=true``
+    porque havia qualquer entrega de 2025-B6 — exatamente a conclusão errada para uma tela
+    vazia no período selecionado.
+    """
     mapa = fontes_por_pagina()
     if pagina not in mapa and pagina not in INDICADORES_POR_PAGINA:
         raise AppError(
@@ -134,15 +140,16 @@ def build_cobertura_pagina(
 
     itens_fonte: list[CoberturaFonteItem] = []
     for fonte in fontes:
-        linhas = session.execute(
-            select(
-                func.count(func.distinct(MartCoberturaFonte.cod_ibge)),
-                func.max(MartCoberturaFonte.periodo),
-            ).where(
-                MartCoberturaFonte.fonte == fonte,
-                MartCoberturaFonte.cod_ibge.in_(escopo_lista),
-            )
-        ).one()
+        stmt_fonte = select(
+            func.count(func.distinct(MartCoberturaFonte.cod_ibge)),
+            func.max(MartCoberturaFonte.periodo),
+        ).where(
+            MartCoberturaFonte.fonte == fonte,
+            MartCoberturaFonte.cod_ibge.in_(escopo_lista),
+        )
+        if periodo:
+            stmt_fonte = stmt_fonte.where(MartCoberturaFonte.periodo == periodo)
+        linhas = session.execute(stmt_fonte).one()
         meta = FONTE_META.get(fonte)
         itens_fonte.append(
             CoberturaFonteItem(
@@ -156,15 +163,16 @@ def build_cobertura_pagina(
 
     itens_indicador: list[CoberturaIndicadorItem] = []
     for indicador in INDICADORES_POR_PAGINA.get(pagina, ()):
-        linhas = session.execute(
-            select(
-                func.count(func.distinct(MartIndicador.cod_ibge)),
-                func.max(MartIndicador.periodo),
-            ).where(
-                MartIndicador.indicador == indicador,
-                MartIndicador.cod_ibge.in_(escopo_lista),
-            )
-        ).one()
+        stmt_indicador = select(
+            func.count(func.distinct(MartIndicador.cod_ibge)),
+            func.max(MartIndicador.periodo),
+        ).where(
+            MartIndicador.indicador == indicador,
+            MartIndicador.cod_ibge.in_(escopo_lista),
+        )
+        if periodo:
+            stmt_indicador = stmt_indicador.where(MartIndicador.periodo == periodo)
+        linhas = session.execute(stmt_indicador).one()
         itens_indicador.append(
             CoberturaIndicadorItem(
                 indicador=indicador,
@@ -177,20 +185,17 @@ def build_cobertura_pagina(
     ente_tem = 0
     ente_periodo: str | None = None
     if fontes:
-        ente_tem = session.scalar(
-            select(func.count())
-            .select_from(MartCoberturaFonte)
-            .where(
-                MartCoberturaFonte.cod_ibge == cod_ibge,
-                MartCoberturaFonte.fonte.in_(fontes),
-            )
-        ) or 0
-        ente_periodo = session.scalar(
-            select(func.max(MartCoberturaFonte.periodo)).where(
-                MartCoberturaFonte.cod_ibge == cod_ibge,
-                MartCoberturaFonte.fonte.in_(fontes),
-            )
+        filtro_ente = (
+            MartCoberturaFonte.cod_ibge == cod_ibge,
+            MartCoberturaFonte.fonte.in_(fontes),
         )
+        stmt_ente = select(func.count()).select_from(MartCoberturaFonte).where(*filtro_ente)
+        stmt_periodo = select(func.max(MartCoberturaFonte.periodo)).where(*filtro_ente)
+        if periodo:
+            stmt_ente = stmt_ente.where(MartCoberturaFonte.periodo == periodo)
+            stmt_periodo = stmt_periodo.where(MartCoberturaFonte.periodo == periodo)
+        ente_tem = session.scalar(stmt_ente) or 0
+        ente_periodo = session.scalar(stmt_periodo)
 
     total_escopo = len(entes_do_escopo)
     # **Qual número vai em destaque.** O máximo entre as fontes seria o mais generoso e o

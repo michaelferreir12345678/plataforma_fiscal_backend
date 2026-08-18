@@ -11,12 +11,15 @@ município; a segunda, a plataforma. Só a segunda é verdade.
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
-from sqlalchemy import text
+from sqlalchemy import delete, text
 
 from app.core.db import admin_session
 from app.core.errors import AppError
 from app.modules.coverage import service
+from app.modules.ingestion.models import MartCoberturaFonte
 
 
 def _escopo_ce() -> set[str]:
@@ -85,6 +88,56 @@ def test_escopo_vazio_nao_e_cobertura_zero() -> None:
     assert c.escopo.entes_no_escopo == 0
     assert c.observacao is not None
     assert "carteira" in c.observacao
+
+
+def test_periodo_restringe_contagens_e_selo_do_ente() -> None:
+    """Dado em outro período não pode preencher uma tela vazia no período solicitado."""
+    cod_ibge = f"9{uuid.uuid4().int % 1_000_000:06d}"
+    periodo_com_dado = "2088-B5"
+    periodo_sem_dado = "2088-B6"
+    try:
+        with admin_session() as s:
+            s.add(
+                MartCoberturaFonte(
+                    fonte="siconfi_rreo",
+                    cod_ibge=cod_ibge,
+                    periodo=periodo_com_dado,
+                    uf="CE",
+                    ano=2088,
+                    n_registros=1,
+                    versao_entrega_vigente="v1",
+                )
+            )
+
+        with admin_session() as s:
+            com_dado = service.build_cobertura_pagina(
+                s,
+                pagina="receita",
+                cod_ibge=cod_ibge,
+                periodo=periodo_com_dado,
+                entes_do_escopo={cod_ibge},
+            )
+            sem_dado = service.build_cobertura_pagina(
+                s,
+                pagina="receita",
+                cod_ibge=cod_ibge,
+                periodo=periodo_sem_dado,
+                entes_do_escopo={cod_ibge},
+            )
+    finally:
+        with admin_session() as s:
+            s.execute(
+                delete(MartCoberturaFonte).where(MartCoberturaFonte.cod_ibge == cod_ibge)
+            )
+
+    fonte_com_dado = next(f for f in com_dado.fontes if f.fonte == "siconfi_rreo")
+    fonte_sem_dado = next(f for f in sem_dado.fontes if f.fonte == "siconfi_rreo")
+    assert com_dado.ente.tem_dado is True
+    assert com_dado.ente.periodo_mais_recente == periodo_com_dado
+    assert fonte_com_dado.entes_com_dado == 1
+    assert sem_dado.ente.tem_dado is False
+    assert sem_dado.ente.periodo_mais_recente is None
+    assert fonte_sem_dado.entes_com_dado == 0
 
 
 def test_o_mapa_de_paginas_vem_do_catalogo_de_fontes() -> None:

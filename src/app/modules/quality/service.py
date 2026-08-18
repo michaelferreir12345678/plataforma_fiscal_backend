@@ -451,10 +451,16 @@ def painel(
 
 
 def selo_do_ente(
-    session: Session, cod_ibge: str, periodo: str | None = None
+    session: Session,
+    cod_ibge: str,
+    periodo: str | None = None,
+    *,
+    as_of: datetime | None = None,
 ) -> list[CheckOut]:
-    """Checks abertos que a página fiscal precisa selar sobre o número exibido."""
-    abertos = repository.checks_abertos(session, cod_ibge=cod_ibge, periodo=periodo)
+    """Checks abertos que selavam o número no instante solicitado (ou agora)."""
+    abertos = repository.checks_abertos(
+        session, cod_ibge=cod_ibge, periodo=periodo, as_of=as_of
+    )
     return [_to_out(row) for row in abertos]
 
 

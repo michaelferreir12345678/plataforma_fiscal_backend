@@ -50,6 +50,18 @@ from typing import Any
 #: fica deliberadamente de fora.
 NUMERO_FISCAL = re.compile(r"-?\d{1,3}(?:\.\d{3})+(?:,\d+)?%?|-?\d+,\d+%?|-?\d+%")
 
+#: Carimbo de tempo ISO-8601, mascarado ANTES de procurar número citado. O modelo cita a
+#: referência bitemporal da consulta ("...em 2026-08-18T04:46:13.996583Z"), o que é o
+#: comportamento certo — e o extrator lia "13.996" dentro dos segundos fracionários como
+#: notação de milhar, acusando número sem lastro numa resposta que não tinha nenhum.
+#:
+#: Não afrouxa a verificação: número fiscal não mora dentro de carimbo de tempo. O modo de
+#: falha oposto é que era caro — um aviso de "número sem fonte" que aparece quando não há
+#: número sem fonte ensina o gestor a ignorar o aviso.
+_TIMESTAMP_ISO = re.compile(
+    r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?"
+)
+
 #: Número em qualquer notação, para **colher lastro** (não para achar citação). Aqui o
 #: inteiro solto entra: ``periodo: 2024`` e ``teto_pct: 54`` são lastro legítimo do que o
 #: modelo pode citar, mesmo que sozinhos não fossem considerados citação.
@@ -142,7 +154,10 @@ def _tolerancia(token: str) -> Decimal:
 def numeros_citados(texto: str) -> list[NumeroCitado]:
     """Números fiscais escritos na prosa, na ordem em que aparecem."""
     achados: list[NumeroCitado] = []
-    for bruto in NUMERO_FISCAL.findall(texto or ""):
+    # Mascarado, não removido: trocar por espaço preserva o comprimento e, com ele,
+    # qualquer raciocínio sobre posição no texto.
+    limpo = _TIMESTAMP_ISO.sub(lambda m: " " * len(m.group(0)), texto or "")
+    for bruto in NUMERO_FISCAL.findall(limpo):
         valor = _para_decimal(bruto)
         if valor is None:
             continue

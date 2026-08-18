@@ -97,6 +97,41 @@ class PontoSerie(ToolOutput):
     source_ref: SourceRef | None = None
 
 
+class LimiteDaFaixa(ToolOutput):
+    """Os limiares que dão sentido ao rótulo da faixa — com procedência própria.
+
+    Existem por uma razão medida. Sem eles, o ponto da série dizia ``faixa="alerta"`` e
+    não dizia *alerta a partir de quanto*; pedido a explicar a posição em relação ao
+    limite, o modelo completava a lacuna calculando (54% × 0,90 = 48,6%). A conta estava
+    certa e o número não tinha fonte — que é o que a regra 2.2 do prompt passou a proibir.
+    Proibir sem fornecer tornaria a pergunta irrespondível.
+
+    Objeto separado, e não campos soltos na raiz, porque a **procedência é outra**: os
+    pontos da série vêm da entrega do RREO/RGF daquele período; estes números vêm da norma,
+    via ``gold.dim_limite_legal``. Herdar a cobertura de um ``source_ref`` de entrega
+    diria, falsamente, que o teto foi apurado junto com o valor.
+    """
+
+    #: ``teto`` (não ultrapassar) ou ``piso`` (mínimo a aplicar). Sem isto o limiar é
+    #: ambíguo: em mínimo de saúde/educação a semântica é invertida — ficar **abaixo** é
+    #: a irregularidade.
+    indicador: str | None = None
+    sentido: str
+    teto_pct: Decimal | None = None
+    alerta_pct: Decimal | None = None
+    prudencial_pct: Decimal | None = None
+    #: Os mesmos três números já na formatação pt-BR que a plataforma imprime. Não é
+    #: redundância decorativa: entregue só o ``Decimal`` cru, o modelo formatava sozinho e
+    #: escolhia ponto ("48.60%"). Em português o ponto é separador de milhar, então a
+    #: verificação lia "48.60%" como milhar, caía num token solto ("60%") e acusava sem
+    #: lastro um número que tinha lastro. A regra 2.1 do prompt manda copiar o valor
+    #: exatamente como aparece — faltava fazê-lo aparecer já correto.
+    teto_formatado: str | None = None
+    alerta_formatado: str | None = None
+    prudencial_formatado: str | None = None
+    source_ref: SourceRef | None = None
+
+
 class SerieHistoricaOut(ToolOutput):
     ente: str
     indicador: str
@@ -104,6 +139,10 @@ class SerieHistoricaOut(ToolOutput):
     disponivel: bool
     total: int = 0
     pontos: list[PontoSerie] = Field(default_factory=list)
+    #: No topo, e não por ponto, porque ``gold.dim_limite_legal`` guarda um limiar por
+    #: indicador/esfera/poder, sem vigência temporal: repeti-lo em cada ponto sugeriria
+    #: que ele varia ao longo da série, o que este modelo de dados não afirma.
+    limite: LimiteDaFaixa | None = None
     as_of: datetime | None = None
     observacao: str | None = None
 
@@ -141,6 +180,33 @@ def executar_serie_historica(ctx: ToolContext, entrada: SerieHistoricaIn) -> Ser
             + (" no recorte pedido." if entrada.periodo_inicial or entrada.periodo_final else ".")
             + " A plataforma não interpola período sem apuração."
         )
+    # A esfera decide o teto (54% município × 49% estado), então o limiar é lido do ente,
+    # nunca de uma constante. Duas ausências legítimas, e as duas silenciosas de propósito:
+    # ente sem esfera cadastrada (``_esfera_do_ente`` levanta 422) e indicador gerencial
+    # sem limite legal. Nos dois casos o bloco fica ausente e a série continua respondendo
+    # — enriquecer a resposta não pode derrubar o que já funcionava, e ausência aqui é mais
+    # honesta que um zero que o modelo leria como "teto de 0%".
+    try:
+        esfera = limits_service._esfera_do_ente(ctx.session, entrada.ente)
+        dim = limits_service._limite_dim(ctx.session, entrada.indicador, esfera)
+    except AppError:
+        dim = None
+    limite = (
+        LimiteDaFaixa(
+            sentido=dim.sentido,
+            teto_pct=dim.teto_pct,
+            alerta_pct=dim.alerta_pct,
+            prudencial_pct=dim.prudencial_pct,
+            teto_formatado=formatar_valor(dim.teto_pct, _FORMATO_PCT),
+            alerta_formatado=formatar_valor(dim.alerta_pct, _FORMATO_PCT),
+            prudencial_formatado=formatar_valor(dim.prudencial_pct, _FORMATO_PCT),
+            # Sem ``anexo``: ``dim_limite_legal`` não guarda o dispositivo, e escrever
+            # "LRF art. X" por indicador seria inventar citação legal com ar de rigor.
+            source_ref=SourceRef(relatorio="LRF"),
+        )
+        if dim is not None
+        else None
+    )
     return SerieHistoricaOut(
         ente=entrada.ente,
         indicador=entrada.indicador,
@@ -148,6 +214,7 @@ def executar_serie_historica(ctx: ToolContext, entrada: SerieHistoricaIn) -> Ser
         disponivel=bool(pontos),
         total=len(pontos),
         pontos=pontos,
+        limite=limite,
         as_of=entrada.as_of,
         observacao=observacao,
     )
@@ -207,10 +274,49 @@ class LimitesDoEnteOut(ToolOutput):
     disponivel: bool = False
     total: int = 0
     itens: list[LimiteFerramenta] = Field(default_factory=list)
+    #: Os limites **legais** aplicáveis ao ente, mesmo sem apuração no período. A linha de
+    #: ``gold.dim_limite_legal`` não depende de o ente ter entregue relatório: o teto do
+    #: Executivo estadual é 49% havendo ou não RGF. Sem isto, uma pergunta sobre período
+    #: sem dado levava o modelo a explicar a norma e **derivar** as faixas dela ("o
+    #: prudencial equivale a 46,55%") — número correto e sem procedência, que é o que a
+    #: regra 2.2 proíbe e ele fazia por não ter de onde copiar.
+    limites_aplicaveis: list[LimiteDaFaixa] = Field(default_factory=list)
     observacao: str | None = None
 
     def linhas(self) -> int:
-        return len(self.itens)
+        return len(self.itens) or len(self.limites_aplicaveis)
+
+
+def _limites_aplicaveis(ctx: ToolContext, ente: str) -> list[LimiteDaFaixa]:
+    """Os tetos/pisos que valem para o ente — independentes de haver apuração.
+
+    Serve à ausência com saída: quando não há número do ente, a resposta útil não é o
+    silêncio, é "não há apuração para este período, e os limites que se aplicam a você são
+    estes". De quebra, tira do modelo o motivo para derivar a faixa a partir do teto.
+    """
+    try:
+        esfera = limits_service._esfera_do_ente(ctx.session, ente)
+    except AppError:
+        return []
+    aplicaveis: list[LimiteDaFaixa] = []
+    for indicador in sorted(limits_service.SEMAFORO_INDICADORES):
+        dim = limits_service._limite_dim(ctx.session, indicador, esfera)
+        if dim is None:
+            continue
+        aplicaveis.append(
+            LimiteDaFaixa(
+                indicador=indicador,
+                sentido=dim.sentido,
+                teto_pct=dim.teto_pct,
+                alerta_pct=dim.alerta_pct,
+                prudencial_pct=dim.prudencial_pct,
+                teto_formatado=formatar_valor(dim.teto_pct, _FORMATO_PCT),
+                alerta_formatado=formatar_valor(dim.alerta_pct, _FORMATO_PCT),
+                prudencial_formatado=formatar_valor(dim.prudencial_pct, _FORMATO_PCT),
+                source_ref=SourceRef(relatorio="LRF"),
+            )
+        )
+    return aplicaveis
 
 
 def executar_limites_do_ente(ctx: ToolContext, entrada: LimitesDoEnteIn) -> LimitesDoEnteOut:
@@ -229,7 +335,11 @@ def executar_limites_do_ente(ctx: ToolContext, entrada: LimitesDoEnteIn) -> Limi
         ctx, ente=entrada.ente, periodo=entrada.periodo, as_of=entrada.as_of
     )
     if periodo is None:
-        return LimitesDoEnteOut(ente=entrada.ente, observacao=sem_entrega(entrada.ente))
+        return LimitesDoEnteOut(
+            ente=entrada.ente,
+            limites_aplicaveis=_limites_aplicaveis(ctx, entrada.ente),
+            observacao=sem_entrega(entrada.ente),
+        )
 
     resposta = limits_service.build_limites(
         ctx.session, entrada.ente, periodo, as_of=entrada.as_of
@@ -239,6 +349,7 @@ def executar_limites_do_ente(ctx: ToolContext, entrada: LimitesDoEnteIn) -> Limi
         return LimitesDoEnteOut(
             ente=entrada.ente,
             periodo=periodo,
+            limites_aplicaveis=_limites_aplicaveis(ctx, entrada.ente),
             observacao=sem_vigente(
                 entrada.ente, periodo, entrada.as_of, relatorio=RELATORIO_ANCORA
             ),
@@ -494,6 +605,22 @@ def executar_cobertura_do_ente(
     disponível — a de que o **seu** setor contábil falhou. A cobertura é medida dentro da
     carteira de quem pergunta, que é o único denominador sobre o qual ele pode agir.
     """
+    if entrada.as_of is not None:
+        # ``gold.mart_cobertura_fonte`` é um retrato corrente: a rematerialização apaga
+        # e reconstrói suas linhas. Filtrar pelo carimbo atual produziria falso histórico
+        # (e, pior, culparia o ente por uma lacuna que pode ser apenas do nosso snapshot).
+        # Até a cobertura ter armazenamento/consulta bitemporal, falhar é a única resposta
+        # honesta para um corte explícito.
+        raise AppError(
+            status=422,
+            title="Cobertura histórica indisponível",
+            detail=(
+                "A cobertura por página ainda é materializada apenas como estado atual e "
+                "não pode ser reproduzida com 'as_of'. Remova o corte para consultar a "
+                "cobertura corrente."
+            ),
+            type_="urn:plataforma-fiscal:error:cobertura-as-of-nao-suportado",
+        )
     cobertura = coverage_service.build_cobertura_pagina(
         ctx.session,
         pagina=entrada.pagina,
@@ -567,6 +694,10 @@ class CheckFerramenta(ToolOutput):
 class QualidadeDoEnteOut(ToolOutput):
     ente: str
     periodo: str | None = None
+    as_of: datetime | None = Field(
+        default=None,
+        description="Corte bitemporal efetivamente solicitado; nulo significa estado corrente.",
+    )
     total: int = 0
     checks: list[CheckFerramenta] = Field(default_factory=list)
     observacao: str | None = None
@@ -585,7 +716,9 @@ def executar_qualidade_do_ente(ctx: ToolContext, entrada: QualidadeDoEnteIn) -> 
     fatos apurados. O check continua aparecendo, com status e ``resumo`` em texto: o gestor
     precisa saber que a fonte está atrasada, e essa informação não é um valor fiscal.
     """
-    abertos = quality_service.selo_do_ente(ctx.session, entrada.ente, entrada.periodo)
+    abertos = quality_service.selo_do_ente(
+        ctx.session, entrada.ente, entrada.periodo, as_of=entrada.as_of
+    )
     checks: list[CheckFerramenta] = []
     for check in abertos:
         tem_fonte = check.source_ref is not None
@@ -608,6 +741,7 @@ def executar_qualidade_do_ente(ctx: ToolContext, entrada: QualidadeDoEnteIn) -> 
     return QualidadeDoEnteOut(
         ente=entrada.ente,
         periodo=entrada.periodo,
+        as_of=entrada.as_of,
         total=len(checks),
         checks=checks,
         observacao=(

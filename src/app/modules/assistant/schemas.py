@@ -5,15 +5,38 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.shared.source_ref import SourceRef
 
 
 # ------------------------------- Entrada -------------------------------- #
 class PerguntaRequest(BaseModel):
-    ente: str = Field(description="Código IBGE do ente (7 dígitos, ou 2 para UF).")
+    """Uma pergunta ao assistente — isolada, ou a continuação de uma conversa (IA-7).
+
+    ``ente`` deixou de ser obrigatório **apenas** quando há ``conversa_id``: numa pergunta
+    de acompanhamento ("e por que isso aconteceu?"), exigir o ente de novo obrigaria o
+    cliente a repetir o que o servidor já sabe — e era esse contrato que fazia cada
+    pergunta ser isolada por construção. Sem ``conversa_id``, nada mudou: o ente continua
+    obrigatório, e a validação falha na borda em vez de virar consulta sem alvo.
+    """
+
+    ente: str | None = Field(
+        default=None,
+        description=(
+            "Código IBGE do ente (7 dígitos, ou 2 para UF). Opcional quando há "
+            "'conversa_id': o ente é herdado do turno anterior."
+        ),
+    )
     pergunta: str = Field(min_length=3, max_length=2000)
+    conversa_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Turno anterior desta conversa (o 'conversa_id' devolvido pela resposta "
+            "anterior). Recupera o histórico e herda ente/período. O escopo é revalidado "
+            "a cada turno — conversa não é passe livre."
+        ),
+    )
     periodo: str | None = Field(
         default=None, description="Período RREO (ex.: 2024-B6). Default: última entrega vigente."
     )
@@ -28,6 +51,12 @@ class PerguntaRequest(BaseModel):
             "pergunta não nomeia indicador — 'pergunte sobre esta tela' (Sprint 25E)."
         ),
     )
+
+    @model_validator(mode="after")
+    def _exige_ente_ou_conversa(self) -> PerguntaRequest:
+        if not self.ente and self.conversa_id is None:
+            raise ValueError("Informe 'ente' ou 'conversa_id' para continuar uma conversa.")
+        return self
 
 
 class ResumoExecutivoRequest(BaseModel):
@@ -50,6 +79,14 @@ class FatoResposta(BaseModel):
     unidade: str
     status: str
     faixa: str | None = None
+    #: Os limiares que definem a faixa, já formatados em pt-BR. Estão aqui por duas razões
+    #: e as duas importam: é deste objeto que o guardrail G6 tira o lastro (ele confere os
+    #: fatos e os payloads das ferramentas, não o texto do prompt), e é ele que vai para
+    #: ``op.conversa.fatos`` — quem auditar a conversa depois vê contra qual faixa aquele
+    #: número foi lido, não só que "estava normal".
+    teto_formatado: str | None = None
+    alerta_formatado: str | None = None
+    prudencial_formatado: str | None = None
     disponivel: bool
     periodo: str
     as_of: datetime | None = None
@@ -87,6 +124,13 @@ class UsoInfo(BaseModel):
     tokens_entrada: int
     tokens_saida: int
     latencia_ms: int
+    modelo_solicitado: str | None = None
+    model_version: str | None = None
+    model_versions: list[str] = Field(default_factory=list)
+    finish_reasons: list[str] = Field(default_factory=list)
+    truncada: bool = False
+    requests_provedor: int = 0
+    max_tokens_entrada_por_request: int = 0
 
 
 class VerificacaoOut(BaseModel):
@@ -109,6 +153,12 @@ class RespostaOut(BaseModel):
     """Resposta fundamentada do assistente (perguntar ou resumo-executivo)."""
 
     conversa_id: uuid.UUID
+    thread_id: uuid.UUID | None = Field(
+        default=None, description="Fio ao qual o turno persistido pertence."
+    )
+    parent_id: uuid.UUID | None = Field(
+        default=None, description="Turno causal usado como âncora desta continuação."
+    )
     tipo: str
     ente: str
     ente_nome: str | None = None
@@ -127,8 +177,21 @@ class RespostaOut(BaseModel):
     source_refs: list[SourceRef] = Field(default_factory=list)
     verificacao: VerificacaoOut | None = Field(
         default=None,
+        description=("Verificação de saída (G6). Ausente na recusa honesta, que não cita número."),
+    )
+    turnos_no_contexto: int = Field(
+        default=0,
         description=(
-            "Verificação de saída (G6). Ausente na recusa honesta, que não cita número."
+            "Turnos anteriores que entraram no contexto desta resposta (Sprint IA-7). "
+            "Zero = pergunta isolada. Turno de ente fora do escopo atual é descartado, e "
+            "por isso este número pode ser menor que o tamanho do fio."
+        ),
+    )
+    turnos_descartados: int = Field(
+        default=0,
+        description=(
+            "Ancestrais inspecionados mas removidos porque o ente deixou o escopo ou a "
+            "licença vigente. Nunca entram no prompt nem no lastro."
         ),
     )
     gerado_em: datetime
@@ -136,6 +199,8 @@ class RespostaOut(BaseModel):
 
 class ConversaResumo(BaseModel):
     id: uuid.UUID
+    thread_id: uuid.UUID
+    parent_id: uuid.UUID | None = None
     tipo: str
     cod_ibge: str | None = None
     periodo: str | None = None
@@ -143,6 +208,9 @@ class ConversaResumo(BaseModel):
     resposta: str
     recusa: bool
     modelo: str | None = None
+    as_of: datetime | None = None
+    source_refs: list[SourceRef] = Field(default_factory=list)
+    verificacao: VerificacaoOut | None = None
     criado_em: datetime
 
 

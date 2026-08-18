@@ -17,6 +17,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from pydantic import Field
@@ -35,6 +36,7 @@ from app.modules.ingestion.models import DimEntrega
 from app.shared import tooling
 from app.shared.scope import EnteNaoLicenciadoError
 from app.shared.source_ref import SourceRef
+from app.shared.tooling import ferramentas as ferramentas_mod
 from app.shared.tooling.base import EnteToolInput, Tool, ToolContext, ToolInput, ToolOutput
 from app.shared.tooling.errors import (
     EntradaInvalidaError,
@@ -152,6 +154,82 @@ def cenario() -> Iterator[Cenario]:
                     },
                 )
             )
+    yield Cenario(ente=cod)
+    with admin_session() as s:
+        s.execute(delete(MartIndicador).where(MartIndicador.cod_ibge == cod))
+        s.execute(delete(FatoRcl).where(FatoRcl.cod_ibge == cod))
+        s.execute(delete(DimEntrega).where(DimEntrega.cod_ibge == cod))
+        s.execute(delete(DimEnte).where(DimEnte.cod_ibge == cod))
+
+
+@pytest.fixture
+def cenario_estadual() -> Iterator[Cenario]:
+    """Ente **estadual** com ``pessoal_executivo`` materializado.
+
+    Existe por causa da regra invariante nº 1 do domínio: a esfera determina o cálculo.
+    O teto do Executivo é 54% no município e 49% no estado, então um limiar escrito no
+    código passaria no cenário municipal e erraria aqui — é este par que prova que o
+    número sai de ``gold.dim_limite_legal``.
+    """
+    cod = _cod_ente()
+    with admin_session() as s:
+        s.add(
+            DimEnte(
+                cod_ibge=cod,
+                nome="Estado Ferramenta",
+                esfera="estadual",
+                uf="CE",
+                regiao="Nordeste",
+                populacao=9_000_000,
+                pib=Decimal("90000000000"),
+                rpps=True,
+                possui_tcm=False,
+            )
+        )
+        s.add(
+            DimEntrega(
+                cod_ibge=cod,
+                relatorio="RREO",
+                periodo=PERIODO,
+                versao_entrega=VERSAO_VIGENTE,
+                homologada_em=HOMOLOGADA_VIGENTE,
+                vigente=True,
+                hash_payload=f"hash-uf-{cod}",
+            )
+        )
+        s.add(
+            FatoRcl(
+                cod_ibge=cod,
+                periodo_ref=PERIODO,
+                rcl_12m=Decimal("40000000000"),
+                receita_corrente=Decimal("45000000000"),
+                deducoes=Decimal("5000000000"),
+                versao_entrega=VERSAO_VIGENTE,
+                memoria={"formula": "receita_corrente - deducoes"},
+            )
+        )
+        s.add(
+            MartIndicador(
+                cod_ibge=cod,
+                periodo=PERIODO,
+                indicador="pessoal_executivo",
+                valor_rs=Decimal("18000000000"),
+                valor_pct_rcl=Decimal("45"),
+                faixa="alerta",
+                teto_pct=Decimal("49"),
+                denominador="rcl_ajustada",
+                base_valor=Decimal("40000000000"),
+                versao_entrega=VERSAO_VIGENTE,
+                source_ref={
+                    "relatorio": "RGF",
+                    "anexo": "Anexo 01",
+                    "periodo": PERIODO,
+                    "versao_entrega": VERSAO_VIGENTE,
+                    "indicador": "pessoal_executivo",
+                    "esfera": "estadual",
+                },
+            )
+        )
     yield Cenario(ente=cod)
     with admin_session() as s:
         s.execute(delete(MartIndicador).where(MartIndicador.cod_ibge == cod))
@@ -724,6 +802,58 @@ def test_qualidade_sem_check_aberto_e_ausencia_declarada(client, make_org, cenar
     assert "atestado de exatidão" in resultado.payload["observacao"]
 
 
+def test_qualidade_do_ente_propaga_as_of_ao_selo(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Aceitar o campo no schema sem usá-lo na consulta seria bitemporalidade decorativa."""
+    corte = datetime(2088, 4, 10, 12, 0, tzinfo=UTC)
+    recebido: dict[str, object] = {}
+
+    def selo_falso(
+        session: object,
+        cod_ibge: str,
+        periodo: str | None = None,
+        *,
+        as_of: datetime | None = None,
+    ) -> list[object]:
+        recebido.update(
+            session=session, cod_ibge=cod_ibge, periodo=periodo, as_of=as_of
+        )
+        return []
+
+    monkeypatch.setattr(ferramentas_mod.quality_service, "selo_do_ente", selo_falso)
+    session_falsa = object()
+    saida = ferramentas_mod.executar_qualidade_do_ente(
+        SimpleNamespace(session=session_falsa),
+        ferramentas_mod.QualidadeDoEnteIn(
+            ente="2304400", periodo="2088-B2", as_of=corte
+        ),
+    )
+
+    assert recebido == {
+        "session": session_falsa,
+        "cod_ibge": "2304400",
+        "periodo": "2088-B2",
+        "as_of": corte,
+    }
+    assert saida.as_of == corte
+
+
+def test_cobertura_historica_falha_fechada_antes_de_consultar_o_mart() -> None:
+    """O mart corrente não pode se apresentar como fotografia bitemporal."""
+    entrada = ferramentas_mod.CoberturaDoEnteIn(
+        ente="2304400",
+        pagina="limites",
+        as_of=datetime(2088, 4, 10, 12, 0, tzinfo=UTC),
+    )
+    with pytest.raises(AppError) as exc:
+        ferramentas_mod.executar_cobertura_do_ente(
+            SimpleNamespace(session=object(), principal=None), entrada
+        )
+
+    assert exc.value.status == 422
+    assert exc.value.type.endswith("cobertura-as-of-nao-suportado")
+    assert "estado atual" in str(exc.value.detail)
+
+
 def test_registro_aceita_fonte_por_item_e_recusa_saida_sem_nenhuma() -> None:
     """A guarda de carga passou a aceitar procedência por item — e só por isso."""
 
@@ -747,3 +877,58 @@ def test_registro_aceita_fonte_por_item_e_recusa_saida_sem_nenhuma() -> None:
             _tool(nome="fonte_nenhuma", saida=_SaidaSemNada, saida_tem_numero_fiscal=True)
         )
     assert "source_ref" in str(exc.value)
+
+
+# --------------------------------------------------------------------------- #
+# 10. Sprint IA-7 — a faixa devolve o número, não só o nome
+#
+# Achado da corrida ao vivo contra o Gemini (a corrida local não podia achar: o provedor
+# determinístico nem lê o prompt). Pedido a explicar "onde o número está em relação ao
+# limite" — regra de redação nova da IA-7 —, o modelo não tinha o limiar no payload e o
+# calculava: 54% × 0,90 = 48,6% no município, 49% × 0,90 = 44,10% no estado. Conta certa,
+# número sem procedência — e o G6 acusou os quatro casos.
+#
+# A regra 2.2 do prompt passou a proibir derivar. Proibir sem fornecer tornaria a pergunta
+# irrespondível, então a ferramenta passou a declarar o limiar. Os dois testes cobrem os
+# dois lados do mesmo par: o limiar vem de `gold.dim_limite_legal` (nunca constante) e
+# muda com a esfera.
+# --------------------------------------------------------------------------- #
+def test_serie_historica_declara_os_limiares_da_faixa(client, make_org, cenario) -> None:
+    """Sem isto, `faixa='alerta'` diz que há alerta e não diz alerta a partir de quanto."""
+    org = make_org(entes=[cenario.ente])
+    payload = _invocar(
+        org, "serie_historica", {"ente": cenario.ente, "indicador": "garantias"}
+    ).payload
+
+    limite = payload["limite"]
+    # Garantias: 22% da RCL nas duas esferas (CLAUDE.md §2), com faixas em 90% e 95%.
+    assert Decimal(str(limite["teto_pct"])) == Decimal("22")
+    assert Decimal(str(limite["alerta_pct"])) == Decimal("19.8")  # 22 × 0,90
+    assert Decimal(str(limite["prudencial_pct"])) == Decimal("20.9")  # 22 × 0,95
+    # Sem o sentido, o limiar é ambíguo: em mínimo de saúde/educação ficar ABAIXO é o erro.
+    assert limite["sentido"] == "teto"
+    # Procedência própria, e não a da entrega: o teto vem da norma, não foi apurado junto
+    # com o valor. É o que o G4 exigiu quando estes campos nasceram soltos na raiz.
+    assert limite["source_ref"]["relatorio"] == "LRF"
+
+
+def test_limiar_da_serie_sai_da_dim_e_acompanha_a_esfera(
+    client, make_org, cenario_estadual
+) -> None:
+    """Controle da regra invariante nº 1: a esfera do ente é que determina o cálculo.
+
+    Um limiar constante passaria no teste acima e erraria aqui — é este par que prova que
+    o número veio de `gold.dim_limite_legal`, e não de um valor escrito no código.
+    """
+    org = make_org(entes=[cenario_estadual.ente])
+    payload = _invocar(
+        org,
+        "serie_historica",
+        {"ente": cenario_estadual.ente, "indicador": "pessoal_executivo"},
+    ).payload
+
+    # Executivo estadual: 49% (o municipal é 54%) — o teto muda, as faixas acompanham.
+    limite = payload["limite"]
+    assert Decimal(str(limite["teto_pct"])) == Decimal("49")
+    assert Decimal(str(limite["alerta_pct"])) == Decimal("44.10")
+    assert Decimal(str(limite["prudencial_pct"])) == Decimal("46.55")

@@ -26,7 +26,7 @@ import re
 import typing
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -142,6 +142,10 @@ class ToolContext:
     #: "veio do MCP" é tudo que a trilha diria, e revogar a credencial certa depois de um
     #: incidente viraria adivinhação entre os clientes externos da organização.
     origem_ref: str | None = None
+    #: IDs de auditoria produzidos durante a requisição. A lista é compartilhada com o
+    #: assistente, que só conhece o ``conversa_id`` definitivo depois de gerar e persistir
+    #: a resposta; nesse momento ele fecha o elo G7 em lote.
+    call_ids: list[uuid.UUID] = field(default_factory=list, compare=False, repr=False)
 
 
 @dataclass(frozen=True)

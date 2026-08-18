@@ -24,6 +24,7 @@ from app.modules.assistant import agente
 from app.modules.assistant.agente import (
     ChamadaPedida,
     OrcamentoAgente,
+    RespostaFerramenta,
     ResultadoLaco,
     Turno,
     executar_laco,
@@ -105,7 +106,7 @@ def test_o_texto_da_norma_e_lastro_legitimo() -> None:
 
 
 def test_aviso_declara_os_numeros_sem_lastro() -> None:
-    """"Sinalizado, não publicado em silêncio": o aviso nomeia os valores."""
+    """ "Sinalizado, não publicado em silêncio": o aviso nomeia os valores."""
     laudo = verificacao.verificar("O resultado foi de 99,99%.", {})
     aviso = laudo.aviso()
     assert aviso is not None
@@ -158,7 +159,10 @@ PAYLOAD_GARANTIAS = {
     "periodo": "2024-B6",
     "disponivel": True,
     "source_ref": {
-        "relatorio": "RGF", "anexo": "Anexo 3", "periodo": "2024-Q3", "versao_entrega": "v1"
+        "relatorio": "RGF",
+        "anexo": "Anexo 3",
+        "periodo": "2024-Q3",
+        "versao_entrega": "v1",
     },
 }
 
@@ -170,10 +174,12 @@ def executor_fixo(nome: str, argumentos: dict) -> dict:
 def test_laco_devolve_o_texto_quando_o_modelo_redige() -> None:
     motor = MotorFalso(
         [
-            Turno(chamadas=(ChamadaPedida("indicador_do_ente", {"ente": FORTALEZA}),),
-                  tokens_entrada=100, tokens_saida=20),
-            Turno(texto="As garantias somam 1,20% da RCL.", tokens_entrada=150,
-                  tokens_saida=30),
+            Turno(
+                chamadas=(ChamadaPedida("indicador_do_ente", {"ente": FORTALEZA}, "call-1"),),
+                tokens_entrada=100,
+                tokens_saida=20,
+            ),
+            Turno(texto="As garantias somam 1,20% da RCL.", tokens_entrada=150, tokens_saida=30),
         ]
     )
     resultado = executar_laco(motor, executor_fixo)
@@ -184,7 +190,9 @@ def test_laco_devolve_o_texto_quando_o_modelo_redige() -> None:
     assert resultado.payloads == [PAYLOAD_GARANTIAS]
     # A segunda volta recebeu o resultado da ferramenta pedida na primeira.
     assert motor.recebidos[0] is None
-    assert motor.recebidos[1] == [("indicador_do_ente", PAYLOAD_GARANTIAS)]
+    assert motor.recebidos[1] == [
+        RespostaFerramenta("indicador_do_ente", PAYLOAD_GARANTIAS, "call-1")
+    ]
 
 
 def test_teto_de_passos_degrada_para_parcial_declarada() -> None:
@@ -240,9 +248,7 @@ def test_parcial_sem_nenhum_dado_nao_inventa_numero() -> None:
     def executor_recusa(nome: str, argumentos: dict) -> dict:
         return {"erro": "scope-forbidden", "status": 403, "titulo": "Ente fora do escopo"}
 
-    resultado = executar_laco(
-        motor, executor_recusa, orcamento=OrcamentoAgente(max_passos=2)
-    )
+    resultado = executar_laco(motor, executor_recusa, orcamento=OrcamentoAgente(max_passos=2))
     assert resultado.parcial is True
     assert verificacao.verificar(resultado.texto, resultado.payloads).ok
 
@@ -260,9 +266,7 @@ def test_indicador_indisponivel_aparece_como_ausencia_na_parcial() -> None:
             "observacao": "não está materializado para 2024-B6",
         }
 
-    resultado = executar_laco(
-        motor, executor_ausente, orcamento=OrcamentoAgente(max_passos=2)
-    )
+    resultado = executar_laco(motor, executor_ausente, orcamento=OrcamentoAgente(max_passos=2))
     assert "dado não apurado" in resultado.texto
     assert "não está materializado" in resultado.texto
 
@@ -282,9 +286,7 @@ def test_orcamento_exige_ao_menos_um_passo() -> None:
 
 def test_resultado_do_laco_vira_llm_result_preservando_telemetria() -> None:
     """``op.conversa_uso`` continua recebendo tokens reais — a cota depende disso."""
-    resultado = ResultadoLaco(
-        texto="ok", modelo="m", tokens_entrada=11, tokens_saida=22
-    )
+    resultado = ResultadoLaco(texto="ok", modelo="m", tokens_entrada=11, tokens_saida=22)
     convertido = resultado.para_llm_result()
     assert convertido.tokens_entrada == 11 and convertido.tokens_saida == 22
     assert convertido.modelo == "m"

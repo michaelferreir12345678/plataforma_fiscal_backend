@@ -58,6 +58,18 @@ class ChamadaPedida:
 
     nome: str
     argumentos: dict[str, Any]
+    #: Identificador opaco do provedor. Modelos Gemini 3.x o usam para correlacionar cada
+    #: ``FunctionResponse`` com o ``FunctionCall`` original, sobretudo em chamadas paralelas.
+    id: str | None = None
+
+
+@dataclass(frozen=True)
+class RespostaFerramenta:
+    """Resultado de ferramenta com a correlação do pedido preservada ponta a ponta."""
+
+    nome: str
+    payload: dict[str, Any]
+    id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +83,12 @@ class Turno:
     #: Explicação de por que veio vazio, quando veio (o adaptador sabe olhar o
     #: ``finish_reason``; o laço não deve aprender a fazer isso).
     motivo_vazio: str | None = None
+    modelo_solicitado: str | None = None
+    model_version: str | None = None
+    finish_reason: str | None = None
+    truncada: bool = False
+    requests_provedor: int = 1
+    max_tokens_entrada_por_request: int = 0
 
 
 @runtime_checkable
@@ -84,7 +102,7 @@ class MotorDeTurno(Protocol):
 
     modelo: str
 
-    def gerar(self, respostas: Sequence[tuple[str, dict[str, Any]]] | None) -> Turno:
+    def gerar(self, respostas: Sequence[RespostaFerramenta] | None) -> Turno:
         """Envia o pedido inicial (``None``) ou os resultados das ferramentas pedidas."""
         ...
 
@@ -102,6 +120,12 @@ class ResultadoLaco:
     modelo: str
     tokens_entrada: int = 0
     tokens_saida: int = 0
+    modelo_solicitado: str | None = None
+    model_versions: list[str] = field(default_factory=list)
+    finish_reasons: list[str] = field(default_factory=list)
+    truncada: bool = False
+    requests_provedor: int = 0
+    max_tokens_entrada_por_request: int = 0
     #: Payloads devolvidos pelas ferramentas — o **lastro** que o G6 vai conferir.
     payloads: list[dict[str, Any]] = field(default_factory=list)
     passos: int = 0
@@ -114,6 +138,13 @@ class ResultadoLaco:
             modelo=self.modelo,
             tokens_entrada=self.tokens_entrada,
             tokens_saida=self.tokens_saida,
+            modelo_solicitado=self.modelo_solicitado or self.modelo,
+            model_version=self.model_versions[-1] if self.model_versions else None,
+            model_versions=tuple(self.model_versions),
+            finish_reasons=tuple(self.finish_reasons),
+            truncada=self.truncada,
+            requests_provedor=self.requests_provedor,
+            max_tokens_entrada_por_request=self.max_tokens_entrada_por_request,
         )
 
 
@@ -122,14 +153,26 @@ def executar_laco(
 ) -> ResultadoLaco:
     """Roda o laço até o modelo redigir, o teto estourar ou o orçamento acabar."""
     limites = orcamento or OrcamentoAgente()
-    estado = ResultadoLaco(texto="", modelo=motor.modelo)
-    respostas: list[tuple[str, dict[str, Any]]] | None = None
+    estado = ResultadoLaco(texto="", modelo=motor.modelo, modelo_solicitado=motor.modelo)
+    respostas: list[RespostaFerramenta] | None = None
 
     for passo in range(1, limites.max_passos + 1):
         turno = motor.gerar(respostas)
         estado.passos = passo
         estado.tokens_entrada += max(turno.tokens_entrada, 0)
         estado.tokens_saida += max(turno.tokens_saida, 0)
+        estado.requests_provedor += max(turno.requests_provedor, 0)
+        estado.max_tokens_entrada_por_request = max(
+            estado.max_tokens_entrada_por_request,
+            max(turno.max_tokens_entrada_por_request, turno.tokens_entrada, 0),
+        )
+        if turno.modelo_solicitado:
+            estado.modelo_solicitado = turno.modelo_solicitado
+        if turno.model_version:
+            estado.model_versions.append(turno.model_version)
+        if turno.finish_reason:
+            estado.finish_reasons.append(turno.finish_reason)
+        estado.truncada = estado.truncada or turno.truncada
 
         if not turno.chamadas:
             texto = (turno.texto or "").strip()
@@ -138,8 +181,7 @@ def executar_laco(
                 # respondido. Isso continua sendo LLMProviderError (§9), nunca uma
                 # resposta montada por nós fingindo ser dele.
                 raise LLMProviderError(
-                    detail=turno.motivo_vazio
-                    or f"O modelo {motor.modelo} retornou resposta vazia."
+                    detail=turno.motivo_vazio or f"O modelo {motor.modelo} retornou resposta vazia."
                 )
             estado.texto = texto
             return estado
@@ -147,7 +189,7 @@ def executar_laco(
         respostas = []
         for chamada in turno.chamadas:
             payload = executar(chamada.nome, dict(chamada.argumentos))
-            respostas.append((chamada.nome, payload))
+            respostas.append(RespostaFerramenta(nome=chamada.nome, payload=payload, id=chamada.id))
             estado.payloads.append(payload)
 
         gastos = estado.tokens_entrada + estado.tokens_saida
@@ -157,9 +199,7 @@ def executar_laco(
     return _degradar(estado, MOTIVO_PASSOS, limites)
 
 
-def _degradar(
-    estado: ResultadoLaco, motivo: str, limites: OrcamentoAgente
-) -> ResultadoLaco:
+def _degradar(estado: ResultadoLaco, motivo: str, limites: OrcamentoAgente) -> ResultadoLaco:
     """Compõe a resposta parcial **declarada** a partir do que já foi apurado."""
     logger.warning(
         "Laço de agente interrompido por %s (passos=%s, tokens=%s); "

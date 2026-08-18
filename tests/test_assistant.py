@@ -16,6 +16,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import delete, select
 
+from app.core.config import get_settings
 from app.core.db import admin_session
 from app.main import app
 from app.modules.assistant import retriever
@@ -48,9 +49,7 @@ class FakeProvider:
         self.calls.append(request)
         if self.fail:
             raise LLMProviderError(detail="Gemini indisponível (simulado).")
-        nums = "; ".join(
-            f"{f.rotulo}={f.valor_formatado}" for f in request.fatos if f.disponivel
-        )
+        nums = "; ".join(f"{f.rotulo}={f.valor_formatado}" for f in request.fatos if f.disponivel)
         return LLMResult(
             texto=f"[fake] Fundamentado em: {nums or 'sem dados'}.",
             modelo="fake-model",
@@ -168,12 +167,8 @@ def test_perguntar_fundamentado_com_fonte_e_registra_uso(
 
     # Uso registrado por organização (op.conversa_uso) + conversa + auditoria.
     with admin_session() as s:
-        usos = list(
-            s.scalars(select(ConversaUso).where(ConversaUso.org_id == org.org_id))
-        )
-        conversas = list(
-            s.scalars(select(Conversa).where(Conversa.org_id == org.org_id))
-        )
+        usos = list(s.scalars(select(ConversaUso).where(ConversaUso.org_id == org.org_id)))
+        conversas = list(s.scalars(select(Conversa).where(Conversa.org_id == org.org_id)))
         auditorias = list(
             s.scalars(
                 select(AuditLog.acao).where(
@@ -185,12 +180,14 @@ def test_perguntar_fundamentado_com_fonte_e_registra_uso(
     assert usos[0].modelo == "fake-model"
     assert usos[0].tokens_entrada == 42 and usos[0].tokens_saida == 7
     assert len(conversas) == 1 and conversas[0].recusa is False
+    assert conversas[0].thread_id == conversas[0].id
+    assert conversas[0].parent_id is None
+    assert conversas[0].verificacao is not None
+    assert conversas[0].verificacao["status"] in {"ok", "sinalizado"}
     assert "CONSULTA_IA" in auditorias
 
 
-def test_resumo_executivo_rastreavel(
-    client, make_org, use_fake, cenario_com_rcl: Cenario
-) -> None:
+def test_resumo_executivo_rastreavel(client, make_org, use_fake, cenario_com_rcl: Cenario) -> None:
     provider, _ = use_fake
     org = make_org(entes=[cenario_com_rcl.ente])
     headers = auth_header(login(client, org.email, org.senha))
@@ -204,8 +201,12 @@ def test_resumo_executivo_rastreavel(
     body = resp.json()
     assert body["tipo"] == "resumo_executivo"
     assert body["titulo"] == "Resumo Executivo"
-    # Modelo do resumo pediu o tier "pro" ao provedor.
-    assert provider.calls[0].modelo == "gemini-2.5-pro"
+    # O resumo pede ao provedor o modelo **configurado** para resumo. Era um literal
+    # (``gemini-2.5-pro``) e a Sprint IA-7 mostrou por que isso é uma armadilha: o literal
+    # continuou passando no teste depois de a API deixar de servir aquele modelo, enquanto
+    # todo resumo executivo terminava em 502 em produção. Um teste que fixa o valor da
+    # configuração testa a configuração, não o comportamento.
+    assert provider.calls[0].modelo == get_settings().assistant_summary_model
     codigos = {f["codigo"] for f in body["fatos"]}
     assert {"rcl", "pessoal_executivo", "divida_consolidada_liquida"} <= codigos
     assert body["source_refs"]
@@ -215,9 +216,7 @@ def test_resumo_executivo_rastreavel(
     assert body["dados_incompletos"]
 
 
-def test_recusa_honesta_quando_falta_dado(
-    client, make_org, cenario_com_rcl: Cenario
-) -> None:
+def test_recusa_honesta_quando_falta_dado(client, make_org, cenario_com_rcl: Cenario) -> None:
     """Com o provedor local REAL: o indicador ausente é sinalizado, sem inventar número.
 
     Este teste NÃO injeta o fake — usa o ``LocalGroundedProvider`` determinístico (offline),
@@ -298,9 +297,7 @@ def test_provedor_indisponivel_erro_claro_sem_resposta_inventada(
     assert conversas == [] and usos == []  # nada inventado, nada gravado
 
 
-def test_escopo_fora_da_carteira_403(
-    client, make_org, use_fake, cenario_com_rcl: Cenario
-) -> None:
+def test_escopo_fora_da_carteira_403(client, make_org, use_fake, cenario_com_rcl: Cenario) -> None:
     org = make_org(entes=[])  # carteira vazia: ente não está no escopo
     headers = auth_header(login(client, org.email, org.senha))
     resp = client.post(
@@ -311,9 +308,7 @@ def test_escopo_fora_da_carteira_403(
     assert resp.status_code == 403, resp.text
 
 
-def test_sem_capacidade_usar_ia_403(
-    client, make_org, use_fake, cenario_com_rcl: Cenario
-) -> None:
+def test_sem_capacidade_usar_ia_403(client, make_org, use_fake, cenario_com_rcl: Cenario) -> None:
     org = make_org(entes=[cenario_com_rcl.ente], capacidades=["ver", "exportar"])
     headers = auth_header(login(client, org.email, org.senha))
     resp = client.post(

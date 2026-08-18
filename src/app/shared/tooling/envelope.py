@@ -107,7 +107,9 @@ def invoke(
         registro.duracao_ms = int((time.perf_counter() - inicio) * 1000)
         _preencher_erro(registro, exc)
         # A auditoria não pode mascarar o erro que ela está auditando.
-        _auditar(ctx, registro, tolerar_falha=True)
+        call_id = _auditar(ctx, registro, tolerar_falha=True)
+        if call_id is not None:
+            ctx.call_ids.append(call_id)
         raise
     registro.duracao_ms = int((time.perf_counter() - inicio) * 1000)
     registro.status = STATUS_OK
@@ -116,6 +118,8 @@ def invoke(
     # No caminho de sucesso a auditoria é condição de entrega: um número fundamentado que
     # ninguém consegue rastrear depois vale menos que um erro honesto.
     call_id = _auditar(ctx, registro, tolerar_falha=False)
+    if call_id is not None:
+        ctx.call_ids.append(call_id)
     return ToolCallResult(
         ferramenta=resultado.ferramenta,
         saida=resultado.saida,

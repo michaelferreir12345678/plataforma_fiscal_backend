@@ -172,6 +172,41 @@ def test_a_falha_da_entrega_vigente_continua_selando_a_pagina(ente_de_teste) -> 
     assert itens[0].status == "falha"
 
 
+def test_selo_as_of_elege_o_ultimo_veredito_ate_o_corte(ente_de_teste) -> None:
+    """Uma correção posterior não reescreve o selo que existia na fotografia antiga."""
+    _gravar_check(ente_de_teste, versao="v1", status="falha")
+    _gravar_check(ente_de_teste, versao="v2", status="ok")
+    instante_v1 = datetime(2087, 1, 10, 10, 0, tzinfo=UTC)
+    corte = datetime(2087, 2, 1, 0, 0, tzinfo=UTC)
+    instante_v2 = datetime(2087, 3, 10, 10, 0, tzinfo=UTC)
+    with admin_session() as s:
+        s.execute(
+            update(DataQualityCheck)
+            .where(
+                DataQualityCheck.cod_ibge == ente_de_teste,
+                DataQualityCheck.versao_entrega == "v1",
+            )
+            .values(executado_em=instante_v1)
+        )
+        s.execute(
+            update(DataQualityCheck)
+            .where(
+                DataQualityCheck.cod_ibge == ente_de_teste,
+                DataQualityCheck.versao_entrega == "v2",
+            )
+            .values(executado_em=instante_v2)
+        )
+
+    with admin_session() as s:
+        no_corte = quality_service.selo_do_ente(
+            s, ente_de_teste, PERIODO, as_of=corte
+        )
+        corrente = quality_service.selo_do_ente(s, ente_de_teste, PERIODO)
+
+    assert [(item.versao_entrega, item.status) for item in no_corte] == [("v1", "falha")]
+    assert corrente == [], "o veredito v2 corrigiu a falha apenas depois da fotografia"
+
+
 def test_check_sem_entrega_nao_inventa_source_ref(ente_de_teste) -> None:
     """Atualidade mede a **ausência** da entrega; carimbar uma fonte ali seria mentira."""
     _gravar_check(ente_de_teste, versao=quality_service.SEM_VERSAO, status="aviso")

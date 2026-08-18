@@ -20,10 +20,13 @@ import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from app.core.config import Settings, get_settings
 from app.core.errors import AppError
+
+if TYPE_CHECKING:
+    from app.modules.assistant.agente import RespostaFerramenta
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +79,15 @@ class FatoContexto:
     source_ref: dict
     as_of: str | None = None
     faixa: str | None = None
+    #: O limiar que dá sentido ao rótulo da faixa, já formatado em pt-BR. Dizer
+    #: ``faixa="normal"`` sem dizer *normal até quanto* é frase incompleta — e a redação
+    #: da IA-7 manda explicar a posição em relação ao limite. Sem estes campos o modelo
+    #: calculava a faixa do teto (54% × 0,90 = 48,6%): conta certa, número sem fonte.
+    #: Formatado porque o modelo, recebendo ``Decimal`` cru, escrevia "48.60%" com ponto —
+    #: separador de milhar em português — e a verificação o lia como número diferente.
+    teto_formatado: str | None = None
+    alerta_formatado: str | None = None
+    prudencial_formatado: str | None = None
     valor: str | None = None
     memoria: dict = field(default_factory=dict)
 
@@ -136,6 +148,30 @@ class NotaContexto:
 
 
 @dataclass(frozen=True)
+class TurnoContexto:
+    """Um turno **anterior** da mesma conversa (Sprint IA-7).
+
+    Existe para que "e por que isso aconteceu?" seja uma pergunta respondível: sem o turno
+    anterior, ela não tem sujeito. Vem de ``op.conversa``, que já persistia tudo — o que
+    faltava era a entrada aceitar ``conversa_id``.
+
+    Três cuidados que a forma do dado carrega:
+
+    - o texto é o que **foi entregue ao gestor** (já com o aviso do G6, se houve), e não
+      uma reconstrução: o modelo continua a conversa que existiu, não uma versão limpa;
+    - ``ente``/``periodo`` viajam junto porque é deles que a herança de contexto sai;
+    - o histórico **não é lastro** para número novo. Ele é conversa; o valor que a resposta
+      reafirmar tem de estar no contexto atual (ou nos fatos daquele turno, que a
+      plataforma guardou com ``source_ref`` — texto de modelo, nunca).
+    """
+
+    pergunta: str
+    resposta: str
+    ente: str | None = None
+    periodo: str | None = None
+
+
+@dataclass(frozen=True)
 class LLMRequest:
     """Requisição fundamentada enviada à porta — contexto estruturado, não texto solto."""
 
@@ -145,6 +181,8 @@ class LLMRequest:
     periodo: str | None = None
     fatos: tuple[FatoContexto, ...] = ()
     normas: tuple[NormaContexto, ...] = ()
+    #: Turnos anteriores desta conversa, do mais antigo ao mais novo (Sprint IA-7).
+    historico: tuple[TurnoContexto, ...] = ()
     #: Contexto textual já apurado (linhagem, providência, cobertura, prazo) — Sprint IA-5.
     notas: tuple[NotaContexto, ...] = ()
     #: Definições do dicionário semântico (Sprint IA-2). Deliberadamente **não** contam
@@ -152,12 +190,28 @@ class LLMRequest:
     #: quanto ele vale. A recusa honesta da §9 continua decidida por fato + norma.
     verbetes: tuple[VerbeteContexto, ...] = ()
     modelo: str | None = None
-    temperatura: float = 0.2
     #: Teto de saída. Precisa acomodar o **raciocínio** dos modelos 3.x, que sai do mesmo
     #: orçamento: o ``gemini-3.5-flash`` gasta ~250 tokens pensando antes da primeira
     #: palavra, e um teto apertado devolveria resposta vazia com o modelo saudável. É um
     #: limite, não um gasto — elevar não encarece quem responde curto.
-    max_tokens: int | None = 2048
+    #:
+    #: **Medido na IA-7, e por isso subiu de 2048 para 6144.** Uma pergunta simples ("qual
+    #: é a RCL?"), sem ferramentas, consumiu 1.443 tokens de raciocínio + 553 de resposta =
+    #: 1.996 — 97% do teto anterior. Com *function calling* e uma resposta didática, o
+    #: estouro deixava de ser risco e virava rotina: o modelo terminava em ``MAX_TOKENS`` e
+    #: a plataforma entregava, **em silêncio**, um texto cortado no meio da frase (foi o que
+    #: se encontrou nas conversas reais de produção). O ``finish_reason`` agora é lido e o
+    #: corte é declarado ao gestor — mas a primeira correção é caber.
+    #:
+    #: **Segunda medição (IA-7, primeira corrida paga contra o `gemini-3.5-flash`):** o
+    #: conjunto dourado gastou p50 2.901, p90 4.725 e máximo 5.803 tokens de saída — 94%
+    #: do teto de 6.144. Nenhuma pergunta do conjunto truncou; três respostas adversárias
+    #: (pedido de parecer, que produz texto longo) truncaram. 94% de ocupação não é folga,
+    #: é coincidência: com a prosa didática desta sprint, o pior caso do conjunto virou o
+    #: caso comum de uma pergunta de análise. Daí 12.288 — cerca do dobro do máximo
+    #: medido, na mesma proporção com que 6.144 sucedeu o teto anterior. O teto não custa
+    #: nada por si: cobra-se o token gerado, não o reservado.
+    max_tokens: int | None = 12288
 
 
 @dataclass(frozen=True)
@@ -168,6 +222,17 @@ class LLMResult:
     modelo: str
     tokens_entrada: int
     tokens_saida: int
+    #: Alias enviado ao provedor e revisão realmente declarada pela resposta são coisas
+    #: diferentes. Manter ambas evita chamar o alias configurado de "modelo efetivo".
+    modelo_solicitado: str | None = None
+    model_version: str | None = None
+    model_versions: tuple[str, ...] = ()
+    finish_reasons: tuple[str, ...] = ()
+    truncada: bool = False
+    #: Uma resposta com function calling pode consumir vários requests pagos.
+    requests_provedor: int = 1
+    #: Necessário para validar faixas de preço que mudam por tamanho de cada prompt.
+    max_tokens_entrada_por_request: int = 0
 
 
 @runtime_checkable
@@ -295,10 +360,15 @@ def _fmt_source(ref: dict) -> str:
 def montar_prompt(request: LLMRequest, *, com_ferramentas: bool = False) -> str:
     """Contexto + pergunta + as instruções que repetem os guardrails no corpo do pedido."""
     instrucoes = (
-        "Responda em português, de forma objetiva e fundamentada. Cite a fonte de "
-        "cada número (relatório/anexo/período/versão). Distinga o que é 'calculado "
-        "dos dados do ente' do que é 'explicação geral da norma'. Se um dado não foi "
-        "fornecido acima, diga que não está disponível — não estime nem invente."
+        "Responda em português, para um gestor público que pode não ser da área "
+        "financeira. Diga primeiro o que o indicador significa, depois o número, depois o "
+        "que ele implica na prática e o que se pode fazer. Expanda cada sigla na primeira "
+        "vez que usá-la. Cite a fonte de cada número (relatório/anexo/período/versão) como "
+        "procedência, junto do valor. Distinga o que é 'calculado dos dados do ente' do "
+        "que é 'explicação geral da norma'. Se um dado não foi fornecido acima, diga que "
+        "não está disponível — não estime nem invente. Copie cada valor calculado exatamente "
+        "como fornecido, apenas uma vez: não arredonde, não abrevie e não o converta para "
+        "milhares, milhões ou bilhões."
     )
     if com_ferramentas:
         instrucoes += (
@@ -307,11 +377,79 @@ def montar_prompt(request: LLMRequest, *, com_ferramentas: bool = False) -> str:
             "no contexto acima. Nunca invente o valor que a ferramenta não devolveu: se "
             "ela responder 'disponivel: false', diga que o dado não foi apurado."
         )
+    if request.historico:
+        instrucoes += (
+            "\nEsta é a continuação de uma conversa: a pergunta pode se referir ao que já "
+            "foi dito ('e por que isso aconteceu?', 'e no ano anterior?'). Entenda-a no "
+            "contexto dos turnos acima e NÃO peça ao gestor que repita o ente ou o "
+            "período. Números citados nos turnos anteriores não podem ser reafirmados de "
+            "memória: use os indicadores desta consulta e, se o valor não estiver aqui, "
+            "diga que precisaria consultá-lo de novo."
+        )
     return (
+        f"{render_historico(request)}"
         f"{render_grounding(request)}\n\n"
         f"PERGUNTA DO GESTOR:\n{request.pergunta}\n\n"
         f"{instrucoes}"
     )
+
+
+def render_historico(request: LLMRequest) -> str:
+    """Serializa os turnos anteriores. Vazio ⇒ string vazia (pergunta isolada, como antes).
+
+    Vem **antes** do contexto fundamentado de propósito: o modelo lê a conversa, depois lê
+    os números vigentes, e o último bloco que ele vê antes da pergunta é o dado com fonte.
+    """
+    if not request.historico:
+        return ""
+    linhas = [
+        "CONVERSA ATÉ AQUI (turnos anteriores desta mesma conversa, do mais antigo ao mais "
+        "recente — use para entender a pergunta, não como fonte de número):"
+    ]
+    for indice, turno in enumerate(request.historico, start=1):
+        alvo = " · ".join(p for p in (turno.ente, turno.periodo) if p)
+        cabecalho = f"[turno {indice}{' — ' + alvo if alvo else ''}]"
+        linhas.append(f"{cabecalho} Gestor perguntou: {turno.pergunta}")
+        linhas.append(f"{cabecalho} Você respondeu: {turno.resposta}")
+    return "\n".join(linhas) + "\n\n"
+
+
+def _limiares_declarados(fato: FatoContexto) -> list[tuple[str, str]]:
+    return [
+        (rotulo, valor)
+        for rotulo, valor in (
+            ("alerta a partir de", fato.alerta_formatado),
+            ("prudencial", fato.prudencial_formatado),
+            ("teto", fato.teto_formatado),
+        )
+        if valor
+    ]
+
+
+def _fmt_limite_legal(fato: FatoContexto) -> str:
+    """Os limiares de um indicador **sem valor apurado** — a norma vale mesmo sem entrega."""
+    limiares = _limiares_declarados(fato)
+    if not limiares:
+        return ""
+    detalhe = ", ".join(f"{rotulo} {valor}" for rotulo, valor in limiares)
+    return f" — limite legal aplicável: {detalhe}"
+
+
+def _fmt_faixa(fato: FatoContexto) -> str:
+    """Rótulo da faixa **com os números que a definem**.
+
+    ``[normal]`` sozinho diz que está normal e não diz normal até quanto — e era essa
+    lacuna que o modelo preenchia calculando a faixa a partir do teto (54% × 0,90 = 48,6%).
+    Guardar o limiar no objeto sem escrevê-lo aqui não resolveria nada: o modelo só vê o
+    que o render produz.
+    """
+    if not fato.faixa:
+        return ""
+    limiares = _limiares_declarados(fato)
+    if not limiares:
+        return f" [{fato.faixa}]"
+    detalhe = ", ".join(f"{rotulo} {valor}" for rotulo, valor in limiares)
+    return f" [{fato.faixa}: {detalhe}]"
 
 
 def render_grounding(request: LLMRequest) -> str:
@@ -327,15 +465,18 @@ def render_grounding(request: LLMRequest) -> str:
     if disponiveis:
         linhas.append("\nINDICADORES CALCULADOS DOS DADOS DO ENTE (use apenas estes números):")
         for fato in disponiveis:
-            faixa = f" [{fato.faixa}]" if fato.faixa else ""
             linhas.append(
-                f"- {fato.rotulo}: {fato.valor_formatado}{faixa} "
+                f"- {fato.rotulo}: {fato.valor_formatado}{_fmt_faixa(fato)} "
                 f"(fonte: {_fmt_source(fato.source_ref)})"
             )
     if indisponiveis:
         linhas.append("\nSEM DADO MATERIALIZADO (NÃO afirme valores — sinalize a ausência):")
         for fato in indisponiveis:
-            linhas.append(f"- {fato.rotulo} ({fato.periodo})")
+            # O limite legal aplicável vai junto, e é deliberado: sem ele o modelo explica
+            # a norma e **calcula** a faixa a partir do teto, que é o número sem fonte que
+            # mais apareceu na avaliação. Com ele, a ausência ganha saída — "não há o seu
+            # número, e o limite que se aplica a você é este".
+            linhas.append(f"- {fato.rotulo} ({fato.periodo}){_fmt_limite_legal(fato)}")
     if request.verbetes:
         linhas.append(
             "\nDICIONÁRIO DA PLATAFORMA (definições oficiais — prevalecem sobre "
@@ -344,9 +485,7 @@ def render_grounding(request: LLMRequest) -> str:
         for verbete in request.verbetes:
             linhas.extend(_linhas_do_verbete(verbete))
     if request.notas:
-        linhas.append(
-            "\nAPURADO PELA PLATAFORMA (use como está — não complete nem reordene):"
-        )
+        linhas.append("\nAPURADO PELA PLATAFORMA (use como está — não complete nem reordene):")
         for nota in request.notas:
             origem = f" [via {nota.origem}]" if nota.origem else ""
             linhas.append(f"- {nota.titulo}{origem}:")
@@ -367,9 +506,7 @@ def _linhas_do_verbete(verbete: VerbeteContexto) -> list[str]:
         f"  Fórmula: {verbete.formula}",
     ]
     if verbete.denominador:
-        linhas.append(
-            f"  Denominador ({verbete.denominador}): {verbete.denominador_definicao}"
-        )
+        linhas.append(f"  Denominador ({verbete.denominador}): {verbete.denominador_definicao}")
     else:
         linhas.append(f"  Observação: {verbete.denominador_definicao}")
     linhas.append(f"  Sentido: {verbete.sentido}. Base legal: {verbete.base_legal}")
@@ -392,22 +529,59 @@ class LocalGroundedProvider:
     Não é um LLM: costura os fatos calculados e os dispositivos normativos numa resposta
     legível, citando a fonte de cada número. Como só reutiliza valores já presentes no
     contexto, respeita por construção o guardrail "nenhum número sem fonte".
+
+    **Ordem didática (Sprint IA-7).** A definição do indicador vem **antes** do valor, e as
+    siglas são expandidas na primeira ocorrência. Não é enfeite: é o mesmo texto extrativo,
+    montado na ordem em que se ensina ("o que é → quanto é → o que significa → o que
+    fazer"). Vale a pena aqui, e não só no Gemini, porque este é o provedor com que a
+    avaliação da IA-6 roda — se a régua de legibilidade só medisse um provedor que a suíte
+    não executa, ela não mediria nada.
     """
 
     name = "local-grounded"
 
     def chat(self, request: LLMRequest) -> LLMResult:
-        from app.modules.assistant import vectors
+        from app.modules.assistant import didatica, vectors
 
         disponiveis = [f for f in request.fatos if f.disponivel]
         indisponiveis = [f for f in request.fatos if not f.disponivel]
         blocos: list[str] = []
 
+        if request.historico:
+            ultimo = request.historico[-1]
+            blocos.append(
+                "Continuando a conversa (o turno anterior tratou de: "
+                f"{ultimo.pergunta.strip()}):"
+            )
+
+        if request.verbetes:
+            # Extrativo como o resto do provedor: as definições saem do dicionário da
+            # plataforma, não de conhecimento do adaptador — que não tem nenhum. Vêm
+            # primeiro porque quem lê precisa saber o que é o indicador antes de saber
+            # quanto ele deu.
+            blocos.append(
+                "O que estes indicadores medem (definições oficiais da plataforma, "
+                "dicionário semântico):"
+            )
+            for verbete in request.verbetes:
+                blocos.append(f"• {verbete.rotulo} ({verbete.codigo}): {verbete.definicao}")
+                blocos.append(f"  Fórmula: {verbete.formula}")
+                if verbete.denominador:
+                    blocos.append(
+                        f"  Denominador — {verbete.denominador}: "
+                        f"{verbete.denominador_definicao}"
+                    )
+                blocos.append(f"  Base legal: {verbete.base_legal}")
+                if verbete.armadilha:
+                    blocos.append(f"  Atenção: {verbete.armadilha}")
+
         if disponiveis:
             alvo = request.ente_label or "o ente"
             periodo = f" no período {request.periodo}" if request.periodo else ""
             blocos.append(
-                f"Com base nos indicadores já calculados dos dados de {alvo}{periodo}:"
+                f"Os valores a seguir são de {alvo}{periodo} e foram apurados pela "
+                "plataforma a partir das entregas oficiais do ente; cada um vem com a "
+                "fonte que o sustenta:"
             )
             for fato in disponiveis:
                 nota = f" — situação: {fato.faixa}" if fato.faixa else ""
@@ -423,22 +597,6 @@ class LocalGroundedProvider:
                 f"{rotulos}. Não é possível afirmar esses valores para o período informado — "
                 "recomenda-se verificar a entrega/retificação no SICONFI."
             )
-
-        if request.verbetes:
-            # Extrativo como o resto do provedor: as definições saem do dicionário da
-            # plataforma, não de conhecimento do adaptador — que não tem nenhum.
-            blocos.append("Definições da plataforma (dicionário semântico):")
-            for verbete in request.verbetes:
-                blocos.append(f"• {verbete.rotulo} ({verbete.codigo}): {verbete.definicao}")
-                blocos.append(f"  Fórmula: {verbete.formula}")
-                if verbete.denominador:
-                    blocos.append(
-                        f"  Denominador — {verbete.denominador}: "
-                        f"{verbete.denominador_definicao}"
-                    )
-                blocos.append(f"  Base legal: {verbete.base_legal}")
-                if verbete.armadilha:
-                    blocos.append(f"  Atenção: {verbete.armadilha}")
 
         if request.notas:
             # Sprint IA-5: linhagem, providência, cobertura e prazo já vêm apurados das
@@ -465,19 +623,84 @@ class LocalGroundedProvider:
             "Esta resposta é informativa e fundamentada apenas nas fontes citadas; "
             "não constitui parecer jurídico ou contábil definitivo."
         )
-        texto = "\n".join(blocos)
+        # Expandir sigla é reescrever com a tabela do domínio — não acrescenta informação,
+        # não toca em número, e é o que separa um texto legível de um texto para iniciado.
+        texto = didatica.expandir_siglas("\n".join(blocos))
         entrada = vectors.approx_tokens(
-            request.system + request.pergunta + render_grounding(request)
+            request.system
+            + request.pergunta
+            + render_historico(request)
+            + render_grounding(request)
         )
         saida = vectors.approx_tokens(texto)
         return LLMResult(
-            texto=texto, modelo=self.name, tokens_entrada=entrada, tokens_saida=saida
+            texto=texto,
+            modelo=self.name,
+            tokens_entrada=entrada,
+            tokens_saida=saida,
+            modelo_solicitado=self.name,
+            model_version=self.name,
+            model_versions=(self.name,),
+            finish_reasons=("LOCAL_COMPLETE",),
+            requests_provedor=1,
+            max_tokens_entrada_por_request=entrada,
         )
 
 
 # --------------------------------------------------------------------------- #
 # Adaptador Google Gemini (SDK google-genai importado preguiçosamente).
 # --------------------------------------------------------------------------- #
+#: Declaração de corte. Uma resposta truncada não pode chegar ao gestor parecendo
+#: completa: ele leria uma frase interrompida como se fosse a conclusão da análise — e,
+#: pior, poderia ler a explicação sem nunca chegar ao número, que costuma vir depois dela
+#: na ordem didática. Sinalizar é a mesma política do G6: nunca publicar em silêncio.
+AVISO_TRUNCADA = (
+    "⚠️ Resposta interrompida: o modelo atingiu o limite de tokens de saída antes de "
+    "concluir o texto. O que está acima veio das fontes citadas e continua válido, mas a "
+    "resposta está incompleta — refaça a pergunta de forma mais específica (um indicador "
+    "por vez) para obter a análise inteira."
+)
+
+
+def foi_truncada(response: object) -> bool:
+    """O provedor parou por limite de saída? (``finish_reason == MAX_TOKENS``)
+
+    Função pura sobre o objeto do SDK para ser testável com um dublê: a alternativa seria
+    inspecionar ``finish_reason`` no meio da chamada de rede, que é onde nenhum teste
+    chega.
+    """
+    candidatos = getattr(response, "candidates", None) or []
+    if not candidatos:
+        return False
+    return "MAX_TOKENS" in str(getattr(candidatos[0], "finish_reason", "") or "").upper()
+
+
+def finish_reason_de(response: object) -> str | None:
+    """Valor auditável do SDK, sem acoplar o domínio ao enum do ``google-genai``."""
+    candidatos = getattr(response, "candidates", None) or []
+    if not candidatos:
+        return None
+    bruto = getattr(candidatos[0], "finish_reason", None)
+    if bruto is None:
+        return None
+    nome = getattr(bruto, "name", None)
+    return str(nome or bruto)
+
+
+def model_version_de(response: object) -> str | None:
+    """Revisão que o backend afirma ter usado; nunca cai silenciosamente no alias pedido."""
+    bruto = getattr(response, "model_version", None)
+    texto = str(bruto or "").strip()
+    return texto or None
+
+
+def declarar_corte(texto: str, response: object) -> str:
+    """Anexa o aviso de truncamento quando houve corte. Texto vazio segue vazio."""
+    if not texto or not foi_truncada(response):
+        return texto
+    return f"{texto}\n\n{AVISO_TRUNCADA}"
+
+
 def _motivo_resposta_vazia(response: object, usage: object, modelo: str) -> str:
     """Explica **por que** veio vazio, em vez de só constatar que veio.
 
@@ -539,6 +762,7 @@ class GeminiProvider:
         chat_model: str,
         summary_model: str,
         timeout_s: float,
+        temperatura: float,
         fallback_models: Sequence[str] = (),
     ) -> None:
         self._api_key = api_key
@@ -546,6 +770,7 @@ class GeminiProvider:
         self._summary_model = summary_model
         self._fallback_models = tuple(fallback_models)
         self._timeout_ms = int(timeout_s * 1000)
+        self._temperatura = temperatura
         self._client: object | None = None
 
     def _modelos_a_tentar(self, pedido: str | None) -> list[str]:
@@ -583,8 +808,8 @@ class GeminiProvider:
 
         config = types.GenerateContentConfig(
             system_instruction=request.system,
-            temperature=request.temperatura,
             max_output_tokens=request.max_tokens,
+            temperature=self._temperatura,
             http_options=types.HttpOptions(timeout=self._timeout_ms),
         )
         ultimo: Exception | None = None
@@ -609,11 +834,22 @@ class GeminiProvider:
             texto = (getattr(response, "text", None) or "").strip()
             if not texto:
                 raise LLMProviderError(detail=_motivo_resposta_vazia(response, usage, modelo))
+            tokens_entrada = int(getattr(usage, "prompt_token_count", 0) or 0)
+            model_version = model_version_de(response)
+            finish_reason = finish_reason_de(response)
             return LLMResult(
-                texto=texto,
+                texto=declarar_corte(texto, response),
                 modelo=modelo,
-                tokens_entrada=int(getattr(usage, "prompt_token_count", 0) or 0),
-                tokens_saida=int(getattr(usage, "candidates_token_count", 0) or 0),
+                tokens_entrada=tokens_entrada,
+                tokens_saida=int(getattr(usage, "candidates_token_count", 0) or 0)
+                + int(getattr(usage, "thoughts_token_count", 0) or 0),
+                modelo_solicitado=modelo,
+                model_version=model_version,
+                model_versions=(model_version,) if model_version else (),
+                finish_reasons=(finish_reason,) if finish_reason else (),
+                truncada=foi_truncada(response),
+                requests_provedor=1,
+                max_tokens_entrada_por_request=tokens_entrada,
             )
         raise LLMProviderError(detail=f"Falha na chamada ao Gemini: {ultimo}")
 
@@ -695,23 +931,21 @@ class _MotorGemini:
             ]
             self._config = types.GenerateContentConfig(
                 system_instruction=self._request.system,
-                temperature=self._request.temperatura,
                 max_output_tokens=self._request.max_tokens,
+                temperature=self._provider._temperatura,
                 tools=[types.Tool(function_declarations=declaracoes)],
                 http_options=types.HttpOptions(timeout=self._provider._timeout_ms),
             )
             self._conteudos = [
                 types.Content(
                     role="user",
-                    parts=[
-                        types.Part(text=montar_prompt(self._request, com_ferramentas=True))
-                    ],
+                    parts=[types.Part(text=montar_prompt(self._request, com_ferramentas=True))],
                 )
             ]
         return types
 
     def gerar(  # pragma: no cover - requer rede/credencial
-        self, respostas: Sequence[tuple[str, dict]] | None
+        self, respostas: Sequence[RespostaFerramenta] | None
     ) -> Any:
         from app.modules.assistant.agente import ChamadaPedida, Turno
 
@@ -725,8 +959,14 @@ class _MotorGemini:
                 types.Content(
                     role="user",
                     parts=[
-                        types.Part.from_function_response(name=nome, response=payload)
-                        for nome, payload in respostas
+                        types.Part(
+                            function_response=types.FunctionResponse(
+                                id=resposta.id,
+                                name=resposta.nome,
+                                response=resposta.payload,
+                            )
+                        )
+                        for resposta in respostas
                     ],
                 )
             )
@@ -745,14 +985,28 @@ class _MotorGemini:
             candidatos = getattr(response, "candidates", None) or []
             if candidatos and getattr(candidatos[0], "content", None) is not None:
                 self._conteudos.append(candidatos[0].content)
+        tokens_entrada = int(getattr(usage, "prompt_token_count", 0) or 0)
+        model_version = model_version_de(response)
         return Turno(
-            texto=(getattr(response, "text", None) or "").strip() or None,
+            texto=declarar_corte((getattr(response, "text", None) or "").strip(), response) or None,
             chamadas=tuple(
-                ChamadaPedida(nome=c.name, argumentos=dict(c.args or {})) for c in chamadas
+                ChamadaPedida(
+                    nome=c.name,
+                    argumentos=dict(c.args or {}),
+                    id=getattr(c, "id", None) or None,
+                )
+                for c in chamadas
             ),
-            tokens_entrada=int(getattr(usage, "prompt_token_count", 0) or 0),
-            tokens_saida=int(getattr(usage, "candidates_token_count", 0) or 0),
+            tokens_entrada=tokens_entrada,
+            tokens_saida=int(getattr(usage, "candidates_token_count", 0) or 0)
+            + int(getattr(usage, "thoughts_token_count", 0) or 0),
             motivo_vazio=_motivo_resposta_vazia(response, usage, self.modelo),
+            modelo_solicitado=self.modelo,
+            model_version=model_version,
+            finish_reason=finish_reason_de(response),
+            truncada=foi_truncada(response),
+            requests_provedor=1,
+            max_tokens_entrada_por_request=tokens_entrada,
         )
 
 
@@ -768,6 +1022,7 @@ def build_provider(settings: Settings) -> LLMProvider:
             chat_model=settings.assistant_chat_model,
             summary_model=settings.assistant_summary_model,
             timeout_s=settings.assistant_request_timeout_s,
+            temperatura=settings.assistant_temperatura,
             fallback_models=settings.assistant_chat_fallback_models,
         )
     return LocalGroundedProvider()

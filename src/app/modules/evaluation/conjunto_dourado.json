@@ -19,6 +19,25 @@
       "saida_usd_por_milhao": 10.00,
       "fonte": "tabela publica do Google AI (CONFERIR na troca de modelo: preco e entrada declarada, nao medicao)",
       "declarado_em": "2026-08-14"
+    },
+    "gemini-3.5-flash": {
+      "entrada_usd_por_milhao": 1.50,
+      "saida_usd_por_milhao": 9.00,
+      "fonte": "https://ai.google.dev/gemini-api/docs/pricing — Paid Tier Standard; saida inclui thinking tokens",
+      "declarado_em": "2026-08-15"
+    },
+    "gemini-3.6-flash": {
+      "entrada_usd_por_milhao": 1.50,
+      "saida_usd_por_milhao": 7.50,
+      "fonte": "https://ai.google.dev/gemini-api/docs/pricing — Paid Tier Standard; saida inclui thinking tokens",
+      "declarado_em": "2026-08-15"
+    },
+    "gemini-3.1-pro-preview": {
+      "entrada_usd_por_milhao": 2.00,
+      "saida_usd_por_milhao": 12.00,
+      "fonte": "https://ai.google.dev/gemini-api/docs/pricing — Paid Tier Standard para prompts <= 200.000 tokens; saida inclui thinking tokens",
+      "declarado_em": "2026-08-15",
+      "max_tokens_entrada_por_request": 200000
     }
   },
   "perguntas": [

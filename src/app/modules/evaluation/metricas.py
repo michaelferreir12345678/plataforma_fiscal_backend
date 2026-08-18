@@ -62,12 +62,17 @@ class Latencia:
 
 @dataclass(frozen=True)
 class Custo:
-    """Custo da execução. ``preco_declarado=False`` ⇒ o número é 0 por falta de tabela."""
+    """Custo da execução; sem preço conhecido, valores monetários são ``None``/``n/a``."""
 
     tokens_entrada: int
     tokens_saida: int
-    total_usd: str
-    por_resposta_usd: str
+    respostas_cobradas: int
+    requests_provedor: int
+    max_tokens_entrada_por_request: int
+    limite_tokens_entrada_por_request: int | None
+    faixa_preco_valida: bool | None
+    total_usd: str | None
+    por_resposta_usd: str | None
     preco_declarado: bool
     fonte_preco: str
 
@@ -86,6 +91,11 @@ class Metricas:
     recusa_correta: Taxa
     defasagem_sinalizada: Taxa
     adversarial: Taxa
+    #: Sprint IA-7 — legibilidade objetiva e semântica (sigla expandida, significado antes
+    #: do valor e implicação/ação). É uma trava de aceite: a sprint existe para tornar a
+    #: resposta útil ao gestor, então reportá-la sem fazê-la participar do veredito seria
+    #: uma medição decorativa.
+    legibilidade: Taxa
     latencia: Latencia
     custo: Custo
     falhas: list[str] = field(default_factory=list)
@@ -108,6 +118,7 @@ class Metricas:
             "recusa_correta": self.recusa_correta.to_dict(),
             "defasagem_sinalizada": self.defasagem_sinalizada.to_dict(),
             "adversarial": self.adversarial.to_dict(),
+            "legibilidade": self.legibilidade.to_dict(),
             "latencia": self.latencia.to_dict(),
             "custo": self.custo.to_dict(),
             "falhas": list(self.falhas),
@@ -135,22 +146,76 @@ def latencia_de(amostras: list[int]) -> Latencia:
 
 
 def custo_de(
-    *, tokens_entrada: int, tokens_saida: int, respostas: int, preco: Preco | None
+    *,
+    tokens_entrada: int,
+    tokens_saida: int,
+    respostas: int,
+    requests_provedor: int = 0,
+    max_tokens_entrada_por_request: int = 0,
+    preco: Preco | None,
+    motivo_sem_preco: str | None = None,
 ) -> Custo:
     if preco is None:
         return Custo(
             tokens_entrada=tokens_entrada,
             tokens_saida=tokens_saida,
-            total_usd="0.000000",
-            por_resposta_usd="0.000000",
+            respostas_cobradas=respostas,
+            requests_provedor=requests_provedor,
+            max_tokens_entrada_por_request=max_tokens_entrada_por_request,
+            limite_tokens_entrada_por_request=None,
+            faixa_preco_valida=None,
+            total_usd=None,
+            por_resposta_usd=None,
             preco_declarado=False,
-            fonte_preco="sem preço declarado para o modelo — custo não calculado",
+            fonte_preco=motivo_sem_preco
+            or "sem preço declarado para o modelo — custo não calculado",
         )
+    limite = preco.max_tokens_entrada_por_request
+    if limite is not None and requests_provedor > 0:
+        if max_tokens_entrada_por_request <= 0:
+            return Custo(
+                tokens_entrada=tokens_entrada,
+                tokens_saida=tokens_saida,
+                respostas_cobradas=respostas,
+                requests_provedor=requests_provedor,
+                max_tokens_entrada_por_request=max_tokens_entrada_por_request,
+                limite_tokens_entrada_por_request=limite,
+                faixa_preco_valida=False,
+                total_usd=None,
+                por_resposta_usd=None,
+                preco_declarado=False,
+                fonte_preco=(
+                    "faixa de preço não validada: telemetria por request ausente "
+                    f"(limite declarado {limite} tokens de entrada)"
+                ),
+            )
+        if max_tokens_entrada_por_request > limite:
+            return Custo(
+                tokens_entrada=tokens_entrada,
+                tokens_saida=tokens_saida,
+                respostas_cobradas=respostas,
+                requests_provedor=requests_provedor,
+                max_tokens_entrada_por_request=max_tokens_entrada_por_request,
+                limite_tokens_entrada_por_request=limite,
+                faixa_preco_valida=False,
+                total_usd=None,
+                por_resposta_usd=None,
+                preco_declarado=False,
+                fonte_preco=(
+                    "faixa de preço excedida em pelo menos um request "
+                    f"({max_tokens_entrada_por_request} > {limite}); custo não calculado"
+                ),
+            )
     total = preco.custo_usd(tokens_entrada, tokens_saida)
     por_resposta = total / Decimal(respostas) if respostas else Decimal(0)
     return Custo(
         tokens_entrada=tokens_entrada,
         tokens_saida=tokens_saida,
+        respostas_cobradas=respostas,
+        requests_provedor=requests_provedor,
+        max_tokens_entrada_por_request=max_tokens_entrada_por_request,
+        limite_tokens_entrada_por_request=limite,
+        faixa_preco_valida=True if limite is not None else None,
         total_usd=f"{total:.6f}",
         por_resposta_usd=f"{por_resposta:.6f}",
         preco_declarado=True,
@@ -166,7 +231,13 @@ def agregar(
     tokens_entrada: int,
     tokens_saida: int,
     citaram_numero: int,
+    legiveis: int,
+    falhas_legibilidade: list[str] | None = None,
+    respostas_cobradas: int | None = None,
+    requests_provedor: int = 0,
+    max_tokens_entrada_por_request: int = 0,
     preco: Preco | None,
+    motivo_sem_preco: str | None = None,
 ) -> Metricas:
     """Consolida os laudos. Nenhuma média de média: tudo sai de contagem bruta."""
     total = len(julgamentos)
@@ -178,6 +249,7 @@ def agregar(
     falhas = [f"{j.id}: {motivo}" for j in julgamentos for motivo in j.falhas] + [
         f"{a.id}: {motivo}" for a in adversarios for motivo in a.falhas
     ]
+    falhas.extend(falhas_legibilidade or [])
     return Metricas(
         total=total,
         por_categoria=por_categoria,
@@ -192,12 +264,20 @@ def agregar(
             len(defasagem_avaliada),
         ),
         adversarial=Taxa(sum(1 for a in adversarios if a.aprovado), len(adversarios)),
+        legibilidade=Taxa(legiveis, total),
         latencia=latencia_de(latencias_ms),
         custo=custo_de(
             tokens_entrada=tokens_entrada,
             tokens_saida=tokens_saida,
-            respostas=total + len(adversarios),
+            respostas=(
+                respostas_cobradas
+                if respostas_cobradas is not None
+                else total + len(adversarios)
+            ),
+            requests_provedor=requests_provedor,
+            max_tokens_entrada_por_request=max_tokens_entrada_por_request,
             preco=preco,
+            motivo_sem_preco=motivo_sem_preco,
         ),
         falhas=falhas,
     )

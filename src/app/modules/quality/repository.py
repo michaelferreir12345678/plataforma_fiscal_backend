@@ -15,8 +15,8 @@ from sqlalchemy.sql.elements import ColumnElement
 from app.modules.quality.models import DataQualityCheck, LineageEdge
 
 
-def _somente_vigente() -> ColumnElement[bool]:
-    """Predicado que mantém, por chave de check, apenas o veredito mais recente.
+def _somente_vigente(*, as_of: datetime | None = None) -> ColumnElement[bool]:
+    """Mantém, por chave de check, o veredito vigente agora ou no corte pedido.
 
     Desde a E1 (A26) a ``versao_entrega`` faz parte da chave única: uma retificação cria
     **linha nova** em vez de sobrescrever o resultado da versão anterior. O histórico é
@@ -27,27 +27,29 @@ def _somente_vigente() -> ColumnElement[bool]:
     forem verificadas no mesmo instante.
     """
     superior = aliased(DataQualityCheck)
-    mais_novo = (
-        select(superior.id)
-        .where(
-            superior.check_codigo == DataQualityCheck.check_codigo,
-            superior.fonte == DataQualityCheck.fonte,
-            superior.cod_ibge.is_not_distinct_from(DataQualityCheck.cod_ibge),
-            superior.periodo.is_not_distinct_from(DataQualityCheck.periodo),
-            or_(
-                superior.executado_em > DataQualityCheck.executado_em,
-                and_(
-                    superior.executado_em == DataQualityCheck.executado_em,
-                    # Ordem de ESCRITA, não ``id`` (migration 0044). O desempate por
-                    # ``uuid4()`` era sorteio, e o relógio empata com mais frequência do
-                    # que a E1 supôs — no Windows, 200 chamadas de ``datetime.now(UTC)``
-                    # medidas com o mesmo valor.
-                    superior.seq > DataQualityCheck.seq,
-                ),
+    filtros = [
+        superior.check_codigo == DataQualityCheck.check_codigo,
+        superior.fonte == DataQualityCheck.fonte,
+        superior.cod_ibge.is_not_distinct_from(DataQualityCheck.cod_ibge),
+        superior.periodo.is_not_distinct_from(DataQualityCheck.periodo),
+        or_(
+            superior.executado_em > DataQualityCheck.executado_em,
+            and_(
+                superior.executado_em == DataQualityCheck.executado_em,
+                # Ordem de ESCRITA, não ``id`` (migration 0044). O desempate por
+                # ``uuid4()`` era sorteio, e o relógio empata com mais frequência do
+                # que a E1 supôs — no Windows, 200 chamadas de ``datetime.now(UTC)``
+                # medidas com o mesmo valor.
+                superior.seq > DataQualityCheck.seq,
             ),
-        )
-        .exists()
-    )
+        ),
+    ]
+    # O alias correlacionado também precisa respeitar o corte. Filtrar só a linha externa
+    # faria um veredito posterior ao ``as_of`` esconder o anterior e a consulta devolveria
+    # vazio, em vez do estado que de fato vigorava naquele instante.
+    if as_of is not None:
+        filtros.append(superior.executado_em <= as_of)
+    mais_novo = select(superior.id).where(*filtros).exists()
     return not_(mais_novo)
 
 
@@ -149,15 +151,21 @@ def contar_por_status(
 
 
 def checks_abertos(
-    session: Session, *, cod_ibge: str, periodo: str | None = None
+    session: Session,
+    *,
+    cod_ibge: str,
+    periodo: str | None = None,
+    as_of: datetime | None = None,
 ) -> list[DataQualityCheck]:
-    """Checks em falha/aviso do ente — o que a página precisa selar."""
+    """Checks em falha/aviso do ente vigentes agora ou no ``as_of`` solicitado."""
     stmt = select(DataQualityCheck).where(
         DataQualityCheck.cod_ibge == cod_ibge,
         DataQualityCheck.status.in_(("falha", "aviso")),
         # A entrega retificada não sela a página com o veredito da versão superada.
-        _somente_vigente(),
+        _somente_vigente(as_of=as_of),
     )
+    if as_of is not None:
+        stmt = stmt.where(DataQualityCheck.executado_em <= as_of)
     if periodo:
         stmt = stmt.where(
             DataQualityCheck.periodo.is_(None) | (DataQualityCheck.periodo == periodo)
