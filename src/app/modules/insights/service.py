@@ -980,11 +980,20 @@ def buscar_central_dados(
             principal=principal,
         )
 
+    # **Sem `as_of` aqui, de propósito.** O corte que chega neste endpoint é a versão do
+    # número que está na tela — procedência, não pedido de reprodução histórica: o gestor
+    # clicou "Entenda esta tela", não "reproduza a cobertura como ela era". E
+    # `cobertura_do_ente` recusa corte explícito (com razão: `gold.mart_cobertura_fonte` é
+    # retrato corrente, e forjar histórico ali culparia o ente por uma lacuna que pode ser
+    # do nosso snapshot). Repassá-lo transformava toda explicação de tela num 422.
+    #
+    # As duas chamadas seguintes continuam recebendo o corte: `qualidade_do_ente` e
+    # `calendario_do_ente` são bitemporais de verdade e sabem responder "como era".
     cobertura = _chamar(
         coleta,
         ctx,
         "cobertura_do_ente",
-        {"ente": body.ente, "pagina": pagina, "periodo": body.periodo, "as_of": body.as_of},
+        {"ente": body.ente, "pagina": pagina, "periodo": body.periodo},
     )
     coleta.nota(
         f"Cobertura da página '{pagina}'",

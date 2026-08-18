@@ -29,7 +29,9 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import delete, select
 
-from app.core.db import admin_session
+from app.core.db import admin_session, tenant_session
+from app.core.deps import Principal
+from app.core.errors import AppError
 from app.main import app
 from app.modules.alerts import rules as alert_rules
 from app.modules.alerts import service as alerts_service
@@ -41,6 +43,8 @@ from app.modules.indicators.models import FatoRcl, MartIndicador
 from app.modules.ingestion.models import DimEntrega
 from app.modules.insights import service as insights_service
 from app.modules.tenancy.models import AuditLog
+from app.shared import tooling
+from app.shared.tooling import ToolContext
 
 from .conftest import auth_header, login
 
@@ -662,3 +666,83 @@ def test_nenhuma_capacidade_entrega_ente_de_outra_organizacao(
     resposta = _post(client, tok, rota, {"ente": cenario.ente, **corpo})
     assert resposta.status_code == 403, resposta.text
     assert cenario.ente not in resposta.text or "escopo" in resposta.text.lower()
+
+
+def _principal(org) -> Principal:
+    """Principal do teste — capacidades e escopo da própria organização."""
+    return Principal(
+        usuario_id=org.usuario_id,
+        org_id=org.org_id,
+        papel="Papel",
+        capacidades=frozenset(org.capacidades),
+        escopo_ibges=None if org.escopo is None else frozenset(org.escopo),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# O as_of da TELA não é pedido de reprodução histórica
+#
+# Relatado em produção: "Despesa empenhada · 2025-B6 (acum.)" respondia 422 —
+# "A cobertura por página ainda é materializada apenas como estado atual".
+#
+# A recusa da ferramenta está certa e continua valendo: `gold.mart_cobertura_fonte` é um
+# retrato corrente, e forjar histórico ali culparia o ente por uma lacuna que pode ser do
+# nosso snapshot. O que estava errado é o que chegava até ela. O `as_of` que o frontend
+# manda é a versão do número EXIBIDO — procedência. O gestor clicou "Entenda esta tela",
+# não "reproduza a cobertura como era".
+#
+# O par abaixo separa as duas coisas: a explicação de tela atravessa com `as_of`, e a
+# ferramenta continua recusando quando o corte é pedido de fato.
+# --------------------------------------------------------------------------- #
+def test_explicacao_de_tela_com_as_of_nao_morre_na_cobertura(
+    client, make_org, cenario
+) -> None:
+    org = make_org(entes=[cenario.ente])
+    tok = login(client, org.email, org.senha)
+    resposta = _post(
+        client,
+        tok,
+        "central-dados",
+        {
+            "ente": cenario.ente,
+            "pergunta": "Por que a página de saúde está vazia para o meu município?",
+            "as_of": datetime.now(UTC).isoformat(),
+        },
+    )
+
+    assert resposta.status_code == 200, resposta.text
+    corpo = resposta.json()
+    assert corpo["disponivel"] is True
+    # As três pernas continuam inteiras: só o destino do corte mudou, não a resposta.
+    assert corpo["ferramentas"] == [
+        "cobertura_do_ente",
+        "qualidade_do_ente",
+        "calendario_do_ente",
+    ]
+
+
+def test_cobertura_continua_recusando_corte_pedido_de_verdade(
+    client, make_org, cenario
+) -> None:
+    """Controle negativo: a correção foi no chamador, não afrouxando a ferramenta.
+
+    Se a guarda tivesse sido removida, uma pergunta bitemporal sobre cobertura passaria a
+    receber o retrato corrente como se fosse histórico — que é a resposta desonesta que a
+    recusa existe para impedir.
+    """
+    org = make_org(entes=[cenario.ente])
+    with tenant_session(org.org_id, user_id=org.usuario_id) as session:
+        ctx = ToolContext(session=session, principal=_principal(org), origem="teste")
+        with pytest.raises(AppError) as exc:
+            tooling.invoke(
+                ctx,
+                tooling.registro(),
+                "cobertura_do_ente",
+                {
+                    "ente": cenario.ente,
+                    "pagina": "saude-educacao",
+                    "as_of": datetime.now(UTC).isoformat(),
+                },
+            )
+    assert exc.value.status == 422
+    assert "as_of" in (exc.value.detail or "")
