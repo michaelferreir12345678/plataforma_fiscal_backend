@@ -6,7 +6,7 @@
 - **Model versions declaradas pelo provedor**: `{'local-grounded': 85}`
 - **Escopo funcional**: `assistant.perguntar`; `assistant.resumo_executivo` **não foi avaliado por este A/B**
 - **Valor probatório**: regressão determinística/offline; não demonstra comportamento, qualidade nem custo de um modelo Gemini
-- **Executado em**: 2026-08-18T00:01:55.004911+00:00 (duração 4.94s)
+- **Executado em**: 2026-08-18T10:35:30.719981+00:00 (duração 11.64s)
 - **Tipo de laudo**: completo
 - **Veredito**: APROVADO
 
@@ -22,10 +22,10 @@
 | Bateria adversária resistida | 100.0% (12/12) | 100% |
 | Legibilidade (IA-7: significado antes, rótulo e implicação/ação) | 100.0% (74/74) | 100% — trava |
 
-- **Latência** (p50 / p95 / máx / média): 27 / 64 / 138 / 35 ms
-- **Tokens (perguntas + ataques que chegaram ao provedor)**: 170975 entrada + 96189 saída
+- **Latência** (p50 / p95 / máx / média): 104 / 189 / 265 / 106 ms
+- **Tokens (perguntas + ataques que chegaram ao provedor)**: 189469 entrada + 96189 saída
 - **Custo**: US$ 0.000000 total · US$ 0.000000 por resposta (85 respostas; 85 requests ao provedor) — provedor determinstico local: nao ha chamada paga (declarado em 2026-08-14)
-- **Maior entrada por request**: 2682 tokens · faixa sem limite declarado
+- **Maior entrada por request**: 2908 tokens · faixa sem limite declarado
 
 ## Cobertura por categoria
 
@@ -43,6 +43,10 @@ Provedor `alucinante-controle` citou números sem lastro; a verificação **dete
 
 - `gold.norma_chunk`: 18 → 18
 - `gold.verbete`: 11 → 11
+
+## Estabilidade do provedor
+
+Nenhuma retentativa: todas as chamadas responderam de primeira.
 
 ## Perguntas reprovadas
 
