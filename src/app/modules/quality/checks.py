@@ -31,6 +31,7 @@ from app.modules.accounting import service as accounting_service
 from app.modules.debt.models import FatoDivida
 from app.modules.expense.models import FatoDespesa
 from app.modules.health_edu.models import FatoEducacao, FatoSaude
+from app.modules.indicators import endividamento
 from app.modules.indicators.models import FatoRcl, MartIndicador
 from app.modules.ingestion.models import DimEntrega, SilverRreo
 from app.modules.personnel.models import FatoPessoal
@@ -466,6 +467,17 @@ def mart_vs_detalhe_pessoal(
     Este é o risco estrutural que a auditoria apontou: o mart alimenta dashboard, carteira
     e alertas; o detalhe alimenta a página. Se divergirem, o gestor vê dois números para o
     mesmo fato — e nada no sistema avisa.
+
+    **O denominador é a RCL Ajustada, não a RCL cheia.** Esta verificação nasceu na Sprint
+    26 dividindo pela ``fato_rcl.rcl_12m`` e não acompanhou a Sprint 28, que corrigiu o
+    denominador dos limites de pessoal e dívida (migration 0035). O resultado foi o pior
+    defeito possível numa régua: ela carregava o vício que existe para achar, e passou a
+    acusar de errado exatamente o valor correto — 8 falhas em produção, todas falso
+    positivo, com o painel de resolução mandando reprocessar dado que já estava certo.
+
+    Medido no ente 23 em 2026-B2: R$ 16.679.957.857,72 sobre a RCL Ajustada de
+    R$ 40.690.096.057,23 dá 40,9927% (o que o mart grava); sobre a RCL cheia de
+    R$ 40.899.706.794,11 daria 40,7826% — a divergência de 0,21 p.p. que o check acusava.
     """
     codigo = "mart_vs_detalhe_pessoal"
     mart = session.scalar(
@@ -488,12 +500,24 @@ def mart_vs_detalhe_pessoal(
         )
         .limit(1)
     )
-    rcl = session.scalar(
-        select(FatoRcl.rcl_12m).where(
-            FatoRcl.cod_ibge == cod_ibge, FatoRcl.periodo_ref == periodo_rreo
+    # A RCL Ajustada vem da mesma função que o cálculo do indicador usa — fonte única.
+    # Reproduzi-la aqui faria a régua e o medido divergirem na primeira mudança de regra,
+    # que é como este defeito nasceu.
+    versao_rgf = session.scalar(
+        select(DimEntrega.versao_entrega).where(
+            DimEntrega.cod_ibge == cod_ibge,
+            DimEntrega.relatorio == "RGF",
+            DimEntrega.periodo == periodo_rgf,
+            DimEntrega.vigente.is_(True),
         )
     )
-    rcl_valor = Decimal(str(rcl)) if rcl is not None else None
+    rcl_valor = (
+        endividamento.rcl_ajustada(
+            session, cod_ibge=cod_ibge, periodo=periodo_rgf, versao=versao_rgf
+        )
+        if versao_rgf
+        else None
+    )
     liquida = (
         Decimal(str(fato.despesa_liquida))
         if fato is not None and fato.despesa_liquida is not None
@@ -502,7 +526,7 @@ def mart_vs_detalhe_pessoal(
     if mart is None or liquida is None or rcl_valor is None or rcl_valor == 0:
         return _nao_aplicavel(
             codigo, "siconfi_rgf", cod_ibge, periodo_rreo,
-            "sem mart, despesa líquida de pessoal ou RCL para reconciliar",
+            "sem mart, despesa líquida de pessoal ou RCL Ajustada para reconciliar",
         )
     recalculado = liquida / rcl_valor * Decimal(100)
     return _comparacao(
@@ -515,7 +539,11 @@ def mart_vs_detalhe_pessoal(
         tolerancia=TOL_PONTOS,
         detalhe={
             "periodo_rgf": periodo_rgf,
-            "regra": "detalhe (fato_pessoal ÷ RCL) = mart_indicador.pessoal_executivo",
+            "regra": (
+                "detalhe (fato_pessoal ÷ RCL Ajustada) = mart_indicador.pessoal_executivo"
+            ),
+            "denominador": "rcl_ajustada",
+            "rcl_ajustada": str(rcl_valor),
         },
     )
 

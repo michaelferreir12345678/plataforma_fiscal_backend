@@ -22,8 +22,9 @@ from app.modules.catalog.models import DimEnte
 from app.modules.debt.models import FatoDivida
 from app.modules.expense.models import FatoDespesa
 from app.modules.health_edu.models import FatoSaude
+from app.modules.indicators.endividamento import CONTA_RCL_AJUSTADA, coluna_acumulada
 from app.modules.indicators.models import FatoRcl, MartIndicador
-from app.modules.ingestion.models import DimEntrega, SilverEnte, SilverRreo
+from app.modules.ingestion.models import DimEntrega, SilverEnte, SilverRgf, SilverRreo
 from app.modules.personnel.models import FatoPessoal
 from app.modules.quality import checks, lineage_seed
 from app.modules.quality import service as quality
@@ -155,7 +156,20 @@ def _seed(session: Any, cod: str, *, receita_raiz: int = 1000, rcl_publicada: in
             versao_entrega=RGF_V,
         )
     )
-    # Pessoal: 450 / RCL 900 = 50% — igual ao mart.
+    # A RCL **Ajustada** é o denominador legal dos limites de pessoal e dívida
+    # (CLAUDE.md §2; Sprint 28/migration 0035). Ela é publicada pelo ente no Anexo 02 do
+    # RGF — sem esta linha, o cenário de teste é um ente que entrega RGF sem publicar a
+    # própria base de cálculo, o que não existe em produção.
+    session.add(
+        SilverRgf(
+            cod_ibge=cod, periodo=PERIODO_RGF, anexo="RGF-Anexo 02",
+            conta="Receita Corrente Líquida Ajustada",
+            cod_conta=CONTA_RCL_AJUSTADA,
+            coluna=coluna_acumulada(PERIODO_RGF), linha_seq=1,
+            valor=Decimal(rcl_publicada), versao_entrega=RGF_V,
+        )
+    )
+    # Pessoal: 450 / RCL Ajustada 900 = 50% — igual ao mart.
     session.add(
         FatoPessoal(
             cod_ibge=cod, periodo=PERIODO_RGF, poder_codigo="ENTE.EXEC",

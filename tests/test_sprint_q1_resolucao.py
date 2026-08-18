@@ -11,9 +11,13 @@ o que ele **recusa**.
 
 from __future__ import annotations
 
+import inspect
+from decimal import Decimal
+
 import pytest
 
 from app.modules.quality import causa as causa_mod
+from app.modules.quality import checks as checks_mod
 from app.modules.quality.causa import ACOES_POR_CLASSE, causa_do_check
 from app.modules.quality.checks import SLAS
 
@@ -104,3 +108,63 @@ def test_defasagem_nao_promete_reingestao_antes_de_olhar_a_fonte() -> None:
     Oferecer "reingerir" antes de saber seria prometer que existe o que ingerir.
     """
     assert ACOES_POR_CLASSE[causa_do_check("freshness_rgf").classe] == ()
+
+
+# --------------------------------------------------------------------------- #
+# 3. A régua não pode carregar o vício que existe para achar
+#
+# Achado por uso, e é o pior tipo de defeito num sistema de verificação: o check
+# `mart_vs_detalhe_pessoal` dividia pela RCL **cheia**, enquanto o indicador (corrigido na
+# Sprint 28, migration 0035) divide pela RCL **Ajustada**. A régua acusava de errado
+# exatamente o valor correto — 8 falhas em produção, todas falso positivo, e o painel de
+# resolução mandando reprocessar dado que já estava certo.
+#
+# Medido no ente 23 em 2026-B2:
+#   R$ 16.679.957.857,72 ÷ RCL Ajustada R$ 40.690.096.057,23 = 40,9927%  (o mart)
+#   R$ 16.679.957.857,72 ÷ RCL cheia    R$ 40.899.706.794,11 = 40,7826%  (o check errado)
+# --------------------------------------------------------------------------- #
+def test_check_de_pessoal_usa_a_rcl_ajustada_e_nao_a_cheia() -> None:
+    """O denominador do check tem de ser o mesmo do indicador — fonte única.
+
+    O teste lê o código: chamar ``endividamento.rcl_ajustada`` é o que garante que uma
+    mudança futura na regra do denominador chegue aos dois lados juntos. Foi a divergência
+    entre eles que produziu o falso positivo.
+    """
+    fonte = inspect.getsource(checks_mod.mart_vs_detalhe_pessoal)
+    # Sem a docstring: ela cita `rcl_12m` de propósito, ao contar por que o denominador
+    # errado esteve ali. Documentar o defeito não pode reprovar a correção.
+    doc = checks_mod.mart_vs_detalhe_pessoal.__doc__ or ""
+    corpo = fonte.replace(doc, "")
+    assert "rcl_ajustada" in corpo, "o check tem de usar a RCL Ajustada"
+    assert "rcl_12m" not in corpo, (
+        "a RCL cheia é o denominador errado destes limites (CLAUDE.md §2, Sprint 28)"
+    )
+
+
+def test_reconciliacao_de_pessoal_bate_quando_o_denominador_e_o_mesmo() -> None:
+    """Com o denominador certo, os números reais de produção fecham dentro da tolerância."""
+    despesa = Decimal("16679957857.72")
+    rcl_ajustada = Decimal("40690096057.23")
+    rcl_cheia = Decimal("40899706794.11")
+    mart_gravado = Decimal("40.99267260087047587826243186")
+
+    com_ajustada = despesa / rcl_ajustada * Decimal(100)
+    com_cheia = despesa / rcl_cheia * Decimal(100)
+
+    assert abs(com_ajustada - mart_gravado) < Decimal("0.01")
+    # E o controle negativo: com a RCL cheia a diferença estoura a tolerância — que é
+    # exatamente a falha que o gestor via na tela.
+    assert abs(com_cheia - mart_gravado) > Decimal("0.01")
+
+
+def test_lados_do_check_de_pessoal_estao_rotulados_na_ordem_certa() -> None:
+    """O rótulo tem de dizer de onde veio cada número.
+
+    Estavam trocados: o painel mostrava "semáforo: 40,78 / detalhe: 40,99" quando é o
+    inverso. Atribuir o número à origem errada é pior que não mostrar origem nenhuma —
+    manda o gestor investigar o lado que não tem problema.
+    """
+    causa = causa_do_check("mart_vs_detalhe_pessoal")
+    # O check passa `esquerda=recalculado` e `direita=mart` (ver checks.py).
+    assert "detalhe" in causa.esquerda
+    assert "mart_indicador" in causa.direita

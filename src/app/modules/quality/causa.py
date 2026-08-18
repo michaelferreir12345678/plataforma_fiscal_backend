@@ -72,8 +72,11 @@ CAUSA_POR_CHECK: dict[str, Causa] = {
     ),
     "mart_vs_detalhe_pessoal": Causa(
         classe="plataforma",
-        esquerda="percentual do semáforo (mart_indicador)",
-        direita="percentual recomposto pela página de detalhe",
+        # A ordem segue o que o check passa: esquerda é o RECALCULADO, direita é o mart.
+        # Estavam trocados, e o painel atribuía cada número à origem errada — pior que
+        # não mostrar, porque leva o gestor a investigar o lado que não tem problema.
+        esquerda="percentual recomposto do detalhe (despesa ÷ RCL Ajustada)",
+        direita="percentual do semáforo (mart_indicador)",
         porque=(
             "O semáforo e a página de detalhe são duas leituras nossas do mesmo dado. "
             "Divergirem é defeito de cálculo ou materialização vencida, nunca da fonte."
