@@ -156,20 +156,36 @@ def _seed(session: Any, cod: str, *, receita_raiz: int = 1000, rcl_publicada: in
             versao_entrega=RGF_V,
         )
     )
-    # A RCL **Ajustada** é o denominador legal dos limites de pessoal e dívida
-    # (CLAUDE.md §2; Sprint 28/migration 0035). Ela é publicada pelo ente no Anexo 02 do
-    # RGF — sem esta linha, o cenário de teste é um ente que entrega RGF sem publicar a
-    # própria base de cálculo, o que não existe em produção.
+    # A RCL **Ajustada** é o denominador legal dos limites (CLAUDE.md §2; Sprint 28,
+    # migration 0035), e o ente publica **duas**, em anexos diferentes:
+    #
+    #   Anexo 01 — a do limite de PESSOAL. Só o próprio quadrimestre, coluna "Valor",
+    #              sem comparativo (achado A15).
+    #   Anexos 02/03 — a dos limites de ENDIVIDAMENTO, com "Até o Nº Quadrimestre".
+    #
+    # As duas entram aqui, e com valores **diferentes** de propósito: iguais, a fixture
+    # aceitaria uma régua lendo o anexo errado sem reclamar — foi assim que o defeito
+    # original passou despercebido.
+    session.add(
+        SilverRgf(
+            cod_ibge=cod, periodo=PERIODO_RGF, anexo="RGF-Anexo 01",
+            conta="RECEITA CORRENTE LÍQUIDA AJUSTADA PARA CÁLCULO DOS LIMITES "
+                  "DA DESPESA COM PESSOAL",
+            cod_conta="RGF1RclAjustadaPessoal", coluna="Valor", linha_seq=1,
+            valor=Decimal(rcl_publicada), versao_entrega=RGF_V,
+        )
+    )
     session.add(
         SilverRgf(
             cod_ibge=cod, periodo=PERIODO_RGF, anexo="RGF-Anexo 02",
             conta="Receita Corrente Líquida Ajustada",
             cod_conta=CONTA_RCL_AJUSTADA,
             coluna=coluna_acumulada(PERIODO_RGF), linha_seq=1,
-            valor=Decimal(rcl_publicada), versao_entrega=RGF_V,
+            # Deliberadamente diferente da do Anexo 01.
+            valor=Decimal(rcl_publicada) + Decimal(50), versao_entrega=RGF_V,
         )
     )
-    # Pessoal: 450 / RCL Ajustada 900 = 50% — igual ao mart.
+    # Pessoal: 450 / RCL Ajustada do Anexo 01 (900) = 50% — igual ao mart.
     session.add(
         FatoPessoal(
             cod_ibge=cod, periodo=PERIODO_RGF, poder_codigo="ENTE.EXEC",

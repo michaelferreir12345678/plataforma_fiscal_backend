@@ -31,9 +31,9 @@ from app.modules.accounting import service as accounting_service
 from app.modules.debt.models import FatoDivida
 from app.modules.expense.models import FatoDespesa
 from app.modules.health_edu.models import FatoEducacao, FatoSaude
-from app.modules.indicators import endividamento
 from app.modules.indicators.models import FatoRcl, MartIndicador
 from app.modules.ingestion.models import DimEntrega, SilverRreo
+from app.modules.personnel import service as personnel_service
 from app.modules.personnel.models import FatoPessoal
 from app.modules.result.models import FatoResultado
 from app.modules.revenue.models import DimOrigemReceita, FatoReceita
@@ -478,6 +478,11 @@ def mart_vs_detalhe_pessoal(
     Medido no ente 23 em 2026-B2: R$ 16.679.957.857,72 sobre a RCL Ajustada de
     R$ 40.690.096.057,23 dá 40,9927% (o que o mart grava); sobre a RCL cheia de
     R$ 40.899.706.794,11 daria 40,7826% — a divergência de 0,21 p.p. que o check acusava.
+
+    **E é a RCL Ajustada do Anexo 01**, não a dos Anexos 02/03. O ente publica as duas, com
+    regras de republicação diferentes (ver ``personnel/service.py::_rcl_ajustada_publicada``
+    sobre o achado A15). Usar a de endividamento aqui deixaria a régua e o indicador lendo
+    lugares distintos — no mesmo ente/período elas diferem em R$ 156 milhões.
     """
     codigo = "mart_vs_detalhe_pessoal"
     mart = session.scalar(
@@ -500,9 +505,16 @@ def mart_vs_detalhe_pessoal(
         )
         .limit(1)
     )
-    # A RCL Ajustada vem da mesma função que o cálculo do indicador usa — fonte única.
-    # Reproduzi-la aqui faria a régua e o medido divergirem na primeira mudança de regra,
-    # que é como este defeito nasceu.
+    # A RCL Ajustada vem da MESMA função que o indicador de pessoal usa — e é preciso
+    # dizer *qual*, porque existem duas legítimas. O Anexo 01 (pessoal) publica só o
+    # próprio quadrimestre, na coluna "Valor", sem comparativo; os Anexos 02/03
+    # (endividamento) trazem "Até o Nº Quadrimestre" e sustentam republicação. São números
+    # diferentes de propósito — medido no ente 23 em 2026-Q1, R$ 40.690.096.057,23 no
+    # Anexo 01 contra R$ 40.846.075.408,93 no Anexo 02.
+    #
+    # Fonte única aqui não é "uma RCL para tudo": é a régua lendo o mesmo lugar que o
+    # medido. Apontá-la para a fonte do vizinho troca um erro por outro mais difícil de
+    # ver, porque os dois números são plausíveis.
     versao_rgf = session.scalar(
         select(DimEntrega.versao_entrega).where(
             DimEntrega.cod_ibge == cod_ibge,
@@ -512,9 +524,7 @@ def mart_vs_detalhe_pessoal(
         )
     )
     rcl_valor = (
-        endividamento.rcl_ajustada(
-            session, cod_ibge=cod_ibge, periodo=periodo_rgf, versao=versao_rgf
-        )
+        personnel_service._rcl_ajustada_publicada(session, cod_ibge, periodo_rgf, versao_rgf)
         if versao_rgf
         else None
     )
@@ -542,7 +552,7 @@ def mart_vs_detalhe_pessoal(
             "regra": (
                 "detalhe (fato_pessoal ÷ RCL Ajustada) = mart_indicador.pessoal_executivo"
             ),
-            "denominador": "rcl_ajustada",
+            "denominador": "rcl_ajustada (RGF Anexo 01 — a do limite de pessoal)",
             "rcl_ajustada": str(rcl_valor),
         },
     )
