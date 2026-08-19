@@ -32,6 +32,12 @@ class MudancaRelevante(BaseModel):
 
 
 class CockpitResumo(BaseModel):
+    #: Por que não há mudanças a listar. ``None`` quando há.
+    #:
+    #: Existe porque "lista vazia" tem dois sentidos **opostos**: não houve com o que
+    #: comparar (lacuna) ou comparou-se e nada variou (estabilidade). A tela afirmava o
+    #: primeiro sempre, e passava a reportar como falta o que era boa notícia.
+    mudancas_observacao: str | None = None
     farol: str  # conforme | alerta | prudencial | critico | sem_dados
     cor: str
     indicadores_avaliados: int

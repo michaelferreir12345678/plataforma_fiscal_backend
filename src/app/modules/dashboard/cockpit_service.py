@@ -121,6 +121,23 @@ def _criticos(limites: Any) -> list[CriticoItem]:
     return sorted(itens, key=lambda i: _SEVERIDADE.get(i.cor, 0), reverse=True)
 
 
+def _apuracao_anterior(
+    session: Session, *, cod_ibge: str, periodo: str, indicador: str
+) -> str | None:
+    """Período anterior em que **este** indicador foi apurado, ou ``None``.
+
+    O período canônico é ordenável por texto (``AAAA-Bn``, ano à frente e largura fixa),
+    então o maior período menor que o atual é a apuração imediatamente anterior daquele
+    indicador — seja ela do bimestre passado ou de dois atrás, conforme a cadência da
+    fonte que o alimenta.
+    """
+    periodos = limits_repo.distinct_periodos_mart(
+        session, cod_ibge=cod_ibge, indicador=indicador
+    )
+    anteriores = [p for p in periodos if p < periodo]
+    return anteriores[-1] if anteriores else None
+
+
 def _mudancas(
     session: Session,
     cod_ibge: str,
@@ -129,17 +146,30 @@ def _mudancas(
     *,
     as_of: datetime | None,
 ) -> list[MudancaRelevante]:
-    """Δ de cada indicador contra o período anterior — o "o que mudou" do resumo."""
-    anterior = periodo_util.anterior(periodo)
-    if anterior is None:
-        return []
-    versao_ant = indicators_repo.resolve_versao_rreo(
-        session, cod_ibge=cod_ibge, periodo=anterior, as_of=as_of
-    )
-    if versao_ant is None:
-        return []
+    """Δ de cada indicador contra a **sua própria** apuração anterior.
+
+    Não contra o bimestre imediatamente anterior: os limites de pessoal e dívida vêm do
+    RGF, que é quadrimestral, e só existem nos bimestres que fecham com um quadrimestre
+    (B2↔Q1, B4↔Q2, B6↔Q3). Comparar 2025-B6 com 2025-B5 era comparar com um período onde
+    o indicador **não pode** existir — e a comparação vinha vazia por construção, com a
+    tela concluindo "sem base de comparação" sobre um dado que estava lá.
+
+    Procurar a apuração anterior de cada indicador resolve isso sem mapear cadência por
+    fonte (o que enrijeceria: cada fonte nova pediria mais um caso). Atravessa lacuna de
+    entrega, e o período comparado passa a ser declarado por indicador.
+    """
     mudancas: list[MudancaRelevante] = []
     for c in criticos:
+        anterior = _apuracao_anterior(
+            session, cod_ibge=cod_ibge, periodo=periodo, indicador=c.indicador
+        )
+        if anterior is None:
+            continue
+        versao_ant = indicators_repo.resolve_versao_rreo(
+            session, cod_ibge=cod_ibge, periodo=anterior, as_of=as_of
+        )
+        if versao_ant is None:
+            continue
         mart_ant = indicators_repo.get_mart_indicador(
             session,
             cod_ibge=cod_ibge,
@@ -181,6 +211,8 @@ def _resumo(
     n_alertas: int,
     n_criticos: int,
     source: SourceRef,
+    *,
+    houve_base: bool = True,
 ) -> CockpitResumo:
     severidades = [_SEVERIDADE.get(c.cor, 0) for c in criticos if c.faixa is not None]
     farol = _FAROL_POR_SEVERIDADE[max(severidades)] if severidades else "sem_dados"
@@ -189,7 +221,18 @@ def _resumo(
          "critico": "excedido"}.get(farol),
         "cinza",
     )
+    observacao = None
+    if not mudancas:
+        observacao = (
+            "Nenhum indicador variou de forma relevante desde a apuração anterior."
+            if houve_base
+            else (
+                "Não há apuração anterior destes indicadores para comparar — este é o "
+                "primeiro período apurado, ou o anterior não foi entregue."
+            )
+        )
     return CockpitResumo(
+        mudancas_observacao=observacao,
         farol=farol,
         cor=cor,
         indicadores_avaliados=len([c for c in criticos if c.faixa is not None]),
@@ -700,7 +743,17 @@ def build_cockpit(
         esfera=ente.esfera if ente else None,
         periodo=periodo,
         as_of=efetivo_as_of,
-        resumo=_resumo(criticos, mudancas, n_alertas, n_criticos, source),
+        # `houve_base` separa "não havia com o que comparar" de "comparou e nada
+        # mudou" — duas leituras opostas que a tela dava como a mesma.
+        resumo=_resumo(
+            criticos, mudancas, n_alertas, n_criticos, source,
+            houve_base=any(
+                _apuracao_anterior(
+                    session, cod_ibge=cod_ibge, periodo=periodo, indicador=c.indicador
+                )
+                for c in criticos
+            ),
+        ),
         criticos=criticos,
         tendencias=_tendencias(session, cod_ibge, as_of=as_of),
         explicadores=[

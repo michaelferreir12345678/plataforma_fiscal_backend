@@ -21,6 +21,8 @@ import pytest
 
 from app.core.db import admin_session
 from app.core.errors import AppError
+from app.modules.dashboard import cockpit_service
+from app.modules.indicators.models import MartIndicador
 from app.modules.quality import causa as causa_mod
 from app.modules.quality import checks as checks_mod
 from app.modules.quality import resolucao
@@ -28,6 +30,7 @@ from app.modules.quality import service as quality_service
 from app.modules.quality.causa import ACOES_POR_CLASSE, causa_do_check
 from app.modules.quality.checks import SLAS
 from app.modules.quality.models import DataQualityCheck, QualidadeTratativa
+from tests.test_ia_tooling import PERIODO as PERIODO_CENARIO
 from tests.test_ia_tooling import cenario  # noqa: F401 — ente sintético reusado
 from tests.test_sprint26_qualidade_lineage import PERIODO
 
@@ -443,3 +446,53 @@ def test_tratativa_de_uma_organizacao_nao_apaga_o_selo_de_outra(
     assert any(c.check_codigo == "msc_vs_dca" for c in selo_b), (
         "a organização B não tratou nada e tem de continuar vendo a divergência"
     )
+
+
+# --------------------------------------------------------------------------- #
+# 8. O Resumo comparava com um período onde o indicador não pode existir
+#
+# Relatado em uso: "Sem base de comparação com o período anterior" no Ceará em 2025-B6.
+# Não era falta de dado — 2025-B5 existe e tem entrega vigente.
+#
+# É estrutural: pessoal e dívida vêm do RGF, que é quadrimestral, e só existem nos
+# bimestres que fecham com um quadrimestre (B2↔Q1, B4↔Q2, B6↔Q3). Medido no ente 23:
+# B6 e B2 têm 7 indicadores; B5 e B1 têm 3. Comparar B6 com B5 estava condenado a vir
+# vazio por construção.
+# --------------------------------------------------------------------------- #
+def test_comparacao_usa_a_apuracao_anterior_do_proprio_indicador(cenario) -> None:
+    """Pula o bimestre que não tem o indicador, em vez de desistir nele."""
+    with admin_session() as s:
+        # `garantias` do cenário existe em PERIODO. Cria uma apuração dois bimestres antes,
+        # deixando o bimestre do meio SEM o indicador — exatamente o padrão RGF.
+        # Dois bimestres antes do PERIODO do cenario (2090-B4), deixando B3 sem o indicador.
+        anterior_real = "2090-B2"
+        s.add(
+            MartIndicador(
+                cod_ibge=cenario.ente, periodo=anterior_real, indicador="garantias",
+                valor_rs=Decimal(1), valor_pct_rcl=Decimal("10"), faixa="normal",
+                teto_pct=Decimal("22"), denominador="rcl", base_valor=Decimal(10),
+                versao_entrega="1", source_ref={"relatorio": "RGF"},
+            )
+        )
+
+    with admin_session() as s:
+        achado = cockpit_service._apuracao_anterior(
+            s, cod_ibge=cenario.ente, periodo=PERIODO_CENARIO, indicador="garantias"
+        )
+    assert achado == anterior_real, (
+        "deve achar a apuração anterior do indicador, ainda que não seja o bimestre "
+        "imediatamente anterior"
+    )
+
+
+def test_sem_apuracao_anterior_devolve_none(cenario) -> None:
+    """Controle negativo: não inventa base onde não há.
+
+    Se devolvesse o período mais antigo qualquer, o Resumo compararia com um valor sem
+    relação temporal e apresentaria como "mudança" algo que é só a distância no tempo.
+    """
+    with admin_session() as s:
+        achado = cockpit_service._apuracao_anterior(
+            s, cod_ibge=cenario.ente, periodo="1900-B1", indicador="garantias"
+        )
+    assert achado is None
