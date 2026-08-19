@@ -27,6 +27,14 @@ class IngestJobCreate(BaseModel):
             "topo; parâmetros específicos de arquivo ficam em `params`."
         ),
     )
+    incluir_municipios: bool = Field(
+        default=False,
+        description=(
+            "Para cada ente **estadual** da lista, inclui também os municípios daquela UF "
+            "que estão no escopo do usuário. Municípios fora do escopo não entram, e a "
+            "contagem do que ficou de fora volta na resposta."
+        ),
+    )
     confirmar: bool = Field(
         default=False, description="Obrigatório quando a estimativa passa do limiar."
     )
@@ -106,6 +114,12 @@ class IngestJobCreateResult(BaseModel):
     estimativa_itens: int
     limiar: int
     job: IngestJobOut | None = None
+    #: Quantos municípios a expansão por UF deixou de fora por não estarem no escopo.
+    #: Voltar esse número é o que impede a exclusão de ser silenciosa: quem pediu "todos
+    #: os municípios" precisa saber que recebeu um subconjunto, e quantos faltaram.
+    municipios_fora_do_escopo: int = 0
+    #: Quantos entram na carga depois da expansão — a conta que o gestor confirma.
+    entes_incluidos: int = 0
 
 
 class SaudeFila(BaseModel):

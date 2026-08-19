@@ -18,9 +18,12 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import delete
 
 from app.core.db import admin_session
+from app.core.deps import Principal
 from app.core.errors import AppError
+from app.modules.catalog.models import DimEnte
 from app.modules.dashboard import cockpit_service
 from app.modules.indicators.models import MartIndicador
 from app.modules.quality import causa as causa_mod
@@ -496,3 +499,100 @@ def test_sem_apuracao_anterior_devolve_none(cenario) -> None:
             s, cod_ibge=cenario.ente, periodo="1900-B1", indicador="garantias"
         )
     assert achado is None
+
+
+# --------------------------------------------------------------------------- #
+# 9. Carga já pedida não aceita segunda
+#
+# Relatado em uso: dois jobs de DCA idênticos para o mesmo caso. O gestor clicou duas
+# vezes porque o histórico mostrava "reingerir —" sem resultado — mas o remédio não é só
+# mostrar melhor: ingestão é assíncrona, e nada impedia a segunda carga.
+# --------------------------------------------------------------------------- #
+def test_segunda_reingestao_do_mesmo_caso_e_recusada() -> None:
+    """Recusa apontando o job anterior, em vez de duplicar trabalho do worker."""
+    tratativa = SimpleNamespace(
+        status="acao_aplicada",
+        classe="cobertura",
+        diagnostico={"resultado": "fonte_tem", "periodo_conferido": "2025-1"},
+        tentativas=[
+            {"acao": "reingerir", "job_id": "9fd7dd36-f03c-47d0-8b5d-18fde15d5aac",
+             "periodo_solicitado": "2025-1"}
+        ],
+    )
+    ja = resolucao._reingestao_ja_pedida(tratativa)  # type: ignore[arg-type]
+    assert ja is not None
+    assert str(ja.get("job_id")).startswith("9fd7dd36")
+
+
+def test_reingestao_e_liberada_de_novo_quando_o_check_voltou_a_ok() -> None:
+    """Controle negativo: bloquear para sempre impediria tratar uma defasagem futura.
+
+    O bloqueio existe contra o clique repetido enquanto a carga não foi avaliada — não
+    contra pedir carga de novo num período novo, meses depois.
+    """
+    tratativa = SimpleNamespace(
+        tentativas=[{"acao": "verificar_na_fonte", "resultado": "fonte_tem"}]
+    )
+    assert resolucao._reingestao_ja_pedida(tratativa) is None  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# 10. Carga de um estado pode incluir os municípios dele
+#
+# Pedido de uso: baixar a fonte de um estado e, junto, dos municípios daquela UF — hoje
+# seriam 184 códigos digitados à mão para o Ceará.
+#
+# A expansão fica no backend porque é aqui que o escopo é conferido. E é **interseção**,
+# não união: quem tem parte da UF na carteira recebe a parte, com a contagem do que ficou
+# de fora. Expandir para todos daria 403 no lote inteiro; expandir em silêncio esconderia
+# que a maioria não veio.
+# --------------------------------------------------------------------------- #
+def test_expansao_por_uf_respeita_o_escopo_e_conta_o_que_ficou_de_fora(make_org) -> None:
+    from app.modules.ingestion import jobs_service
+
+    # UF sintética 92: 90 e 94–99 já são usadas por outras suítes, e sortear dentro dessa
+    # faixa faria a limpeza abaixo apagar dado alheio. A limpeza é por código exato (não
+    # por UF) e roda antes e depois, para o teste não depender de ter terminado limpo da
+    # última vez — um resíduo de execução interrompida já quebrou a suíte inteira aqui.
+    uf, dentro, fora = "92", "9200001", "9200002"
+    with admin_session() as s:
+        s.execute(delete(DimEnte).where(DimEnte.cod_ibge.in_([uf, dentro, fora])))
+        s.add(DimEnte(cod_ibge=uf, nome="Estado Teste", esfera="estadual", uf=uf))
+        for cod in (dentro, fora):
+            s.add(DimEnte(cod_ibge=cod, nome=f"Municipio {cod}", esfera="municipal", uf=uf))
+
+    # Carteira com apenas UM dos dois municípios — o escopo sai da carteira real, não de
+    # uma lista informada no principal.
+    org = make_org(entes=[uf, dentro])
+    principal = Principal(
+        usuario_id=org.usuario_id, org_id=org.org_id, papel="Papel",
+        capacidades=frozenset({"administrar"}), escopo_ibges=None,
+    )
+    with admin_session() as s:
+        incluidos, de_fora = jobs_service._municipios_da_uf(s, principal, [uf])
+
+    with admin_session() as s:
+        s.execute(delete(DimEnte).where(DimEnte.cod_ibge.in_([uf, dentro, fora])))
+
+    assert incluidos == [dentro], "só entra o município que está no escopo"
+    assert de_fora == 1, "o que ficou de fora tem de ser contado, não silenciado"
+
+
+def test_expansao_ignora_ente_que_nao_e_estadual(make_org) -> None:
+    """Controle negativo: pedir a expansão com um município na lista não traz a UF inteira.
+
+    Sem isto, digitar um código municipal e marcar a caixa dispararia a carga do estado
+    todo — uma ação muito maior do que a pedida, a partir de um clique ambíguo.
+    """
+    from app.modules.ingestion import jobs_service
+
+    org = make_org(entes=["2304400"])
+    principal = Principal(
+        usuario_id=org.usuario_id, org_id=org.org_id, papel="Papel",
+        capacidades=frozenset({"administrar"}), escopo_ibges=None,
+    )
+    with admin_session() as s:
+        incluidos, de_fora = jobs_service._municipios_da_uf(s, principal, ["2304400"])
+
+    assert incluidos == []
+    assert de_fora == 0

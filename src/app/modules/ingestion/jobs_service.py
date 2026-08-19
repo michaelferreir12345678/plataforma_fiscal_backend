@@ -12,10 +12,12 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.deps import Principal
 from app.core.errors import AppError, ScopeForbiddenError
+from app.modules.catalog.models import DimEnte
 from app.modules.ingestion import integracoes, jobs_repository
 from app.modules.ingestion.connectors.registry import CONNECTOR_REGISTRY, FONTE_META
 from app.modules.ingestion.jobs_models import (
@@ -262,6 +264,40 @@ def _run_payload_from_create(create: IngestJobCreate, entes: list[str]) -> dict[
     return RunRequest.model_validate(payload).model_dump(mode="json", exclude={"confirmar"})
 
 
+def _municipios_da_uf(
+    session: Session, principal: Principal, estaduais: list[str]
+) -> tuple[list[str], int]:
+    """Municípios das UFs dos entes estaduais informados, **restritos ao escopo**.
+
+    Devolve ``(incluidos, fora_do_escopo)``. A interseção é deliberada: expandir para todos
+    daria 403 no lote inteiro para quem tem carteira parcial, e expandir em silêncio
+    esconderia que a maioria não veio. O número que ficou de fora volta na resposta.
+    """
+    if not estaduais:
+        return [], 0
+    ufs = list(
+        session.scalars(
+            select(DimEnte.uf)
+            .where(DimEnte.cod_ibge.in_(estaduais), DimEnte.esfera == "estadual")
+            .distinct()
+        )
+    )
+    if not ufs:
+        return [], 0
+    candidatos = list(
+        session.scalars(
+            select(DimEnte.cod_ibge)
+            .where(DimEnte.uf.in_(ufs), DimEnte.esfera == "municipal")
+            .order_by(DimEnte.cod_ibge)
+        )
+    )
+    permitidos = scope.carteira_scope_ibges(session, principal)
+    if permitidos is None:
+        return candidatos, 0
+    incluidos = [c for c in candidatos if c in permitidos]
+    return incluidos, len(candidatos) - len(incluidos)
+
+
 def _criar(
     session: Session,
     principal: Principal,
@@ -271,6 +307,13 @@ def _criar(
     eager_resolver: Any | None = None,
 ) -> IngestJobCreateResult:
     entes = _normalizar_entes(create.fonte, create.entes)
+    fora_do_escopo = 0
+    if create.incluir_municipios and entes:
+        # Expande aqui, e não no cliente: o escopo é conferido nesta camada, a lista de
+        # municípios é dado nosso, e um cliente que monte a requisição à mão ganha a
+        # mesma expansão.
+        municipios, fora_do_escopo = _municipios_da_uf(session, principal, entes)
+        entes = sorted(set(entes) | set(municipios))
     _validar(
         session,
         principal,
@@ -326,6 +369,8 @@ def _criar(
             precisa_confirmacao=True,
             estimativa_itens=estimativa,
             limiar=LIMIAR_CONFIRMACAO,
+            municipios_fora_do_escopo=fora_do_escopo,
+            entes_incluidos=len(entes),
         )
 
     periodos_display = chaves_planejadas
@@ -375,6 +420,8 @@ def _criar(
         estimativa_itens=estimativa,
         limiar=LIMIAR_CONFIRMACAO,
         job=_to_out(job),
+        municipios_fora_do_escopo=fora_do_escopo,
+        entes_incluidos=len(entes),
     )
 
 
