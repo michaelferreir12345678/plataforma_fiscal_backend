@@ -68,6 +68,24 @@ class Ocorrencia:
     tratativa: QualidadeTratativa | None
 
 
+def _reingestao_ja_pedida(tratativa: QualidadeTratativa) -> dict[str, Any] | None:
+    """Última carga enfileirada para este caso, se houver.
+
+    Ingestão é assíncrona: entre o clique e o veredito novo há uma janela em que a tela
+    ainda mostra a falha. Sem esta guarda, essa janela vira carga duplicada — foi o que
+    aconteceu (dois jobs de DCA idênticos), agravado por o histórico não mostrar que a
+    primeira já tinha sido pedida.
+    """
+    return next(
+        (
+            t
+            for t in reversed(tratativa.tentativas or [])
+            if isinstance(t, dict) and t.get("acao") == "reingerir" and t.get("job_id")
+        ),
+        None,
+    )
+
+
 def _reprocessamento_ja_falhou(tratativa: QualidadeTratativa) -> bool:
     """Já se rematerializou e o veredito continuou diferente de ``ok``?"""
     return any(
@@ -402,6 +420,22 @@ def aplicar_acao(
 
     if acao == "reingerir":
         _exigir_capacidade(principal, CAP_ACAO_COMPARTILHADA, acao)
+        # Carga já pedida não aceita segunda: o gestor clicou duas vezes no mesmo caso
+        # porque a tela não mostrava o resultado da primeira, e duas cargas idênticas só
+        # consomem o worker. Quem precisa insistir tem o job anterior para conferir.
+        pendente = _reingestao_ja_pedida(tratativa)
+        if pendente is not None and check.status != "ok":
+            job_id = str(pendente.get("job_id"))
+            raise AppError(
+                status=409,
+                title="Carga já enfileirada para este caso",
+                detail=(
+                    f"O job {job_id[:8]} já foi criado para {pendente.get('periodo_solicitado')} "
+                    "e a verificação ainda não foi reavaliada. Ingestão é assíncrona: "
+                    "acompanhe o job antes de pedir outra carga igual."
+                ),
+                type_="urn:plataforma-fiscal:error:reingestao-ja-pedida",
+            )
         resultado = _reingerir(session, principal, check, tratativa)
         # Ingestão é assíncrona: o veredito só muda quando a carga terminar e os checks
         # rodarem de novo (o worker os executa ao fim de cada job — Sprint 26). Marcar
