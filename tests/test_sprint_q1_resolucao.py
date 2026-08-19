@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import inspect
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
 from app.modules.quality import causa as causa_mod
 from app.modules.quality import checks as checks_mod
+from app.modules.quality import resolucao
 from app.modules.quality.causa import ACOES_POR_CLASSE, causa_do_check
 from app.modules.quality.checks import SLAS
 
@@ -168,3 +170,93 @@ def test_lados_do_check_de_pessoal_estao_rotulados_na_ordem_certa() -> None:
     # O check passa `esquerda=recalculado` e `direita=mart` (ver checks.py).
     assert "detalhe" in causa.esquerda
     assert "mart_indicador" in causa.direita
+
+
+# --------------------------------------------------------------------------- #
+# 4. Consulta à fonte: o passo que transforma dúvida em fato
+#
+# Antes, `verificar_na_fonte` não consultava nada — na tela era um botão que não
+# respondia. Agora ele pergunta ao SICONFI pelo período que já deveria estar publicado.
+#
+# O risco de errar em silêncio aqui é específico e grave: tratar **falha de rede** como
+# "o ente não publicou". Seria o mesmo vício que a `cobertura_do_ente` existe para
+# evitar — culpar o ente por uma lacuna que pode ser nossa. Por isso o par de testes.
+# --------------------------------------------------------------------------- #
+def test_proximo_periodo_avanca_dentro_do_ano_e_vira_o_ano() -> None:
+    sla_rreo = next(s for s in SLAS if s.relatorio == "RREO")  # 6 bimestres
+    assert resolucao._proximo_periodo_esperado(sla_rreo, "2025-B3") == (2025, 4)
+    # Último período do ano ⇒ o próximo é o primeiro do ano seguinte.
+    assert resolucao._proximo_periodo_esperado(sla_rreo, "2025-B6") == (2026, 1)
+
+    sla_dca = next(s for s in SLAS if s.relatorio == "DCA")  # anual
+    assert resolucao._proximo_periodo_esperado(sla_dca, "2024") == (2025, 1)
+
+
+def test_sem_entrega_nenhuma_nao_ha_proximo_periodo() -> None:
+    """Ente sem nada ingerido é caso de carga inicial, não de defasagem.
+
+    Chutar "o próximo é o do ano corrente" mandaria consultar um período que talvez nunca
+    devesse existir para aquele ente.
+    """
+    sla = next(s for s in SLAS if s.relatorio == "RREO")
+    assert resolucao._proximo_periodo_esperado(sla, None) is None
+
+
+def test_falha_de_rede_nao_vira_acusacao_ao_ente(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Indisponibilidade nossa é `indeterminado`, nunca `fonte_nao_tem`.
+
+    Este é o controle que importa: se um timeout virasse "o ente não publicou", a
+    plataforma passaria a atribuir ao gestor uma falta que é da nossa consulta — e ele
+    aceitaria como fato uma conclusão que nunca foi apurada.
+    """
+    class ConectorQueFalha:
+        def __init__(self, *_a: object, **_k: object) -> None: ...
+        def build_job(self, *_a: object, **_k: object) -> object:
+            return object()
+        def extract(self, _job: object) -> object:
+            raise TimeoutError("a fonte não respondeu")
+
+    monkeypatch.setattr(
+        "app.modules.ingestion.connectors.registry.CONNECTOR_REGISTRY",
+        {"siconfi_rreo": ConectorQueFalha},
+    )
+    monkeypatch.setattr(
+        "app.shared.ingestion.client.RealClientResolver",
+        lambda: SimpleNamespace(get=lambda _f: object()),
+    )
+
+    check = SimpleNamespace(
+        check_codigo="freshness_rreo", cod_ibge="2304400", periodo="2025-B6",
+        esquerda=None, tolerancia=None, detalhe={},
+    )
+    sessao = SimpleNamespace(
+        scalar=lambda _stmt: SimpleNamespace(periodo="2025-B6", versao_entrega="1")
+    )
+
+    resultado = resolucao._verificar_na_fonte(sessao, check)  # type: ignore[arg-type]
+    assert resultado["consultado"] is False
+    assert resultado["resultado"] == "indeterminado"
+    assert "não completou" in resultado["motivo"]
+
+
+# --------------------------------------------------------------------------- #
+# 5. Escalonamento: a ação que não resolveu não volta como botão
+# --------------------------------------------------------------------------- #
+def test_reprocessamento_que_falhou_e_reconhecido() -> None:
+    tratativa = SimpleNamespace(
+        tentativas=[{"acao": "rematerializar", "status_apos": "falha"}]
+    )
+    assert resolucao._reprocessamento_ja_falhou(tratativa) is True  # type: ignore[arg-type]
+
+
+def test_reprocessamento_bem_sucedido_nao_escala() -> None:
+    """Controle negativo: reprocessar e voltar a `ok` não é caso de escalonamento."""
+    tratativa = SimpleNamespace(
+        tentativas=[{"acao": "rematerializar", "status_apos": "ok"}]
+    )
+    assert resolucao._reprocessamento_ja_falhou(tratativa) is False  # type: ignore[arg-type]
+
+    # E outra ação qualquer também não: só o reprocessamento descarta a hipótese de
+    # materialização vencida.
+    outra = SimpleNamespace(tentativas=[{"acao": "verificar_na_fonte", "resultado": "x"}])
+    assert resolucao._reprocessamento_ja_falhou(outra) is False  # type: ignore[arg-type]

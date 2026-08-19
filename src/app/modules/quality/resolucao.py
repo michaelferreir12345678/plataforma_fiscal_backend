@@ -16,6 +16,8 @@ desenho.
 
 from __future__ import annotations
 
+import logging
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -41,6 +43,8 @@ CAP_ACAO_PRIVADA = "editar"
 
 _MIN_JUSTIFICATIVA = 10
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class Ocorrencia:
@@ -62,6 +66,15 @@ class Ocorrencia:
     diagnostico: dict[str, Any]
     acoes: tuple[Acao, ...]
     tratativa: QualidadeTratativa | None
+
+
+def _reprocessamento_ja_falhou(tratativa: QualidadeTratativa) -> bool:
+    """Já se rematerializou e o veredito continuou diferente de ``ok``?"""
+    return any(
+        t.get("acao") == "rematerializar" and t.get("status_apos") not in (None, "ok")
+        for t in (tratativa.tentativas or [])
+        if isinstance(t, dict)
+    )
 
 
 def _chave(check: DataQualityCheck) -> tuple[str, str | None, str | None]:
@@ -135,6 +148,15 @@ def montar_ocorrencia(
     causa = causa_do_check(check.check_codigo)
     if causa.classe == "cobertura":
         diagnostico, acoes = _diagnostico_cobertura(session, check)
+        # Depois de consultar a fonte, a ação deixa de ser "descubra" e passa a ser a que
+        # o fato encontrado autoriza. É esta linha que fecha o ciclo da classe cobertura.
+        ja_consultado = (tratativa.diagnostico or {}) if tratativa else {}
+        if ja_consultado.get("resultado") == "fonte_tem":
+            diagnostico = {**diagnostico, **ja_consultado}
+            acoes = ("reingerir",)
+        elif ja_consultado.get("resultado") == "fonte_nao_tem":
+            diagnostico = {**diagnostico, **ja_consultado}
+            acoes = ("aceitar_como_fato",)
     else:
         diagnostico = _diagnostico_estrutural(check)
         acoes = ACOES_POR_CLASSE[causa.classe]
@@ -142,6 +164,21 @@ def montar_ocorrencia(
     # tratativa que se reabre sozinha é a mesma triagem infinita que este fluxo evita.
     if tratativa is not None and tratativa.status in {"resolvida", "aceita_como_fato"}:
         acoes = ()
+    elif tratativa is not None and _reprocessamento_ja_falhou(tratativa):
+        # Reprocessar de novo daria o mesmo resultado. E a informação que a tentativa
+        # falha traz é justamente a que importa: se rematerializar não fechou a conta, a
+        # materialização não estava vencida — o cálculo é que diverge. Deixa de ser
+        # tarefa de operação e vira defeito de software, que botão nenhum resolve.
+        acoes = ()
+        diagnostico = {
+            **diagnostico,
+            "escalonado": True,
+            "conclusao": (
+                "A rematerialização foi aplicada e a verificação continuou falhando. Isso "
+                "descarta materialização vencida: a divergência é de cálculo, e precisa de "
+                "correção no código — não de reprocessamento."
+            ),
+        }
     return Ocorrencia(
         check_codigo=check.check_codigo,
         cod_ibge=check.cod_ibge,
@@ -390,38 +427,131 @@ def aplicar_acao(
     )
 
 
+def _proximo_periodo_esperado(sla: SlaFonte, ultimo: str | None) -> tuple[int, int] | None:
+    """(ano, número do período) que deveria vir depois do último que temos.
+
+    Sem entrega nenhuma, não há "próximo": devolve ``None`` e o caso vira reingestão do
+    exercício corrente, decidida por quem tem o contexto — não por um chute daqui.
+    """
+    if not ultimo or len(ultimo) < 4 or not ultimo[:4].isdigit():
+        return None
+    ano = int(ultimo[:4])
+    if sla.periodos_por_ano == 1:
+        return (ano + 1, 1)
+    sufixo = ultimo[5:]
+    numero = int(sufixo[1:]) if len(sufixo) > 1 and sufixo[1:].isdigit() else 0
+    if numero >= sla.periodos_por_ano:
+        return (ano + 1, 1)
+    return (ano, numero + 1)
+
+
 def _verificar_na_fonte(session: Session, check: DataQualityCheck) -> dict[str, Any]:
-    """Pergunta à fonte se existe entrega mais recente do que a nossa.
+    """Pergunta ao SICONFI se existe entrega mais recente do que a nossa.
 
     É o passo que transforma "está defasado" em "de quem é a falta" — e o único do fluxo
-    que sai da nossa base. Deliberadamente pontual (um ente, um relatório): varrer a
-    carteira inteira para responder uma ocorrência seria caro e desnecessário.
+    que sai da nossa base. Deliberadamente pontual: um ente, um relatório, um período.
 
-    Ainda **não** consulta o SICONFI ao vivo: a descoberta de períodos publicados exige o
-    conector com rede, e enfileirá-lo aqui tornaria a resposta assíncrona. O que este
-    passo faz hoje é fechar o que dá para fechar com o que já temos — o período que o
-    prazo legal já exigia contra o último que ingerimos — e declarar explicitamente o que
-    falta apurar. Declarar o limite é o que impede a tela de parecer conclusiva.
+    O resultado é um **fato**, não uma opinião, e é ele que decide a ação seguinte:
+    a fonte publicou e nós não ingerimos (``reingerir``), ou o ente não publicou
+    (``aceitar_como_fato``). Antes desta consulta, oferecer qualquer uma das duas seria
+    adivinhar — e mandar reprocessar quando não há o que buscar gasta o tempo de quem
+    clicou.
+
+    Falha de rede **não vira "o ente não publicou"**: devolve ``indeterminado`` e diz o
+    que aconteceu. Transformar indisponibilidade nossa em acusação ao ente seria o mesmo
+    erro que a ``cobertura_do_ente`` existe para evitar.
     """
     sla = _sla_do_check(check.check_codigo)
+    if sla is None or not check.cod_ibge:
+        return {"consultado": False, "motivo": "verificação sem relatório ou ente associado"}
+
     ultima = session.scalar(
         select(DimEntrega)
         .where(
             DimEntrega.cod_ibge == check.cod_ibge,
-            DimEntrega.relatorio == (sla.relatorio if sla else ""),
+            DimEntrega.relatorio == sla.relatorio,
             DimEntrega.vigente.is_(True),
         )
         .order_by(DimEntrega.periodo.desc())
         .limit(1)
     )
+    ultimo_periodo = ultima.periodo if ultima else None
+    proximo = _proximo_periodo_esperado(sla, ultimo_periodo)
+    if proximo is None:
+        return {
+            "consultado": False,
+            "ultimo_periodo_ingerido": ultimo_periodo,
+            "motivo": (
+                "Não há entrega deste relatório para o ente — não existe 'próximo período' "
+                "a conferir. O caso é de carga inicial, não de defasagem."
+            ),
+        }
+
+    ano, numero = proximo
+    # O próprio conector monta o pedido daquele relatório. Remontar os parâmetros aqui
+    # seria a mesma armadilha do denominador: duas construções do mesmo pedido divergindo
+    # na primeira mudança da fonte. Este caminho só **lê** — `sink` não é tocado.
+    from app.modules.ingestion.connectors.registry import CONNECTOR_REGISTRY
+    from app.shared.ingestion.client import RealClientResolver
+
+    fonte = f"siconfi_{sla.relatorio.lower()}"
+    classe = CONNECTOR_REGISTRY.get(fonte)
+    if classe is None:
+        return {
+            "consultado": False,
+            "ultimo_periodo_ingerido": ultimo_periodo,
+            "motivo": f"sem conector de consulta para {sla.relatorio}",
+        }
+
+    # Nem todo conector é periódico por ente/ano: planilha, PDF e agregado nacional têm
+    # outra forma. Sem esta guarda, um `freshness_*` de fonte assim estouraria dentro de
+    # um clique do gestor — e "não sei consultar" é resposta melhor que exceção.
+    if not hasattr(classe, "build_job"):
+        return {
+            "consultado": False,
+            "ultimo_periodo_ingerido": ultimo_periodo,
+            "motivo": (
+                f"O conector de {sla.relatorio} não consulta por ente/período; a conferência "
+                "desta fonte precisa ser feita no portal."
+            ),
+        }
+
+    inicio = time.perf_counter()
+    try:
+        conector: Any = classe(RealClientResolver().get(fonte), None)  # type: ignore[arg-type]
+        registros = conector.extract(
+            conector.build_job(check.cod_ibge, ano, numero, "1", None)
+        )
+    except Exception as exc:  # noqa: BLE001 — qualquer falha aqui é "não sei", não "não tem"
+        logger.warning(
+            "Consulta ao SICONFI falhou para %s %s %s-%s: %s",
+            check.cod_ibge, sla.relatorio, ano, numero, exc,
+        )
+        return {
+            "consultado": False,
+            "resultado": "indeterminado",
+            "ultimo_periodo_ingerido": ultimo_periodo,
+            "periodo_conferido": f"{ano}-{numero}",
+            "erro": str(exc)[:300],
+            "motivo": (
+                "A consulta à fonte não completou. Indisponibilidade nossa não é prova de "
+                "que o ente deixou de publicar — tente de novo antes de concluir."
+            ),
+        }
+
+    linhas = len(registros or [])
     return {
+        "consultado": True,
         "consultado_em": datetime.now(UTC).isoformat(),
-        "ultimo_periodo_ingerido": ultima.periodo if ultima else None,
-        "fonte_consultada": False,
-        "pendente": (
-            "A verificação ao vivo no SICONFI ainda não está ligada a este fluxo. Confira "
-            "o período no portal do Tesouro: havendo entrega mais nova que a nossa, o caso "
-            "é de reingestão; não havendo, o ente é que não publicou e o caso se aceita "
-            "como fato."
+        "resultado": "fonte_tem" if linhas else "fonte_nao_tem",
+        "ultimo_periodo_ingerido": ultimo_periodo,
+        "periodo_conferido": f"{ano}-{numero}",
+        "linhas_na_fonte": linhas,
+        "duracao_ms": int((time.perf_counter() - inicio) * 1000),
+        "motivo": (
+            f"O SICONFI publicou {linhas} linha(s) para {ano}-{numero} e nós não ingerimos: "
+            "a falta é nossa."
+            if linhas
+            else f"O SICONFI não tem {ano}-{numero} para este ente: quem não publicou foi o ente."
         ),
     }
