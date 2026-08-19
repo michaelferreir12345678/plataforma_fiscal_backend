@@ -9,19 +9,27 @@ Por isso quase todo teste aqui vem em par: um mostra o que o fluxo permite, o ou
 o que ele **recusa**.
 """
 
+# ruff: noqa: F811 — fixtures importadas reaparecem como argumentos dos testes
 from __future__ import annotations
 
 import inspect
+import uuid
 from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 
+from app.core.db import admin_session
+from app.core.errors import AppError
 from app.modules.quality import causa as causa_mod
 from app.modules.quality import checks as checks_mod
 from app.modules.quality import resolucao
+from app.modules.quality import service as quality_service
 from app.modules.quality.causa import ACOES_POR_CLASSE, causa_do_check
 from app.modules.quality.checks import SLAS
+from app.modules.quality.models import DataQualityCheck, QualidadeTratativa
+from tests.test_ia_tooling import cenario  # noqa: F401 — ente sintético reusado
+from tests.test_sprint26_qualidade_lineage import PERIODO
 
 
 # --------------------------------------------------------------------------- #
@@ -260,3 +268,178 @@ def test_reprocessamento_bem_sucedido_nao_escala() -> None:
     # materialização vencida.
     outra = SimpleNamespace(tentativas=[{"acao": "verificar_na_fonte", "resultado": "x"}])
     assert resolucao._reprocessamento_ja_falhou(outra) is False  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# 6. Reingerir: só depois de a fonte confirmar
+#
+# É a perna que fecha o fluxo — a que de fato faz a falha sumir, ingerindo o que falta.
+# E é onde um atalho custaria caro: enfileirar sem confirmação manda o worker buscar o que
+# talvez não exista e depois registrar como "ausente" um dado que ninguém deveria ter.
+# --------------------------------------------------------------------------- #
+def test_reingerir_exige_confirmacao_previa_da_fonte() -> None:
+    """Sem `fonte_tem` no diagnóstico, a ação é recusada com instrução do que fazer."""
+    tratativa = SimpleNamespace(diagnostico={"origem_indeterminada": True}, tentativas=[])
+    check = SimpleNamespace(check_codigo="freshness_rreo", cod_ibge="2304400", periodo="2025-B6")
+
+    with pytest.raises(AppError) as exc:
+        resolucao._reingerir(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            SimpleNamespace(capacidades=frozenset({"administrar"})),  # type: ignore[arg-type]
+            check,  # type: ignore[arg-type]
+            tratativa,  # type: ignore[arg-type]
+        )
+    assert exc.value.status == 422
+    assert "Verificar na fonte" in (exc.value.detail or "")
+
+
+def test_reingerir_usa_o_periodo_que_a_fonte_confirmou(monkeypatch: pytest.MonkeyPatch) -> None:
+    """O período vem do diagnóstico, não de um palpite sobre o calendário."""
+    capturado: dict[str, object] = {}
+
+    class JobFalso:
+        id = uuid.UUID("11111111-2222-3333-4444-555555555555")
+
+    def criar_job_falso(_s: object, _p: object, create: object) -> object:
+        capturado["fonte"] = create.fonte  # type: ignore[attr-defined]
+        capturado["entes"] = create.entes  # type: ignore[attr-defined]
+        capturado["anos"] = create.anos  # type: ignore[attr-defined]
+        capturado["parametros"] = create.parametros  # type: ignore[attr-defined]
+        return SimpleNamespace(job=JobFalso(), estimativa_itens=1, limiar=100)
+
+    monkeypatch.setattr(
+        "app.modules.ingestion.jobs_service.criar_job", criar_job_falso
+    )
+
+    tratativa = SimpleNamespace(
+        diagnostico={"resultado": "fonte_tem", "periodo_conferido": "2026-1"},
+        tentativas=[],
+    )
+    check = SimpleNamespace(check_codigo="freshness_rreo", cod_ibge="2304400", periodo="2025-B6")
+
+    resultado = resolucao._reingerir(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        SimpleNamespace(capacidades=frozenset({"administrar"})),  # type: ignore[arg-type]
+        check,  # type: ignore[arg-type]
+        tratativa,  # type: ignore[arg-type]
+    )
+
+    assert capturado["fonte"] == "siconfi_rreo"
+    assert capturado["entes"] == ["2304400"]
+    assert capturado["anos"] == [2026]
+    assert capturado["parametros"] == {"periodos": [1]}
+    # Assíncrono: a resposta não promete que resolveu, só que enfileirou.
+    assert resultado["assincrono"] is True
+    assert resultado["job_id"] == "11111111-2222-3333-4444-555555555555"
+
+
+def test_reingerir_nao_registra_enfileiramento_que_nao_aconteceu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Se o serviço pedir confirmação e não criar o job, a ação falha — não mente.
+
+    ``IngestJobCreateResult`` devolve ``job=None`` nesse caso. Registrar "enfileirado" sem
+    id deixaria a tratativa com um rastro que não existe, e o gestor esperando por uma
+    carga que ninguém agendou.
+    """
+    monkeypatch.setattr(
+        "app.modules.ingestion.jobs_service.criar_job",
+        lambda *_a, **_k: SimpleNamespace(job=None, estimativa_itens=9000, limiar=100),
+    )
+    tratativa = SimpleNamespace(
+        diagnostico={"resultado": "fonte_tem", "periodo_conferido": "2026-1"},
+        tentativas=[],
+    )
+    check = SimpleNamespace(check_codigo="freshness_rreo", cod_ibge="2304400", periodo="2025-B6")
+
+    with pytest.raises(AppError) as exc:
+        resolucao._reingerir(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            SimpleNamespace(capacidades=frozenset({"administrar"})),  # type: ignore[arg-type]
+            check,  # type: ignore[arg-type]
+            tratativa,  # type: ignore[arg-type]
+        )
+    assert exc.value.status == 422
+    assert "9000" in (exc.value.detail or "")
+
+
+# --------------------------------------------------------------------------- #
+# 7. Resolver no painel tem de apagar o selo na página
+#
+# Relatado em uso, e a queixa era exata: o gestor tratou todas as ocorrências no painel
+# ("Nenhuma verificação em falha em aberto"), voltou às páginas e o selo continuava
+# dizendo "7 verificações em falha".
+#
+# Os dois liam fontes diferentes — o painel considerava a tratativa, o selo lia o veredito
+# cru. Um fluxo de resolução que não apaga o aviso que ele resolveu não é um fluxo de
+# resolução, e ensina a ignorar os dois.
+# --------------------------------------------------------------------------- #
+def test_ocorrencia_encerrada_nao_sela_mais_o_numero(client, make_org, cenario) -> None:
+    org = make_org(entes=[cenario.ente])
+    with admin_session() as s:
+        s.add(
+            DataQualityCheck(
+                fonte="siconfi_rgf", cod_ibge=cenario.ente, periodo=PERIODO,
+                versao_entrega="-", check_codigo="dcl_a6_vs_rgf", status="falha",
+                esquerda=Decimal(1), direita=Decimal(2), diferenca=Decimal(-1),
+                tolerancia=Decimal("0.01"),
+            )
+        )
+
+    with admin_session() as s:
+        antes = quality_service.selo_do_ente(s, cenario.ente, org_id=org.org_id)
+    assert any(c.check_codigo == "dcl_a6_vs_rgf" for c in antes), "o selo deve começar aceso"
+
+    # A organização aceita a divergência como fato da fonte, com justificativa.
+    with admin_session() as s:
+        s.add(
+            QualidadeTratativa(
+                org_id=org.org_id, check_codigo="dcl_a6_vs_rgf", cod_ibge=cenario.ente,
+                periodo=PERIODO, status="aceita_como_fato",
+                justificativa="Divergência publicada pelo ente; retificação solicitada.",
+                tentativas=[],
+            )
+        )
+
+    with admin_session() as s:
+        depois = quality_service.selo_do_ente(s, cenario.ente, org_id=org.org_id)
+    assert not any(c.check_codigo == "dcl_a6_vs_rgf" for c in depois)
+
+
+def test_tratativa_de_uma_organizacao_nao_apaga_o_selo_de_outra(
+    client, make_org, cenario
+) -> None:
+    """Controle negativo: a decisão é privada da organização.
+
+    Duas consultorias acompanham o mesmo município. Se o aceite de uma silenciasse o selo
+    da outra, uma organização estaria decidindo o que a outra vê sobre dado público — que
+    é exatamente a fronteira que a plataforma inteira protege.
+    """
+    org_a = make_org(entes=[cenario.ente])
+    org_b = make_org(entes=[cenario.ente])
+    with admin_session() as s:
+        s.add(
+            DataQualityCheck(
+                fonte="siconfi_rgf", cod_ibge=cenario.ente, periodo=PERIODO,
+                versao_entrega="-", check_codigo="msc_vs_dca", status="falha",
+                esquerda=Decimal(1), direita=Decimal(2), diferenca=Decimal(-1),
+                tolerancia=Decimal("0.01"),
+            )
+        )
+        s.add(
+            QualidadeTratativa(
+                org_id=org_a.org_id, check_codigo="msc_vs_dca", cod_ibge=cenario.ente,
+                periodo=PERIODO, status="aceita_como_fato",
+                justificativa="Analisado pela organização A e aceito como fato.",
+                tentativas=[],
+            )
+        )
+
+    with admin_session() as s:
+        selo_a = quality_service.selo_do_ente(s, cenario.ente, org_id=org_a.org_id)
+        selo_b = quality_service.selo_do_ente(s, cenario.ente, org_id=org_b.org_id)
+
+    assert not any(c.check_codigo == "msc_vs_dca" for c in selo_a)
+    assert any(c.check_codigo == "msc_vs_dca" for c in selo_b), (
+        "a organização B não tratou nada e tem de continuar vendo a divergência"
+    )

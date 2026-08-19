@@ -7,12 +7,12 @@ from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import and_, func, not_, or_, select, text
+from sqlalchemy import and_, func, not_, or_, select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, aliased
 from sqlalchemy.sql.elements import ColumnElement
 
-from app.modules.quality.models import DataQualityCheck, LineageEdge
+from app.modules.quality.models import DataQualityCheck, LineageEdge, QualidadeTratativa
 
 
 def _somente_vigente(*, as_of: datetime | None = None) -> ColumnElement[bool]:
@@ -156,14 +156,41 @@ def checks_abertos(
     cod_ibge: str,
     periodo: str | None = None,
     as_of: datetime | None = None,
+    org_id: uuid.UUID | None = None,
 ) -> list[DataQualityCheck]:
-    """Checks em falha/aviso do ente vigentes agora ou no ``as_of`` solicitado."""
+    """Checks em falha/aviso do ente vigentes agora ou no ``as_of`` solicitado.
+
+    Com ``org_id``, exclui as ocorrências que **aquela organização** já encerrou —
+    resolvidas ou aceitas como fato da fonte (Sprint Q1). Sem isso, tratar uma falha no
+    painel não silenciava o selo na página, e o gestor concluía (com razão) que a
+    plataforma ignora o que ele faz nela.
+
+    Encerrar não é esconder: a ocorrência continua no painel de resolução, com a
+    justificativa e quem a assinou. O que ela deixa de fazer é selar o número como se
+    ninguém a tivesse examinado.
+    """
     stmt = select(DataQualityCheck).where(
         DataQualityCheck.cod_ibge == cod_ibge,
         DataQualityCheck.status.in_(("falha", "aviso")),
         # A entrega retificada não sela a página com o veredito da versão superada.
         _somente_vigente(as_of=as_of),
     )
+    if org_id is not None:
+        encerradas = select(
+            QualidadeTratativa.check_codigo,
+            QualidadeTratativa.cod_ibge,
+            QualidadeTratativa.periodo,
+        ).where(
+            QualidadeTratativa.org_id == org_id,
+            QualidadeTratativa.status.in_(("resolvida", "aceita_como_fato")),
+        )
+        stmt = stmt.where(
+            ~tuple_(
+                DataQualityCheck.check_codigo,
+                DataQualityCheck.cod_ibge,
+                DataQualityCheck.periodo,
+            ).in_(encerradas)
+        )
     if as_of is not None:
         stmt = stmt.where(DataQualityCheck.executado_em <= as_of)
     if periodo:

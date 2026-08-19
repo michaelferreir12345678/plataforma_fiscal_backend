@@ -400,6 +400,17 @@ def aplicar_acao(
         session.flush()
         return montar_ocorrencia(session, check, tratativa)
 
+    if acao == "reingerir":
+        _exigir_capacidade(principal, CAP_ACAO_COMPARTILHADA, acao)
+        resultado = _reingerir(session, principal, check, tratativa)
+        # Ingestão é assíncrona: o veredito só muda quando a carga terminar e os checks
+        # rodarem de novo (o worker os executa ao fim de cada job — Sprint 26). Marcar
+        # "resolvida" aqui seria comemorar o clique, não o resultado.
+        tratativa.status = "acao_aplicada"
+        _registrar_tentativa(tratativa, acao, resultado)
+        session.flush()
+        return montar_ocorrencia(session, check, tratativa)
+
     if acao == "rematerializar":
         _exigir_capacidade(principal, CAP_ACAO_COMPARTILHADA, acao)
         from app.workers import materialize
@@ -443,6 +454,84 @@ def _proximo_periodo_esperado(sla: SlaFonte, ultimo: str | None) -> tuple[int, i
     if numero >= sla.periodos_por_ano:
         return (ano + 1, 1)
     return (ano, numero + 1)
+
+
+def _reingerir(
+    session: Session,
+    principal: Principal,
+    check: DataQualityCheck,
+    tratativa: QualidadeTratativa,
+) -> dict[str, Any]:
+    """Enfileira a carga do período que a consulta à fonte mostrou existir.
+
+    **Não adivinha o período.** Ele vem do ``periodo_conferido`` gravado no diagnóstico —
+    e o diagnóstico só existe depois de a fonte ter confirmado que publicou. Enfileirar
+    sem essa confirmação seria mandar o worker buscar o que talvez não exista, e depois
+    registrar como "ausente" um dado que ninguém deveria ter.
+    """
+    from app.modules.ingestion import jobs_service
+    from app.modules.ingestion.jobs_schemas import IngestJobCreate
+
+    diagnostico = tratativa.diagnostico or {}
+    conferido = str(diagnostico.get("periodo_conferido") or "")
+    sla = _sla_do_check(check.check_codigo)
+    if diagnostico.get("resultado") != "fonte_tem" or not conferido or sla is None:
+        raise AppError(
+            status=422,
+            title="Reingestão sem confirmação da fonte",
+            detail=(
+                "Só é possível reingerir depois de a consulta à fonte confirmar que existe "
+                "entrega mais recente. Use 'Verificar na fonte' primeiro — enfileirar antes "
+                "manda o worker buscar o que talvez não exista."
+            ),
+        )
+
+    ano_txt, _, numero_txt = conferido.partition("-")
+    if not ano_txt.isdigit():
+        raise AppError(
+            status=422,
+            title="Período do diagnóstico ilegível",
+            detail=f"'{conferido}' não é um período conferível.",
+        )
+
+    criado = jobs_service.criar_job(
+        session,
+        principal,
+        IngestJobCreate(
+            fonte=f"siconfi_{sla.relatorio.lower()}",
+            tipo="backfill",
+            entes=[check.cod_ibge or ""],
+            anos=[int(ano_txt)],
+            parametros={"periodos": [int(numero_txt)]} if numero_txt.isdigit() else {},
+            # A confirmação de custo é para varredura ampla; aqui é um ente e um período,
+            # e o gestor já clicou no botão desta ocorrência.
+            confirmar=True,
+        ),
+    )
+    # ``IngestJobCreateResult`` devolve o job em ``.job``; ler um atributo que não existe
+    # daria None em silêncio, e a tratativa registraria "enfileirado" sem o rastro.
+    job = criado.job
+    if job is None:
+        raise AppError(
+            status=422,
+            title="Carga não enfileirada",
+            detail=(
+                f"O serviço de ingestão pediu confirmação para {criado.estimativa_itens} "
+                f"item(ns) (limiar {criado.limiar}) e não criou o job."
+            ),
+        )
+    return {
+        "job_id": str(job.id),
+        "estimativa_itens": criado.estimativa_itens,
+        "fonte": f"siconfi_{sla.relatorio.lower()}",
+        "ente": check.cod_ibge,
+        "periodo_solicitado": conferido,
+        "assincrono": True,
+        "motivo": (
+            "Carga enfileirada. O veredito só muda quando ela terminar — o worker reexecuta "
+            "as verificações ao fim de cada job."
+        ),
+    }
 
 
 def _verificar_na_fonte(session: Session, check: DataQualityCheck) -> dict[str, Any]:

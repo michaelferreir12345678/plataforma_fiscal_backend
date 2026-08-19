@@ -460,10 +460,14 @@ def selo_do_ente(
     periodo: str | None = None,
     *,
     as_of: datetime | None = None,
+    org_id: uuid.UUID | None = None,
 ) -> list[CheckOut]:
-    """Checks abertos que selavam o número no instante solicitado (ou agora)."""
+    """Checks abertos que selavam o número no instante solicitado (ou agora).
+
+    ``org_id`` exclui o que a organização já tratou — ver ``repository.checks_abertos``.
+    """
     abertos = repository.checks_abertos(
-        session, cod_ibge=cod_ibge, periodo=periodo, as_of=as_of
+        session, cod_ibge=cod_ibge, periodo=periodo, as_of=as_of, org_id=org_id
     )
     return [_to_out(row) for row in abertos]
 

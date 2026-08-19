@@ -12,6 +12,7 @@ Regras de honestidade aplicadas em todas as camadas:
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterable, Mapping
 from datetime import datetime
 from decimal import Decimal
@@ -576,7 +577,9 @@ def _riscos(
 
 
 # --- 7. Qualidade ----------------------------------------------------------
-def _qualidade(session: Session, cod_ibge: str) -> CockpitQualidade:
+def _qualidade(
+    session: Session, cod_ibge: str, *, org_id: uuid.UUID | None = None
+) -> CockpitQualidade:
     fontes: list[QualidadeFonte] = []
     defasagens: list[int] = []
     for fonte in _FONTES_DO_COCKPIT:
@@ -607,7 +610,11 @@ def _qualidade(session: Session, cod_ibge: str) -> CockpitQualidade:
             )
         )
     maxima = max(defasagens) if defasagens else None
-    abertos = quality_service.selo_do_ente(session, cod_ibge)
+    # O selo respeita o que a organização já tratou (Sprint Q1): uma ocorrência resolvida
+    # ou aceita como fato não volta a selar o número. Sem isto, tratar a falha no painel
+    # não mudava nada na página — e um fluxo de resolução que não apaga o aviso que ele
+    # resolveu ensina o gestor a ignorar os dois.
+    abertos = quality_service.selo_do_ente(session, cod_ibge, org_id=org_id)
     falhas = [c for c in abertos if c.status == "falha"]
     avisos = [c for c in abertos if c.status == "aviso"]
     observacao = None
@@ -703,6 +710,6 @@ def build_cockpit(
         ],
         comparacoes=_comparacoes(session, cod_ibge, periodo, criticos, as_of=as_of),
         riscos=riscos,
-        qualidade=_qualidade(session, cod_ibge),
+        qualidade=_qualidade(session, cod_ibge, org_id=principal.org_id),
         source_ref=source,
     )
