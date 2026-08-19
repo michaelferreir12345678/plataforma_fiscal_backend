@@ -12,11 +12,12 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.deps import Principal
 from app.core.errors import AppError, ScopeForbiddenError
+from app.modules.catalog import repository as catalog_repo
 from app.modules.catalog.models import DimEnte
 from app.modules.ingestion import integracoes, jobs_repository
 from app.modules.ingestion.connectors.registry import CONNECTOR_REGISTRY, FONTE_META
@@ -275,22 +276,23 @@ def _municipios_da_uf(
     """
     if not estaduais:
         return [], 0
-    ufs = list(
+    # O vínculo é o PREFIXO do código, não a coluna `uf`: os 2 primeiros dígitos do
+    # cod_ibge de 7 dígitos de um município são o cod_ibge do seu estado. Usar `uf` aqui
+    # devolveria vazio em produção, onde o ente estadual tem `uf = 'BR'` e só o município
+    # carrega a sigla. Mesma regra de `scope._estado_prefixes`, via o repositório que já
+    # a implementa.
+    prefixos = set(
         session.scalars(
-            select(DimEnte.uf)
-            .where(DimEnte.cod_ibge.in_(estaduais), DimEnte.esfera == "estadual")
-            .distinct()
+            select(DimEnte.cod_ibge).where(
+                DimEnte.cod_ibge.in_(estaduais),
+                DimEnte.esfera == "estadual",
+                func.length(DimEnte.cod_ibge) == 2,
+            )
         )
     )
-    if not ufs:
+    if not prefixos:
         return [], 0
-    candidatos = list(
-        session.scalars(
-            select(DimEnte.cod_ibge)
-            .where(DimEnte.uf.in_(ufs), DimEnte.esfera == "municipal")
-            .order_by(DimEnte.cod_ibge)
-        )
-    )
+    candidatos = sorted(catalog_repo.list_ibges_by_prefixes(session, prefixos))
     permitidos = scope.carteira_scope_ibges(session, principal)
     if permitidos is None:
         return candidatos, 0

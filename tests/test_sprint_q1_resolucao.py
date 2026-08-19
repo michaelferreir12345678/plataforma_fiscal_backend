@@ -557,9 +557,13 @@ def test_expansao_por_uf_respeita_o_escopo_e_conta_o_que_ficou_de_fora(make_org)
     uf, dentro, fora = "92", "9200001", "9200002"
     with admin_session() as s:
         s.execute(delete(DimEnte).where(DimEnte.cod_ibge.in_([uf, dentro, fora])))
-        s.add(DimEnte(cod_ibge=uf, nome="Estado Teste", esfera="estadual", uf=uf))
+        # `uf="BR"` no ente estadual espelha a produção: só o município carrega a sigla
+        # da UF. A fixture anterior dava a mesma `uf` aos dois e, com isso, aprovava uma
+        # expansão que em produção devolveria zero município — o teste validava a
+        # suposição do código em vez do dado real.
+        s.add(DimEnte(cod_ibge=uf, nome="Estado Teste", esfera="estadual", uf="BR"))
         for cod in (dentro, fora):
-            s.add(DimEnte(cod_ibge=cod, nome=f"Municipio {cod}", esfera="municipal", uf=uf))
+            s.add(DimEnte(cod_ibge=cod, nome=f"Municipio {cod}", esfera="municipal", uf="ZZ"))
 
     # Carteira com apenas UM dos dois municípios — o escopo sai da carteira real, não de
     # uma lista informada no principal.
